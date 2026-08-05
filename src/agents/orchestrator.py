@@ -10,7 +10,7 @@ from llm.base import LLMClient, Message
 from llm.errors import LLMUnavailableError
 from rag.citation import build_citations
 from rag.source_filter import SourceExclusions
-from rag.types import Citation, ScoredChunk
+from rag.types import Citation, RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -79,8 +79,9 @@ class ChatOrchestrator:
         llm: LLMClient,
         store: VectorStore,
         exclusions: SourceExclusions = SourceExclusions(),
+        filters: RetrievalFilters | None = None,
     ) -> None:
-        self._agent = OrchestratorAgent(llm, store, exclusions)
+        self._agent = OrchestratorAgent(llm, store, exclusions, filters)
 
     def stream(self, query: str, history: list[HistoryEntry]) -> Iterator[str]:
         messages: list[Message] = [

@@ -345,3 +345,28 @@ def test_ingest_contextualize_prepends_context_block(
     assert response.status_code == 200
     body = response.json()
     assert body["chunks"][0]["text"].startswith("Context: onboarding notes.")
+
+
+def test_ingest_stores_project_ids_on_chunks_and_record(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    response = client.post(
+        "/api/v1/ingest",
+        json={
+            "artifact_id": "artifact-1",
+            "filename": "notes.txt",
+            "content": "SprintStart uses OLLAMA_EMBED_MODEL for embeddings.",
+            "projectIds": ["project-1"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert vector_store.chunks
+    for chunk in vector_store.chunks:
+        assert chunk.project_ids == ("project-1",)
+
+    record = metadata_store.get_artifact("artifact-1")
+    assert record is not None
+    assert record.project_ids == ("project-1",)

@@ -37,6 +37,17 @@ class IngestRequest(BaseModel):
             "and chunk_count will be 0."
         )
     )
+    project_ids: list[str] = Field(
+        default_factory=list,
+        alias="projectIds",
+        description=(
+            "Projects this artifact belongs to. Retrieval is project-scoped: an "
+            "artifact ingested without project ids is not reachable from any "
+            "project-scoped request (chat, onboarding, insights) until it is "
+            "re-ingested with them."
+        ),
+        examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
+    )
     source_role: Literal["primary", "test"] | None = Field(
         default=None,
         description=(
@@ -77,15 +88,17 @@ class IngestRequest(BaseModel):
             raise ValueError("filename must not contain path separators")
         return v
 
-    model_config = {
-        "json_schema_extra": {
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
             "example": {
                 "artifact_id": "sprint-42-retro",
                 "filename": "retro.md",
                 "content": "# Retro\n## What went well\nGood collaboration...",
+                "projectIds": ["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
             }
-        }
-    }
+        },
+    )
 
 
 class IngestArtifactResponse(BaseModel):
@@ -209,6 +222,41 @@ class HistoryEntry(BaseModel):
 SourceSystemValue = Literal["GITHUB", "JIRA", "UPLOAD"]
 
 
+class ProjectScopedRequest(BaseModel):
+    """Base for requests that may only ever see one project's material.
+
+    Every RAG-backed endpoint (chat, onboarding, blueprint generation,
+    insights) is project-scoped: the backend knows which projects an artifact
+    belongs to and which project the caller is authorized for, and passes that
+    project down. Without it the service cannot tell one project's corpus from
+    another's, which is why the field is required rather than optional.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: str = Field(
+        alias="projectId",
+        min_length=1,
+        description=(
+            "Project this request is scoped to. Retrieval only ever sees "
+            "artifacts belonging to this project."
+        ),
+        examples=["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
+    )
+
+    @field_validator("project_id")
+    @classmethod
+    def project_id_is_usable(cls, value: str) -> str:
+        # Project ids are stored delimited (``|id1|id2|``) in the chunk metadata
+        # and appear verbatim in blueprint scopes (``project:<id>|global``), so
+        # the delimiter must not occur inside an id.
+        if not value.strip():
+            raise ValueError("project_id cannot be blank")
+        if "|" in value:
+            raise ValueError("project_id must not contain '|'")
+        return value
+
+
 def _empty_history() -> list[HistoryEntry]:
     return []
 
@@ -240,7 +288,7 @@ class ChatFilters(BaseModel):
         return [str(item).upper() for item in items]
 
 
-class ChatRequest(BaseModel):
+class ChatRequest(ProjectScopedRequest):
     question: str = Field(examples=["What changed in the auth implementation?"])
     history: list[HistoryEntry] = Field(default_factory=_empty_history)
     filters: ChatFilters | None = None
@@ -567,7 +615,7 @@ class SkillAssessmentSchema(BaseModel):
     ] = "beginner"
 
 
-class OnboardingPathRequest(BaseModel):
+class OnboardingPathRequest(ProjectScopedRequest):
     working_area: Annotated[
         str,
         Field(
@@ -591,7 +639,9 @@ class OnboardingPathRequest(BaseModel):
         description=(
             "Active blueprints provided by the backend. The AI service is "
             "stateless — the backend owns blueprint persistence and must supply "
-            "these on every request."
+            "these on every request. Only blueprints scoped to this project "
+            "(scope 'project:<projectId>|global' or "
+            "'project:<projectId>|area:<name>') are used."
         ),
     )
 
@@ -604,15 +654,17 @@ class OnboardingPathRequest(BaseModel):
             tags=self.tags,
         )
 
-    model_config = {
-        "json_schema_extra": {
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
             "example": {
+                "projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11",
                 "working_area": "backend",
                 "skills": [{"name": "kotlin", "level": "advanced"}],
                 "tags": [],
                 "blueprints": [
                     {
-                        "scope": "global",
+                        "scope": "project:3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11|global",
                         "version": "3",
                         "source": "generated",
                         "steps": [
@@ -626,16 +678,19 @@ class OnboardingPathRequest(BaseModel):
                     }
                 ],
             }
-        }
-    }
+        },
+    )
 
 
-class GenerateBlueprintsRequest(BaseModel):
+class GenerateBlueprintsRequest(ProjectScopedRequest):
     scopes: list[str] | None = Field(
         default=None,
         description=(
             "Scopes to (re)generate, e.g. ['global', 'area:backend', 'area:frontend']. "
-            "Omit to refresh 'global' plus any active blueprint scopes."
+            "Names are qualified with this request's project, so the generated "
+            "blueprints carry scope 'project:<projectId>|global' etc. Omit to "
+            "refresh the project's 'global' scope plus the scopes of its active "
+            "blueprints."
         ),
     )
     active: list[BlueprintSchema] = Field(
@@ -643,7 +698,8 @@ class GenerateBlueprintsRequest(BaseModel):
         description=(
             "The backend's currently-active blueprints. The AI service is "
             "stateless, so these drive idempotency and version numbering — pass "
-            "them on every request."
+            "them on every request. Blueprints scoped to another project are "
+            "ignored."
         ),
     )
 
@@ -679,6 +735,14 @@ class ArtifactRunIngestRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     artifact_id: str
+    project_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Projects this artifact belongs to (the backend's "
+            "artifact_projects mapping). Chunks are only retrievable from a "
+            "request scoped to one of these projects."
+        ),
+    )
     source_system: str | None = Field(
         default=None,
         alias="sourceSystem",
@@ -765,6 +829,22 @@ class ArtifactSummaryRequest(BaseModel):
 # ── Knowledge-gaps (PM insights) ────────────────────────────────────────────
 
 
+class KnowledgeGapsRequest(ProjectScopedRequest):
+    """Scope for a knowledge-gap detection run.
+
+    The AI service is stateless and sources everything from its ingestion
+    index, so the project is the only input — but it is required: without it
+    the scan would span every project's components.
+    """
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
+            "example": {"projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"}
+        },
+    )
+
+
 class KnowledgeGapSchema(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -805,7 +885,7 @@ class FaqQuestionSchema(BaseModel):
     }
 
 
-class FaqGroupRequest(BaseModel):
+class FaqGroupRequest(ProjectScopedRequest):
     questions: list[FaqQuestionSchema] = Field(
         description=(
             "Questions collected by the backend. The AI service is stateless "
@@ -814,16 +894,18 @@ class FaqGroupRequest(BaseModel):
         )
     )
 
-    model_config = {
-        "json_schema_extra": {
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
             "example": {
+                "projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11",
                 "questions": [
                     {"id": "q_1", "text": "How do I get VPN access?"},
                     {"id": "q_2", "text": "Can someone enable VPN for me?"},
-                ]
+                ],
             }
-        }
-    }
+        },
+    )
 
 
 class FaqDocumentSchema(BaseModel):

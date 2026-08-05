@@ -22,6 +22,38 @@ def normalize_source_system(value: str | None) -> SourceSystem | None:
     return None
 
 
+_PROJECT_DELIMITER = "|"
+# Prefix of the per-project marker keys written into the chunk metadata. Chroma
+# metadata values cannot be lists, so membership is encoded as one boolean key
+# per project (``project:<uuid> = True``), which ``$eq`` can filter on
+# server-side. ``project_ids`` (a delimited string) carries the same
+# information in a form that can be read back into a ``Chunk``.
+PROJECT_METADATA_PREFIX = "project:"
+PROJECT_IDS_METADATA_KEY = "project_ids"
+
+
+def project_metadata_key(project_id: str) -> str:
+    return f"{PROJECT_METADATA_PREFIX}{project_id}"
+
+
+def encode_project_ids(project_ids: tuple[str, ...] | list[str]) -> str:
+    """Encode project ids as a delimited string, e.g. ``|uuid1|uuid2|``.
+
+    Empty input encodes to the empty string so "no projects" never looks like a
+    membership marker.
+    """
+    unique = list(dict.fromkeys(pid for pid in project_ids if pid))
+    if not unique:
+        return ""
+    return _PROJECT_DELIMITER + _PROJECT_DELIMITER.join(unique) + _PROJECT_DELIMITER
+
+
+def decode_project_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, str) or not value:
+        return ()
+    return tuple(part for part in value.split(_PROJECT_DELIMITER) if part)
+
+
 def timestamp_from_iso(value: str | None) -> float:
     parsed = _parse_timestamp(value)
     return parsed or 0.0
@@ -43,6 +75,13 @@ def matches_retrieval_filters(
 ) -> bool:
     if filters is None:
         return True
+
+    if filters.project_id is not None:
+        # Fail closed: a chunk that carries no project association at all (i.e.
+        # ingested before the backend sent projectIds) is not visible to any
+        # project. Re-sync via /ingest/sync to make it retrievable again.
+        if filters.project_id not in chunk.project_ids:
+            return False
 
     if filters.source_systems:
         if chunk.source_system not in filters.source_systems:
@@ -74,6 +113,9 @@ def where_filter_for_chroma(filters: RetrievalFilters | None) -> Any | None:
         return None
 
     conditions: list[dict[str, object]] = []
+
+    if filters.project_id is not None:
+        conditions.append({project_metadata_key(filters.project_id): {"$eq": True}})
 
     if filters.source_systems:
         conditions.append({"source_system": {"$in": filters.source_systems}})

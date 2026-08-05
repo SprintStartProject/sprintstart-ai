@@ -7,6 +7,7 @@ from rag.types import Chunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
+_PROJECT = "project-1"
 _VPN = [1.0, 0.0, 0.0]
 _PASSWORD = [0.0, 1.0, 0.0]
 
@@ -63,7 +64,7 @@ def test_group_faqs_clusters_similar_questions_by_llm_grouping() -> None:
         FaqQuestionInput(id="q3", text="How do I reset my password?"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert [g.count for g in groups] == [2, 1]
     assert groups[0].question == "How do I get VPN access?"
@@ -84,7 +85,7 @@ def test_group_faqs_discards_smalltalk() -> None:
         FaqQuestionInput(id="q2", text="hey there, how you doing"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].question == "How do I get VPN access?"
@@ -102,7 +103,7 @@ def test_group_faqs_keeps_distinct_components_in_separate_groups() -> None:
         FaqQuestionInput(id="q3", text="How to start sprintstart-backend"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert sorted(g.count for g in groups) == [1, 2]
     frontend_group = next(g for g in groups if g.question == "How to start frontend")
@@ -123,7 +124,7 @@ def test_group_faqs_falls_back_to_ungrouped_on_unparseable_llm_output() -> None:
         FaqQuestionInput(id="q2", text="How do I reset my password?"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 2
     assert {g.count for g in groups} == {1}
@@ -141,7 +142,7 @@ def test_group_faqs_never_drops_an_id_the_model_omits() -> None:
         FaqQuestionInput(id="q2", text="How do I reset my password?"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 2
 
@@ -157,6 +158,7 @@ def test_group_faqs_attaches_documents_from_retrieval() -> None:
                 filename="vpn-setup.md",
                 text="How to get VPN access set up",
                 embedding=_VPN,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -177,7 +179,7 @@ def test_group_faqs_attaches_documents_from_retrieval() -> None:
 
     questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].documents == [
@@ -185,12 +187,37 @@ def test_group_faqs_attaches_documents_from_retrieval() -> None:
     ]
 
 
+def test_group_faqs_does_not_attach_another_projects_documents() -> None:
+    llm = _ScriptedFaqLLM(groups=[["q1"]])
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="doc_001",
+                filename="vpn-setup.md",
+                text="How to get VPN access set up",
+                embedding=_VPN,
+                project_ids=("project-2",),
+            )
+        ]
+    )
+    metadata_store = _metadata_store()
+
+    questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert len(groups) == 1
+    assert groups[0].documents == []
+
+
 def test_group_faqs_empty_input_returns_no_groups() -> None:
     llm = _ScriptedFaqLLM(groups=[])
     store = StubVectorStore()
     metadata_store = _metadata_store()
 
-    assert group_faqs([], llm, store, metadata_store) == []
+    assert group_faqs([], llm, store, metadata_store, project_id=_PROJECT) == []
 
 
 def test_group_faqs_caps_sample_size_below_total_count() -> None:
@@ -204,7 +231,7 @@ def test_group_faqs_caps_sample_size_below_total_count() -> None:
         for qid, suffix in zip(ids, ["a", "b", "c", "d", "e", "f", "g"], strict=True)
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].count == 7
@@ -227,7 +254,7 @@ def test_group_faqs_redacts_names_from_returned_questions() -> None:
 
     questions = [FaqQuestionInput(id="q_name", text="Ask John Doe for VPN access")]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].question == "Ask [NAME] for VPN access"

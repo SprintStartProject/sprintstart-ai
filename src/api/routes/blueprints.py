@@ -34,8 +34,11 @@ class GenerateResponse(BaseModel):
     response_model=GenerateResponse,
     summary="Draft/update blueprints from the corpus",
     description=(
-        "Runs the batch generation job over the ingested corpus and returns "
-        "`source: generated` blueprints for the backend to persist. The job is "
+        "Runs the batch generation job over the project's ingested corpus and "
+        "returns `source: generated` blueprints for the backend to persist. "
+        "Generated scopes are project-qualified "
+        "(`project:<projectId>|global`, `project:<projectId>|area:<name>`) and "
+        "only this project's chunks are used as evidence. The job is "
         "idempotent given the backend's active blueprints: an unchanged corpus "
         "yields an `unchanged` outcome with no new blueprint.\n\n"
         "This is a heavyweight, schedulable operation (one retrieval + LLM pass "
@@ -55,7 +58,13 @@ def generate(
 ) -> GenerateResponse:
     try:
         active = [b.to_model() for b in request.active]
-        outcomes = generate_blueprints(llm, store, scopes=request.scopes, active=active)
+        outcomes = generate_blueprints(
+            llm,
+            store,
+            project_id=request.project_id,
+            scopes=request.scopes,
+            active=active,
+        )
     except LLMUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)

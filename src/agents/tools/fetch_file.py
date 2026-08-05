@@ -3,8 +3,9 @@ import re
 from pydantic import BaseModel
 
 from agents.tools.base import Tool, ToolResult
+from rag.filters import matches_retrieval_filters
 from rag.source_filter import SourceExclusions, is_excluded
-from rag.types import ScoredChunk
+from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 _FETCH_SCORE = 0.9
@@ -35,10 +36,15 @@ class FetchFileTool(Tool[FetchFileArgs]):
     args_model = FetchFileArgs
 
     def __init__(
-        self, store: VectorStore, *, exclusions: SourceExclusions = SourceExclusions()
+        self,
+        store: VectorStore,
+        *,
+        exclusions: SourceExclusions = SourceExclusions(),
+        filters: RetrievalFilters | None = None,
     ) -> None:
         self._store = store
         self._exclusions = exclusions
+        self._filters = filters
 
     def run(self, args: FetchFileArgs) -> ToolResult:
         query = args.filename.strip().lower()
@@ -54,9 +60,13 @@ class FetchFileTool(Tool[FetchFileArgs]):
                 kind=chunk.kind,
                 start_line=chunk.start_line,
                 start_page=chunk.start_page,
+                project_ids=chunk.project_ids,
             )
+            # Same as GrepTool: a whole-corpus in-memory scan, so the project
+            # scope has to be enforced here rather than in the store's query.
             for chunk in self._store.all_chunks_without_embeddings()
-            if not is_excluded(chunk, self._exclusions)
+            if matches_retrieval_filters(chunk, self._filters)
+            and not is_excluded(chunk, self._exclusions)
             and _matches(chunk.filename, query, query_has_ext)
         ]
         return ToolResult(

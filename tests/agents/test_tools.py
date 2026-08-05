@@ -8,7 +8,7 @@ from agents.tools.fetch_file import FetchFileTool
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
 from rag.source_filter import SourceExclusions
-from rag.types import Chunk
+from rag.types import Chunk, RetrievalFilters
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
@@ -229,3 +229,60 @@ def test_registry_unknown_tool_returns_empty_result() -> None:
 def test_registry_rejects_duplicate_names() -> None:
     with pytest.raises(ValueError, match="Duplicate tool name"):
         ToolRegistry([_FakeTool(), _FakeTool()])
+
+
+# --- project scoping ---------------------------------------------------------
+
+
+def _project_chunk(chunk_id: str, project_ids: tuple[str, ...]) -> Chunk:
+    return Chunk(
+        id=chunk_id,
+        artifact_id=f"doc-{chunk_id}",
+        filename=f"{chunk_id}.md",
+        text="missing designs blocked auth",
+        embedding=[1.0] + [0.0] * 767,
+        project_ids=project_ids,
+    )
+
+
+def _project_store() -> StubVectorStore:
+    store = StubVectorStore()
+    store.add(
+        [
+            _project_chunk("own", ("project-1",)),
+            _project_chunk("foreign", ("project-2",)),
+            _project_chunk("legacy", ()),
+        ]
+    )
+    return store
+
+
+def test_retrieve_tool_only_returns_the_requested_projects_chunks() -> None:
+    store = _project_store()
+    llm = StubLLMClient(embedding=[1.0] + [0.0] * 767)
+
+    result = RetrieveTool(
+        llm, store, filters=RetrievalFilters(project_id="project-1")
+    ).execute({"query": "blockers"})
+
+    assert isinstance(result, ToolResult)
+    assert [c.id for c in result.chunks] == ["own"]
+
+
+def test_grep_tool_only_returns_the_requested_projects_chunks() -> None:
+    """Regression: grep scans the corpus in memory, bypassing the store query."""
+    result = GrepTool(
+        _project_store(), filters=RetrievalFilters(project_id="project-1")
+    ).execute({"patterns": ["missing designs"]})
+
+    assert isinstance(result, ToolResult)
+    assert [c.id for c in result.chunks] == ["own"]
+
+
+def test_fetch_file_tool_only_returns_the_requested_projects_chunks() -> None:
+    result = FetchFileTool(
+        _project_store(), filters=RetrievalFilters(project_id="project-1")
+    ).execute({"filename": "foreign.md"})
+
+    assert isinstance(result, ToolResult)
+    assert result.chunks == []

@@ -116,6 +116,7 @@ def _ingest_one(
         source_url=artifact.source_url,
         artifact_type=artifact.artifact_type,
         language=artifact.language,
+        project_ids=tuple(dict.fromkeys(pid for pid in artifact.project_ids if pid)),
     )
 
     if len(content) > max_length:
@@ -181,6 +182,7 @@ def _ingest_one(
                     source_created_at=artifact.source_created_at,
                     source_updated_at=artifact.source_updated_at,
                     source_system=source_system,
+                    project_ids=artifact.project_ids,
                 ),
                 position=index,
                 connector_id=source_system.lower(),

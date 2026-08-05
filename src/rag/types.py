@@ -17,6 +17,11 @@ def is_source_system(value: str) -> TypeGuard[SourceSystem]:
 
 @dataclass(frozen=True)
 class RetrievalFilters:
+    # The project the retrieval is scoped to. Chunks that don't belong to it —
+    # including chunks with no project at all — are never returned. Retrieval
+    # is deliberately fail-closed here: a missing project association makes
+    # content invisible rather than visible to everyone (see ``rag.filters``).
+    project_id: str | None = None
     source_systems: list[SourceSystem] | None = None
     time_from: str | None = None
     time_to: str | None = None
@@ -39,6 +44,11 @@ class Chunk:
     connector_source_id: str | None = None
     source_system: SourceSystem | None = None
     created_at: str | None = None
+    # Projects the owning artifact belongs to. The backend owns this mapping
+    # (``artifact_projects``) and sends it on ingest; an empty tuple means the
+    # chunk predates project separation and is unreachable by project-scoped
+    # retrieval until it is re-synced.
+    project_ids: tuple[str, ...] = ()
     # 1-based line the chunk starts on in the source file. Only meaningful for
     # "text"/"code" chunks; PDFs track the source page instead (``start_page``).
     start_line: int | None = None
@@ -66,6 +76,7 @@ class ScoredChunk:
     created_at: str | None = None
     start_line: int | None = None
     start_page: int | None = None
+    project_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -362,3 +362,46 @@ def test_ingest_run_processes_artifacts_concurrently(
     # Sequential would take >= 5 * 0.15s = 0.75s. Comfortably below that
     # (but above a single 0.15s call) proves real concurrent overlap.
     assert elapsed < 0.5
+
+
+def test_ingest_run_stores_project_ids_on_chunks_and_record(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact = _file_artifact()
+    artifact["projectIds"] = ["project-1", "project-2"]
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    assert vector_store.chunks
+    for chunk in vector_store.chunks:
+        assert chunk.project_ids == ("project-1", "project-2")
+
+    record = metadata_store.get_artifact("uuid-1")
+    assert record is not None
+    assert record.project_ids == ("project-1", "project-2")
+
+
+def test_ingest_run_without_project_ids_stores_none(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    """Backends that haven't been updated yet still ingest — the artifact is
+    simply not reachable from any project-scoped request."""
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [_file_artifact()], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    assert all(chunk.project_ids == () for chunk in vector_store.chunks)
+
+    record = metadata_store.get_artifact("uuid-1")
+    assert record is not None
+    assert record.project_ids == ()

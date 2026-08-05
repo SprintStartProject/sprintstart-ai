@@ -139,6 +139,7 @@ def ingest(
         status="processing",
         created_at=created_at,
         updated_at=request_time,
+        project_ids=tuple(dict.fromkeys(pid for pid in body.project_ids if pid)),
     )
     metadata_store.save_artifact(artifact)
 
@@ -228,6 +229,7 @@ def ingest(
                     embedding,
                     source_role=source_role,
                     source_system="UPLOAD",
+                    project_ids=body.project_ids,
                 ),
                 position=index,
             )

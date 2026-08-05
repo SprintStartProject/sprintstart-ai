@@ -2,10 +2,10 @@
 
 Called by the backend's Knowledge-Gaps insight refresh (pull-based, issue #137).
 This service is stateless and sources everything from its ingestion index, so
-the request carries no body.
+the request carries nothing but the project the scan is scoped to.
 
-"Insufficient" is scoped here as *structural coverage*: for each component known
-to the index we determine which expected documentation categories (readme,
+"Insufficient" is scoped here as *structural coverage*: for each component of
+that project we determine which expected documentation categories (readme,
 setup, adr, …) are present versus missing. Detection is hybrid — the LLM
 classifies a component's documents into categories, with a filename heuristic as
 a fallback when the LLM output can't be used.
@@ -255,10 +255,15 @@ def detect_knowledge_gaps(
     llm: LLMClient,
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
+    project_id: str,
 ) -> list[KnowledgeGap]:
-    """Detect per-component documentation-coverage gaps across the index."""
+    """Detect per-component documentation-coverage gaps within one project.
+
+    Only artifacts belonging to ``project_id`` are considered, so a component
+    is never reported to — or judged by the documents of — another project.
+    """
     components: dict[str, list[ArtifactRecord]] = {}
-    for record in metadata_store.list_artifacts():
+    for record in metadata_store.list_artifacts(project_id=project_id):
         component = _component_of(record)
         if component is None:
             continue

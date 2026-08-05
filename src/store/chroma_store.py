@@ -7,7 +7,11 @@ from chromadb.api.types import Metadata, PyEmbeddings
 
 from ingestion.source_role import SourceRole
 from rag.filters import (
+    PROJECT_IDS_METADATA_KEY,
+    decode_project_ids,
+    encode_project_ids,
     normalize_source_system,
+    project_metadata_key,
     timestamp_from_iso,
     where_filter_for_chroma,
 )
@@ -41,9 +45,9 @@ class ChromaVectorStore:
 
         embeddings: list[list[float]] = [chunk.embedding for chunk in chunks]
 
-        metadatas: list[dict[str, str | int | float]] = []
+        metadatas: list[dict[str, str | int | float | bool]] = []
         for chunk in chunks:
-            metadata: dict[str, str | int | float] = {
+            metadata: dict[str, str | int | float | bool] = {
                 "artifact_id": chunk.artifact_id,
                 "filename": chunk.filename,
                 "position": (
@@ -59,15 +63,30 @@ class ChromaVectorStore:
                 "source_system": chunk.source_system or "",
                 "created_at": chunk.created_at or "",
                 "created_at_ts": timestamp_from_iso(chunk.created_at),
+                PROJECT_IDS_METADATA_KEY: encode_project_ids(chunk.project_ids),
             }
+            # One boolean marker per project so Chroma can filter membership
+            # server-side ($eq on a key documents of other projects don't have);
+            # metadata values themselves cannot be lists.
+            for project_id in chunk.project_ids:
+                metadata[project_metadata_key(project_id)] = True
             if chunk.start_line is not None:
                 metadata["start_line"] = chunk.start_line
             if chunk.start_page is not None:
                 metadata["start_page"] = chunk.start_page
             metadatas.append(metadata)
 
+        ids = [chunk.id for chunk in chunks]
+
+        # Chroma's upsert *merges* metadata instead of replacing it, so a key
+        # that is no longer written would survive a re-ingest — including the
+        # ``project:<id>`` marker of a project the artifact was removed from,
+        # which would keep it retrievable from that project forever. Deleting
+        # first makes each chunk's metadata exactly what we write here.
+        self._collection.delete(ids=ids)
+
         self._collection.upsert(
-            ids=[chunk.id for chunk in chunks],
+            ids=ids,
             documents=[chunk.text for chunk in chunks],
             embeddings=cast(PyEmbeddings, embeddings),
             metadatas=cast(list[Metadata], metadatas),
@@ -151,6 +170,9 @@ class ChromaVectorStore:
                     created_at=_optional_str(metadata.get("created_at")),
                     start_line=_optional_int(metadata.get("start_line")),
                     start_page=_optional_int(metadata.get("start_page")),
+                    project_ids=decode_project_ids(
+                        metadata.get(PROJECT_IDS_METADATA_KEY)
+                    ),
                 )
             )
 
@@ -272,6 +294,9 @@ class ChromaVectorStore:
                     created_at=_optional_str(metadata.get("created_at")),
                     start_line=_optional_int(metadata.get("start_line")),
                     start_page=_optional_int(metadata.get("start_page")),
+                    project_ids=decode_project_ids(
+                        metadata.get(PROJECT_IDS_METADATA_KEY)
+                    ),
                 )
             )
 
@@ -341,6 +366,7 @@ def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:
                 created_at=_optional_str(metadata.get("created_at")),
                 start_line=_optional_int(metadata.get("start_line")),
                 start_page=_optional_int(metadata.get("start_page")),
+                project_ids=decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)),
             )
         )
 

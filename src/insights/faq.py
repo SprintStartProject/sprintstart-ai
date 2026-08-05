@@ -17,6 +17,7 @@ from insights.redaction import redact_pii
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from rag.retriever import retrieve
+from rag.types import RetrievalFilters
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,7 @@ def _documents_for(
     llm: LLMClient,
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
+    project_id: str,
 ) -> list[FaqDocument]:
     chunks = retrieve(
         question=representative_text,
@@ -157,6 +159,7 @@ def _documents_for(
         store=store,
         top_k=_DOCS_TOP_K,
         min_score=_DOCS_MIN_SCORE,
+        filters=RetrievalFilters(project_id=project_id),
     )
 
     documents: dict[str, FaqDocument] = {}
@@ -180,7 +183,13 @@ def group_faqs(
     llm: LLMClient,
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
+    project_id: str,
 ) -> list[FaqGroup]:
+    """Group questions and attach the project's documents that answer them.
+
+    The documents come from retrieval, so they are scoped to ``project_id`` —
+    a group must never point a PM at a document from another project.
+    """
     clusters = _cluster_questions(questions, llm)
 
     # Redact every representative + sample question in a single batched LLM
@@ -213,7 +222,7 @@ def group_faqs(
                 count=len(cluster.members),
                 questions=redacted_samples,
                 documents=_documents_for(
-                    representative_text, llm, store, metadata_store
+                    representative_text, llm, store, metadata_store, project_id
                 ),
             )
         )

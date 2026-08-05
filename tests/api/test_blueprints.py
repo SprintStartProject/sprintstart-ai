@@ -13,7 +13,8 @@ from tests.stubs.store import StubVectorStore
 
 _EMBED = [1.0] + [0.0] * 767
 _BASE = "/api/v1/onboarding/blueprints"
-_SCOPE = "area:backend"
+_PROJECT = "project-1"
+_SCOPE = f"project:{_PROJECT}|area:backend"
 
 
 @pytest.fixture
@@ -42,6 +43,7 @@ def client() -> Generator[tuple[TestClient, StubLLMClient, StubVectorStore], Any
                 filename="deploy.md",
                 text="backend onboarding deploy runbook",
                 embedding=_EMBED,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -54,6 +56,7 @@ def client() -> Generator[tuple[TestClient, StubLLMClient, StubVectorStore], Any
 
 def _generate(http: TestClient, **body: Any) -> dict[str, Any]:
     body.setdefault("scopes", [_SCOPE])
+    body.setdefault("projectId", _PROJECT)
     response = http.post(f"{_BASE}/generate", json=body)
     assert response.status_code == 200, response.text
     return response.json()
@@ -97,7 +100,12 @@ def test_generate_bumps_version_against_active(
     store.add(
         [
             Chunk(
-                id="c2", artifact_id="a2", filename="x.md", text="new", embedding=_EMBED
+                id="c2",
+                artifact_id="a2",
+                filename="x.md",
+                text="new",
+                embedding=_EMBED,
+                project_ids=(_PROJECT,),
             )
         ]
     )

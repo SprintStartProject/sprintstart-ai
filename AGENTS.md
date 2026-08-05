@@ -61,7 +61,33 @@ triggers Docker image publish to `ghcr.io/sprintstartproject/sprintstart-ai`.
 - **`onboarding/`** — Deterministic staged pipeline (not agentic):
   `select → filter → retrieve → synthesize → validate → emit`, yielding
   `StageProgress` markers. Blueprints are owned by the backend and passed in
-  on each request — the service is stateless.
+  on each request — the service is stateless. Scopes are project-qualified
+  (`project:<id>|global`, `project:<id>|area:<name>`), parsed by
+  `onboarding/scope.py`.
+
+## Project separation
+
+Every retrieval-backed request is scoped to exactly one project, and the
+scoping is **fail-closed** — a chunk with no project association is invisible
+to all projects rather than visible to all of them. When touching retrieval,
+ingest, or an endpoint, keep that property:
+
+- `project_id` is required on `ChatRequest`, `OnboardingPathRequest`,
+  `GenerateBlueprintsRequest`, `KnowledgeGapsRequest` and `FaqGroupRequest`
+  (all inherit `ProjectScopedRequest` in `api/schemas.py`).
+- `RetrievalFilters.project_id` is enforced in **both** halves of hybrid
+  retrieval — `where_filter_for_chroma()` for the vector side and
+  `matches_retrieval_filters()` for the BM25/in-memory side (`rag/filters.py`).
+  Anything that scans `all_chunks_without_embeddings()` directly (the `grep`
+  and `fetch_file` tools) must apply the filter itself.
+- Chroma metadata cannot hold lists, so membership is stored twice: a
+  delimited `project_ids` string (read back into `Chunk.project_ids`) and one
+  `project:<id>` boolean marker key per project for the `where` clause. Chroma
+  *merges* metadata on upsert, so `ChromaVectorStore.add` deletes the ids first
+  — otherwise a stale marker would keep a moved artifact visible to its old
+  project.
+- Chunks ingested before the backend sent `projectIds` are unreachable; a full
+  `POST /api/v1/ingest/sync` re-sync backfills them.
 
 ## Conventions
 

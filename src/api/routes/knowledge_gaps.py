@@ -3,7 +3,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.dependencies import get_ingestion_metadata_store, get_llm, get_store
-from api.schemas import KnowledgeGapSchema, KnowledgeGapsResponse
+from api.schemas import (
+    KnowledgeGapSchema,
+    KnowledgeGapsRequest,
+    KnowledgeGapsResponse,
+)
 from ingestion.metadata_store import IngestionMetadataStore
 from insights.knowledge_gaps import detect_knowledge_gaps
 from llm.base import LLMClient
@@ -18,17 +22,19 @@ router = APIRouter(prefix="/insights/knowledge-gaps", tags=["insights"])
     response_model=KnowledgeGapsResponse,
     summary="Detect documentation-coverage gaps per component",
     description=(
-        "PM-only. Enumerates the components known to the ingestion index and, "
-        "for each, reports which expected documentation categories are missing "
-        "and how severe the gap is. Called by the backend's Knowledge-Gaps "
-        "insight refresh (pull-based); the AI service is stateless and sources "
-        "everything from its ingestion index, so the request takes no body.\n\n"
+        "PM-only. Enumerates the components of one project known to the "
+        "ingestion index and, for each, reports which expected documentation "
+        "categories are missing and how severe the gap is. Called by the "
+        "backend's Knowledge-Gaps insight refresh (pull-based); the AI service "
+        "is stateless and sources everything from its ingestion index, so the "
+        "request carries nothing but the project scope.\n\n"
         "`owners` and `relatedQuestions` are intentionally not returned — the "
         "index holds no user/ownership data and this service retains no question "
         "history; the backend enriches the returned `component` with those."
     ),
 )
 def detect_gaps(
+    body: KnowledgeGapsRequest,
     llm: Annotated[LLMClient, Depends(get_llm)],
     store: Annotated[VectorStore, Depends(get_store)],
     metadata_store: Annotated[
@@ -36,7 +42,9 @@ def detect_gaps(
     ],
 ) -> KnowledgeGapsResponse:
     try:
-        gaps = detect_knowledge_gaps(llm, store, metadata_store)
+        gaps = detect_knowledge_gaps(
+            llm, store, metadata_store, project_id=body.project_id
+        )
     except LLMUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

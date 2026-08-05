@@ -597,3 +597,159 @@ def test_chroma_query_combines_filters_with_and() -> None:
 
     assert len(result) == 1
     assert result[0].id == "chunk-recent-code"
+
+
+def test_chroma_query_filters_by_project() -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_project_filter",
+        client=client,
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-own",
+                artifact_id="artifact-own",
+                filename="own.md",
+                text="Shared wording",
+                embedding=[1.0, 0.0],
+                project_ids=("project-1",),
+            ),
+            Chunk(
+                id="chunk-foreign",
+                artifact_id="artifact-foreign",
+                filename="foreign.md",
+                text="Shared wording",
+                embedding=[1.0, 0.0],
+                project_ids=("project-2",),
+            ),
+            Chunk(
+                id="chunk-legacy",
+                artifact_id="artifact-legacy",
+                filename="legacy.md",
+                text="Shared wording",
+                embedding=[1.0, 0.0],
+            ),
+        ]
+    )
+
+    result = store.query(
+        embedding=[1.0, 0.0],
+        top_k=10,
+        min_score=0.0,
+        filters=RetrievalFilters(project_id="project-1"),
+    )
+
+    assert [chunk.id for chunk in result] == ["chunk-own"]
+
+
+def test_chroma_query_returns_chunks_shared_by_two_projects() -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_shared_project",
+        client=client,
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-shared",
+                artifact_id="artifact-shared",
+                filename="shared.md",
+                text="Shared doc",
+                embedding=[1.0, 0.0],
+                project_ids=("project-1", "project-2"),
+            )
+        ]
+    )
+
+    for project_id in ("project-1", "project-2"):
+        result = store.query(
+            embedding=[1.0, 0.0],
+            top_k=10,
+            min_score=0.0,
+            filters=RetrievalFilters(project_id=project_id),
+        )
+        assert [chunk.id for chunk in result] == ["chunk-shared"]
+
+
+def test_chroma_round_trips_project_ids() -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_project_round_trip",
+        client=client,
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                text="Text",
+                embedding=[1.0, 0.0],
+                project_ids=("project-1", "project-2"),
+            ),
+            Chunk(
+                id="chunk-2",
+                artifact_id="artifact-2",
+                filename="legacy.md",
+                text="Text",
+                embedding=[0.0, 1.0],
+            ),
+        ]
+    )
+
+    by_id = {chunk.id: chunk for chunk in store.all_chunks()}
+    assert by_id["chunk-1"].project_ids == ("project-1", "project-2")
+    assert by_id["chunk-2"].project_ids == ()
+
+    scored = store.query(embedding=[1.0, 0.0], top_k=1, min_score=0.0)
+    assert scored[0].project_ids == ("project-1", "project-2")
+
+    without_embeddings = {
+        chunk.id: chunk for chunk in store.all_chunks_without_embeddings()
+    }
+    assert without_embeddings["chunk-1"].project_ids == ("project-1", "project-2")
+
+
+def test_chroma_reingest_replaces_project_membership() -> None:
+    """Moving an artifact between projects must not leave a stale marker."""
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_project_reingest",
+        client=client,
+    )
+
+    def chunk(project_ids: tuple[str, ...]) -> Chunk:
+        return Chunk(
+            id="chunk-1",
+            artifact_id="artifact-1",
+            filename="doc.md",
+            text="Text",
+            embedding=[1.0, 0.0],
+            project_ids=project_ids,
+        )
+
+    store.add([chunk(("project-1",))])
+    store.add([chunk(("project-2",))])
+
+    assert (
+        store.query(
+            embedding=[1.0, 0.0],
+            top_k=10,
+            min_score=0.0,
+            filters=RetrievalFilters(project_id="project-1"),
+        )
+        == []
+    )
+    assert [
+        c.id
+        for c in store.query(
+            embedding=[1.0, 0.0],
+            top_k=10,
+            min_score=0.0,
+            filters=RetrievalFilters(project_id="project-2"),
+        )
+    ] == ["chunk-1"]

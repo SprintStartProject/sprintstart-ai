@@ -37,7 +37,9 @@ def group_faq_questions(
     questions = [FaqQuestionInput(id=q.id, text=q.text) for q in body.questions]
 
     try:
-        groups = group_faqs(questions, llm, store, metadata_store)
+        groups = group_faqs(
+            questions, llm, store, metadata_store, project_id=body.project_id
+        )
     except LLMUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

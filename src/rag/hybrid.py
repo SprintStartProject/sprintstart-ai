@@ -48,6 +48,7 @@ def to_scored_chunk(chunk: Chunk | ScoredChunk, score: float) -> ScoredChunk:
         created_at=chunk.created_at,
         start_line=chunk.start_line,
         start_page=chunk.start_page,
+        project_ids=chunk.project_ids,
     )
 
 
@@ -178,11 +179,12 @@ def hybrid_retrieve(
 
     ``exclude_roles`` drops chunks of the given :data:`SourceRole`\\ s (e.g.
     ``"test"``), ``exclusions`` drops chunks belonging to disabled
-    connectors/sources, and ``filters`` drops chunks by source system / time
-    range — all from the candidates *before* fusion. Because each retriever
-    returns its own top-k, we over-fetch when any filter is active so
+    connectors/sources, and ``filters`` drops chunks by project, source system
+    and time range — all from the candidates *before* fusion. Because each
+    retriever returns its own top-k, we over-fetch when any filter is active so
     excluded chunks don't starve the result. Legacy chunks without a role or
-    connector default to unfiltered (``primary`` role, never excluded).
+    connector default to unfiltered (``primary`` role, never excluded) — but a
+    project filter is fail-closed, so chunks without a project are dropped.
     """
     chunk_count = store.count()
     has_filters = (
@@ -191,7 +193,8 @@ def hybrid_retrieve(
         or (
             filters is not None
             and (
-                bool(filters.source_systems)
+                filters.project_id is not None
+                or bool(filters.source_systems)
                 or filters.time_from is not None
                 or filters.time_to is not None
             )

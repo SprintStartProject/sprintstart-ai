@@ -39,7 +39,7 @@ from onboarding.scope import Scope
 from onboarding.similarity import OVERLAP_THRESHOLD, step_text, text_overlap
 from onboarding.synthesis import SynthesisError, SynthesisResult, synthesize
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.types import ScoredChunk
+from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -126,9 +126,11 @@ class OnboardingPipeline:
         self,
         profile: PersonProfile,
         blueprints: list[Blueprint],
+        project_id: str,
     ) -> Generator[StageProgress, None, OnboardingPath]:
-        # (1) select — blueprints are always provided by the backend
-        selected = select_blueprints(blueprints, profile)
+        # (1) select — blueprints are always provided by the backend, and only
+        # those scoped to this project are eligible
+        selected = select_blueprints(blueprints, profile, project_id)
         total_steps = sum(len(b.steps) for b in selected)
         scopes = ", ".join(b.scope for b in selected) or "none"
         yield StageProgress(
@@ -143,8 +145,8 @@ class OnboardingPipeline:
         phases, kept_steps = _build_phases(selected, profile)
         yield StageProgress("filter", f"{len(kept_steps)} step(s) after filtering")
 
-        # (3) retrieve grounding evidence per step
-        chunks_per_step = self._retrieve_per_step(kept_steps)
+        # (3) retrieve grounding evidence per step, scoped to the project
+        chunks_per_step = self._retrieve_per_step(kept_steps, project_id)
         total_chunks = sum(len(c) for c in chunks_per_step.values())
         yield StageProgress(
             "retrieve",
@@ -203,10 +205,11 @@ class OnboardingPipeline:
         return path
 
     def _retrieve_per_step(
-        self, steps: list[BlueprintStep]
+        self, steps: list[BlueprintStep], project_id: str
     ) -> dict[str, list[ScoredChunk]]:
         if self._store.count() == 0:
             return {}
+        filters = RetrievalFilters(project_id=project_id)
         result: dict[str, list[ScoredChunk]] = {}
         for step in steps:
             query = (
@@ -221,6 +224,7 @@ class OnboardingPipeline:
                     min_score=self._min_score,
                     bm25_cache=self._bm25_cache,
                     exclude_roles=GROUNDING_EXCLUDED_ROLES,
+                    filters=filters,
                 )
             except LLMUnavailableError:
                 raise

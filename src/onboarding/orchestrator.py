@@ -64,20 +64,24 @@ class OnboardingOrchestrator:
         self,
         profile: PersonProfile,
         blueprints: list[BlueprintSchema],
+        project_id: str,
     ) -> OnboardingPath:
         """Run the pipeline synchronously and return the finished path."""
         bp_models = _to_blueprint_models(blueprints)
-        return _drain(self._pipeline.run(profile, blueprints=bp_models))
+        return _drain(
+            self._pipeline.run(profile, blueprints=bp_models, project_id=project_id)
+        )
 
     def stream(
         self,
         profile: PersonProfile,
         blueprints: list[BlueprintSchema],
+        project_id: str,
     ) -> Iterator[str]:
         try:
             bp_models = _to_blueprint_models(blueprints)
             path = yield from _emit_stages(
-                self._pipeline.run(profile, blueprints=bp_models)
+                self._pipeline.run(profile, blueprints=bp_models, project_id=project_id)
             )
 
             yield sse_event(

@@ -13,6 +13,7 @@ from rag.types import Chunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
+_PROJECT = "project-1"
 _VPN = [1.0, 0.0, 0.0]
 _PASSWORD = [0.0, 1.0, 0.0]
 
@@ -95,6 +96,7 @@ def test_group_endpoint_groups_and_returns_documents(
                 filename="vpn-setup.md",
                 text="How to get VPN access set up",
                 embedding=_VPN,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -115,11 +117,12 @@ def test_group_endpoint_groups_and_returns_documents(
     response = client.post(
         "/api/v1/insights/faq/group",
         json={
+            "projectId": _PROJECT,
             "questions": [
                 {"id": "q1", "text": "How do I get VPN access?"},
                 {"id": "q2", "text": "Can someone enable VPN for me?"},
                 {"id": "q3", "text": "How do I reset my password?"},
-            ]
+            ],
         },
     )
 
@@ -145,7 +148,9 @@ def test_group_endpoint_groups_and_returns_documents(
 def test_group_endpoint_empty_questions_returns_empty_groups(
     client: TestClient,
 ) -> None:
-    response = client.post("/api/v1/insights/faq/group", json={"questions": []})
+    response = client.post(
+        "/api/v1/insights/faq/group", json={"projectId": _PROJECT, "questions": []}
+    )
 
     assert response.status_code == 200
     assert response.json() == {"groups": []}
@@ -156,7 +161,10 @@ def test_group_endpoint_llm_unavailable_returns_503(client: TestClient) -> None:
 
     response = client.post(
         "/api/v1/insights/faq/group",
-        json={"questions": [{"id": "q1", "text": "How do I get VPN access?"}]},
+        json={
+            "projectId": _PROJECT,
+            "questions": [{"id": "q1", "text": "How do I get VPN access?"}],
+        },
     )
 
     assert response.status_code == 503

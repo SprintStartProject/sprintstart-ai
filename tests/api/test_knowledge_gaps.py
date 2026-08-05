@@ -15,6 +15,7 @@ from tests.stubs.store import StubVectorStore
 
 _URL = "/api/v1/insights/knowledge-gaps/detect"
 _NOW = "2025-05-01T00:00:00+00:00"
+_PROJECT = "project-1"
 
 
 def _artifact(artifact_id: str, filename: str, source_id: str) -> ArtifactRecord:
@@ -29,6 +30,7 @@ def _artifact(artifact_id: str, filename: str, source_id: str) -> ArtifactRecord
         created_at=_NOW,
         updated_at=_NOW,
         source_id=source_id,
+        project_ids=(_PROJECT,),
     )
 
 
@@ -58,7 +60,7 @@ def test_detect_returns_gaps(metadata_store: IngestionMetadataStore) -> None:
     llm = StubLLMClient(generate_response=json.dumps({"present": ["readme", "setup"]}))
     client = next(_client(llm, metadata_store))
 
-    response = client.post(_URL)
+    response = client.post(_URL, json={"projectId": _PROJECT})
 
     assert response.status_code == 200, response.text
     gaps = response.json()["gaps"]
@@ -83,6 +85,26 @@ def test_detect_returns_503_when_llm_unavailable(
 
     client = next(_client(UnavailableLLM(), metadata_store))
 
-    response = client.post(_URL)
+    response = client.post(_URL, json={"projectId": _PROJECT})
 
     assert response.status_code == 503
+
+
+def test_detect_requires_a_project(metadata_store: IngestionMetadataStore) -> None:
+    client = next(_client(StubLLMClient(), metadata_store))
+
+    response = client.post(_URL, json={})
+
+    assert response.status_code == 422
+
+
+def test_detect_only_reports_the_requested_projects_components(
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    llm = StubLLMClient(generate_response=json.dumps({"present": ["readme"]}))
+    client = next(_client(llm, metadata_store))
+
+    response = client.post(_URL, json={"projectId": "project-2"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["gaps"] == []

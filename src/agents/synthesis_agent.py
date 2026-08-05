@@ -9,6 +9,7 @@ from llm.base import LLMClient
 from rag.query_expansion import expand_query
 from rag.retriever import retrieve
 from rag.source_filter import SourceExclusions
+from rag.types import RetrievalFilters
 from store.base import VectorStore
 
 _MAX_STEPS = 3
@@ -41,14 +42,16 @@ class SynthesisAgent(Agent):
         llm: LLMClient,
         store: VectorStore,
         exclusions: SourceExclusions = SourceExclusions(),
+        filters: RetrievalFilters | None = None,
     ) -> None:
         self._store = store
         self._exclusions = exclusions
+        self._filters = filters
         tools = ToolRegistry(
             [
-                RetrieveTool(llm, store, exclusions=exclusions),
-                GrepTool(store, exclusions=exclusions),
-                FetchFileTool(store, exclusions=exclusions),
+                RetrieveTool(llm, store, exclusions=exclusions, filters=filters),
+                GrepTool(store, exclusions=exclusions, filters=filters),
+                FetchFileTool(store, exclusions=exclusions, filters=filters),
             ]
         )
         super().__init__(
@@ -77,6 +80,7 @@ class SynthesisAgent(Agent):
                 _SEED_TOP_K,
                 _SEED_MIN_SCORE,
                 self._exclusions,
+                self._filters,
             ):
                 if chunk.id not in seen:
                     seen.add(chunk.id)

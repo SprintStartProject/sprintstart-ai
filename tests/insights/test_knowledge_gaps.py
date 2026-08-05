@@ -14,6 +14,7 @@ from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
 _NOW = datetime.now(UTC).isoformat()
+_PROJECT = "project-1"
 
 
 def _artifact(
@@ -22,6 +23,7 @@ def _artifact(
     *,
     source_id: str | None = None,
     updated_at: str = _NOW,
+    project_ids: tuple[str, ...] = (_PROJECT,),
 ) -> ArtifactRecord:
     return ArtifactRecord(
         id=artifact_id,
@@ -34,6 +36,7 @@ def _artifact(
         created_at=_NOW,
         updated_at=updated_at,
         source_id=source_id,
+        project_ids=project_ids,
     )
 
 
@@ -107,7 +110,10 @@ def test_detect_reports_missing_types_for_component() -> None:
     )
 
     gaps = detect_knowledge_gaps(
-        _present_llm(["readme", "setup"]), StubVectorStore(), metadata_store
+        _present_llm(["readme", "setup"]),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
     )
 
     assert len(gaps) == 1
@@ -127,7 +133,10 @@ def test_detect_skips_fully_covered_component() -> None:
     )
 
     gaps = detect_knowledge_gaps(
-        _present_llm(list(EXPECTED_TYPES)), StubVectorStore(), metadata_store
+        _present_llm(list(EXPECTED_TYPES)),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
     )
 
     assert gaps == []
@@ -137,7 +146,55 @@ def test_detect_skips_artifacts_without_component() -> None:
     metadata_store = _store()
     metadata_store.save_completed_artifact(_artifact("a1", "notes.md", source_id=None))
 
-    gaps = detect_knowledge_gaps(_present_llm([]), StubVectorStore(), metadata_store)
+    gaps = detect_knowledge_gaps(
+        _present_llm([]), StubVectorStore(), metadata_store, project_id=_PROJECT
+    )
+
+    assert gaps == []
+
+
+def test_detect_ignores_other_projects_components() -> None:
+    metadata_store = _store()
+    metadata_store.save_completed_artifact(
+        _artifact("a1", "README.md", source_id="github:acme/auth:FILE:README.md")
+    )
+    metadata_store.save_completed_artifact(
+        _artifact(
+            "b1",
+            "README.md",
+            source_id="github:other/secret:FILE:README.md",
+            project_ids=("project-2",),
+        )
+    )
+
+    gaps = detect_knowledge_gaps(
+        _present_llm(["readme"]),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
+    )
+
+    assert [gap.component for gap in gaps] == ["acme/auth"]
+
+
+def test_detect_ignores_artifacts_without_a_project() -> None:
+    """Artifacts ingested before project separation are not attributed."""
+    metadata_store = _store()
+    metadata_store.save_completed_artifact(
+        _artifact(
+            "a1",
+            "README.md",
+            source_id="github:acme/auth:FILE:README.md",
+            project_ids=(),
+        )
+    )
+
+    gaps = detect_knowledge_gaps(
+        _present_llm(["readme"]),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
+    )
 
     assert gaps == []
 
@@ -152,7 +209,10 @@ def test_detect_falls_back_to_heuristic_on_bad_llm_output() -> None:
     )
 
     gaps = detect_knowledge_gaps(
-        StubLLMClient(generate_response="not json"), StubVectorStore(), metadata_store
+        StubLLMClient(generate_response="not json"),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
     )
 
     assert len(gaps) == 1
@@ -170,7 +230,10 @@ def test_detect_union_keeps_heuristic_hit_despite_wrong_llm_classification() -> 
     )
 
     gaps = detect_knowledge_gaps(
-        _present_llm(["architecture"]), StubVectorStore(), metadata_store
+        _present_llm(["architecture"]),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
     )
 
     assert len(gaps) == 1

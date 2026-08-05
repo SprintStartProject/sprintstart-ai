@@ -58,6 +58,7 @@ class StubVectorStore:
                     created_at=chunk.created_at,
                     start_line=chunk.start_line,
                     start_page=chunk.start_page,
+                    project_ids=chunk.project_ids,
                 )
             )
 
