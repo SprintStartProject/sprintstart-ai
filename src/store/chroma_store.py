@@ -15,6 +15,7 @@ from rag.filters import (
     timestamp_from_iso,
     where_filter_for_chroma,
 )
+from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
 
 _NO_POSITION: int = -1
@@ -98,11 +99,17 @@ class ChromaVectorStore:
         top_k: int,
         min_score: float,
         filters: RetrievalFilters | None = None,
+        exclude_roles: frozenset[SourceRole] = frozenset(),
+        exclusions: SourceExclusions = SourceExclusions(),
     ) -> list[ScoredChunk]:
-        if self._collection.count() == 0:
+        if self._collection.count() == 0 or top_k <= 0:
             return []
 
-        where_filter = where_filter_for_chroma(filters)
+        # Every constraint goes into the ``where`` clause, which Chroma applies
+        # before limiting to ``n_results``. Filtering the returned window
+        # instead would let higher-ranked ineligible chunks push every eligible
+        # one out of it.
+        where_filter = where_filter_for_chroma(filters, exclude_roles, exclusions)
 
         raw_result = self._collection.query(
             query_embeddings=[embedding],

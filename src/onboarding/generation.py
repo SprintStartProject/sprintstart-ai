@@ -54,7 +54,9 @@ from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
-OutcomeStatus = Literal["created", "updated", "unchanged", "escalated", "skipped"]
+OutcomeStatus = Literal[
+    "created", "updated", "unchanged", "escalated", "skipped", "invalidated"
+]
 
 _TOP_K = 12
 _MIN_SCORE = 0.3
@@ -370,6 +372,29 @@ def _enforce_invariants(
 # --- job -------------------------------------------------------------------
 
 
+def _no_evidence_outcome(
+    scope: str, active: Blueprint | None, reason: str
+) -> GenerationOutcome:
+    """The outcome for a scope whose eligible grounding evidence is all gone.
+
+    ``skipped`` means "nothing to do", which leaves an already-active blueprint
+    serving steps and citations grounded in evidence this project can no longer
+    see — an artifact moved to another project, reclassified as test material,
+    or deleted. ``invalidated`` tells the backend to deactivate that generated
+    blueprint and stop serving its citations.
+
+    Only ``source: generated`` blueprints are invalidated: human-owned content
+    is never withdrawn on the strength of a retrieval result. With nothing
+    active to withdraw, this is an ordinary ``skipped``.
+    """
+    invalidates = active is not None and active.source == "generated"
+    return GenerationOutcome(
+        scope=scope,
+        status="invalidated" if invalidates else "skipped",
+        notes=[reason],
+    )
+
+
 def _next_version(active: Blueprint | None) -> str:
     if active is None:
         return "1"
@@ -403,9 +428,7 @@ def _generate_scope(
         )
 
     if store.count() == 0:
-        return GenerationOutcome(
-            scope=scope, status="skipped", notes=["corpus is empty"]
-        )
+        return _no_evidence_outcome(scope, active, "corpus is empty")
 
     chunks = hybrid_retrieve(
         question=_scope_query(scope),
@@ -418,10 +441,8 @@ def _generate_scope(
         filters=RetrievalFilters(project_id=project_id),
     )
     if not chunks:
-        return GenerationOutcome(
-            scope=scope,
-            status="skipped",
-            notes=["no grounding evidence retrieved for this project"],
+        return _no_evidence_outcome(
+            scope, active, "no grounding evidence retrieved for this project"
         )
 
     # Strip chunks already cited by global steps from the area evidence pool.
@@ -432,10 +453,8 @@ def _generate_scope(
         global_chunk_ids = {ref.chunk_id for s in global_steps for ref in s.citations}
         chunks = [c for c in chunks if c.id not in global_chunk_ids]
     if not chunks:
-        return GenerationOutcome(
-            scope=scope,
-            status="skipped",
-            notes=["no area-specific evidence after excluding global citations"],
+        return _no_evidence_outcome(
+            scope, active, "no area-specific evidence after excluding global citations"
         )
 
     pool: dict[str, StepRecord] = {}
@@ -458,6 +477,10 @@ def _generate_scope(
         )
     refs = _draft_steps(scope, chunks, llm, pool, global_steps)
     if not refs:
+        # Deliberately *not* an invalidation: eligible evidence exists, the LLM
+        # just failed to ground a step in it this run. Withdrawing an active
+        # blueprint over that would make a retry-able model failure look like
+        # the evidence had disappeared.
         return GenerationOutcome(
             scope=scope, status="skipped", notes=["no grounded steps proposed"]
         )

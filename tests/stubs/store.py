@@ -1,4 +1,6 @@
+from ingestion.source_role import SourceRole
 from rag.filters import encode_project_ids, matches_retrieval_filters
+from rag.source_filter import SourceExclusions, is_excluded
 from rag.types import Chunk, RetrievalFilters, ScoredChunk
 
 
@@ -27,11 +29,20 @@ class StubVectorStore:
         top_k: int,
         min_score: float,
         filters: RetrievalFilters | None = None,
+        exclude_roles: frozenset[SourceRole] = frozenset(),
+        exclusions: SourceExclusions = SourceExclusions(),
     ) -> list[ScoredChunk]:
+        """Like Chroma: every constraint is applied before the ``top_k`` cutoff."""
         scored: list[ScoredChunk] = []
 
         for chunk in self.chunks:
             if not matches_retrieval_filters(chunk, filters):
+                continue
+
+            if exclude_roles and chunk.source_role in exclude_roles:
+                continue
+
+            if is_excluded(chunk, exclusions):
                 continue
 
             score = cosine_similarity(embedding, chunk.embedding)

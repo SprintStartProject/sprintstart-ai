@@ -434,3 +434,111 @@ def test_corpus_fingerprint_stable_for_unchanged_corpus() -> None:
     store = _store("backend onboarding deploy runbook")
 
     assert corpus_fingerprint(store, _PROJECT) == corpus_fingerprint(store, _PROJECT)
+
+
+def _generated_active(store: StubVectorStore, llm: StubLLMClient) -> Blueprint:
+    """A `source: generated` active blueprint, as a prior run would have made it."""
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
+    blueprint = outcomes[0].blueprint
+    assert blueprint is not None and blueprint.source == "generated"
+    return blueprint
+
+
+def test_generated_blueprint_is_invalidated_when_its_evidence_leaves_project() -> None:
+    """Regression: a blueprint outliving its evidence must not stay active.
+
+    The artifact grounding the blueprint is reassigned to another project, so
+    nothing eligible is retrievable here any more. Reporting `skipped` would
+    leave the backend serving steps and citations pointing at content this
+    project can no longer see.
+    """
+    store = _store("backend onboarding deploy runbook")
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+    active = _generated_active(store, llm)
+
+    # The backend re-syncs the artifact into a different project.
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="doc1.md",
+                text="backend onboarding deploy runbook",
+                embedding=_EMBED,
+                project_ids=("project-2",),
+            )
+        ]
+    )
+
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
+
+    assert outcomes[0].status == "invalidated"
+    assert outcomes[0].blueprint is None
+
+
+def test_generated_blueprint_is_invalidated_when_the_corpus_empties() -> None:
+    store = _store("backend onboarding deploy runbook")
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+    active = _generated_active(store, llm)
+
+    store.delete("a1")
+
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
+
+    assert outcomes[0].status == "invalidated"
+
+
+def test_authored_blueprint_is_never_invalidated_by_missing_evidence() -> None:
+    """Human-owned content is not withdrawn on the strength of a retrieval."""
+    store = _store("another project's runbook", project_ids=("project-2",))
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+    authored = _active(
+        BlueprintStep(id="s1", title="Read the handbook", requirement="required")
+    )
+
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[authored]
+    )
+
+    assert outcomes[0].status == "skipped"
+
+
+def test_missing_evidence_without_an_active_blueprint_is_skipped() -> None:
+    """Nothing generated to withdraw, so there is nothing for the backend to do."""
+    store = _store("another project's runbook", project_ids=("project-2",))
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
+
+    assert outcomes[0].status == "skipped"
+
+
+def test_ungrounded_llm_output_does_not_invalidate_an_active_blueprint() -> None:
+    """A retry-able model failure must not look like the evidence disappeared."""
+    store = _store("backend onboarding deploy runbook")
+    active = _generated_active(store, _llm([{"title": "Deploy", "chunk_ids": ["c1"]}]))
+
+    # Evidence is still there; the model just cites nothing, so no step grounds.
+    ungrounded = _llm([{"title": "Deploy", "chunk_ids": []}])
+    store.add(
+        [
+            Chunk(
+                id="c2",
+                artifact_id="a2",
+                filename="doc2.md",
+                text="new evidence so the run is not a no-op",
+                embedding=_EMBED,
+                project_ids=(_PROJECT,),
+            )
+        ]
+    )
+
+    outcomes = generate_blueprints(
+        ungrounded, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
+
+    assert outcomes[0].status == "skipped"

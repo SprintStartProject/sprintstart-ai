@@ -4,6 +4,7 @@ from pathlib import Path
 import chromadb
 
 from ingestion.source_role import SourceRole
+from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters
 from store.chroma_store import ChromaVectorStore
 
@@ -870,3 +871,196 @@ def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
     )
     assert store.project_ids_for_artifact("artifact-2") == frozenset({"project-3"})
     assert store.project_ids_for_artifact("missing") == frozenset()
+
+
+_EXCLUSION_DIM = 16
+_QUERY_EMBEDDING = [1.0] + [0.0] * (_EXCLUSION_DIM - 1)
+
+
+def _ranked_embedding(offset: float, slot: int) -> list[float]:
+    """A unit-ish vector whose cosine to ``_QUERY_EMBEDDING`` falls with ``offset``.
+
+    ``slot`` spreads the offset over different dimensions so the vectors are
+    genuinely distinct. Near-duplicate vectors are a degenerate case for HNSW
+    graph construction — a corpus of *identical* embeddings makes Chroma's
+    filtered search lose recall non-deterministically, which would make this
+    test flaky for a reason that has nothing to do with what it checks.
+    """
+    embedding = [0.0] * _EXCLUSION_DIM
+    embedding[0] = 1.0
+    embedding[1 + slot % (_EXCLUSION_DIM - 1)] = offset
+    return embedding
+
+
+def _exclusion_corpus(store: ChromaVectorStore) -> None:
+    """240 ineligible chunks, all ranked above the two eligible ones."""
+
+    # Offsets stay well under the eligible chunks' 0.30, so every ineligible
+    # chunk is a closer match to the query than either eligible chunk.
+    def ineligible_offset(index: int) -> float:
+        return 0.01 + 0.002 * index
+
+    store.add(
+        [
+            Chunk(
+                id=f"test-role-{index}",
+                artifact_id=f"artifact-test-{index}",
+                filename="test_doc.md",
+                text="Text",
+                embedding=_ranked_embedding(ineligible_offset(index), index),
+                source_role="test",
+            )
+            for index in range(80)
+        ]
+        + [
+            Chunk(
+                id=f"disabled-source-{index}",
+                artifact_id=f"artifact-disabled-{index}",
+                filename="doc.md",
+                text="Text",
+                embedding=_ranked_embedding(ineligible_offset(index), index + 1),
+                connector_id="github",
+                connector_source_id="owner/disabled-repo",
+            )
+            for index in range(80)
+        ]
+        + [
+            Chunk(
+                id=f"disabled-connector-{index}",
+                artifact_id=f"artifact-jira-{index}",
+                filename="doc.md",
+                text="Text",
+                embedding=_ranked_embedding(ineligible_offset(index), index + 2),
+                connector_id="jira",
+                connector_source_id="PROJ",
+            )
+            for index in range(80)
+        ]
+        + [
+            Chunk(
+                id="eligible-enabled-repo",
+                artifact_id="artifact-enabled",
+                filename="doc.md",
+                text="Text",
+                embedding=_ranked_embedding(0.30, 3),
+                connector_id="github",
+                connector_source_id="owner/enabled-repo",
+            ),
+            Chunk(
+                id="eligible-legacy",
+                artifact_id="artifact-legacy",
+                filename="doc.md",
+                text="Text",
+                embedding=_ranked_embedding(0.31, 5),
+            ),
+        ]
+    )
+
+
+def test_chroma_query_applies_exclusions_before_the_top_k_cutoff() -> None:
+    """Regression: exclusions must reach Chroma's ``where``, not post-filtering.
+
+    All 240 ineligible chunks outrank the two eligible ones, so asking for the
+    top 5 and filtering the result returns nothing at all. Putting the
+    exclusions in the ``where`` clause — which Chroma applies before it limits
+    to ``n_results`` — returns the eligible chunks instead.
+    """
+    store = ChromaVectorStore(
+        collection_name="test_chunks_exclusion_pushdown",
+        client=chromadb.EphemeralClient(),
+    )
+    _exclusion_corpus(store)
+
+    result = store.query(
+        embedding=_QUERY_EMBEDDING,
+        top_k=5,
+        min_score=0.0,
+        exclude_roles=frozenset({"test"}),
+        exclusions=SourceExclusions(
+            connectors=frozenset({"jira"}),
+            sources=frozenset({("github", "owner/disabled-repo")}),
+        ),
+    )
+
+    assert {chunk.id for chunk in result} == {
+        "eligible-enabled-repo",
+        "eligible-legacy",
+    }
+
+
+def test_chroma_where_exclusions_keep_legacy_chunks() -> None:
+    """A chunk with no connector and no role is never excluded server-side.
+
+    Chroma treats a missing/empty metadata value as matching ``$ne``/``$nin``,
+    which must agree with ``is_excluded``/``_source_role_from_metadata`` treating
+    an absent connector as un-excludable and an absent role as ``primary``.
+    """
+    store = ChromaVectorStore(
+        collection_name="test_chunks_exclusion_legacy",
+        client=chromadb.EphemeralClient(),
+    )
+    store.add(
+        [
+            Chunk(
+                id="legacy",
+                artifact_id="artifact-legacy",
+                filename="doc.md",
+                text="Text",
+                embedding=[1.0, 0.0],
+            )
+        ]
+    )
+
+    result = store.query(
+        embedding=[1.0, 0.0],
+        top_k=5,
+        min_score=0.0,
+        exclude_roles=frozenset({"test"}),
+        exclusions=SourceExclusions(
+            connectors=frozenset({"github"}),
+            sources=frozenset({("github", "owner/repo")}),
+        ),
+    )
+
+    assert [chunk.id for chunk in result] == ["legacy"]
+
+
+def test_chroma_source_exclusion_keeps_other_sources_of_same_connector() -> None:
+    """Excluding one repo must not exclude the whole connector."""
+    store = ChromaVectorStore(
+        collection_name="test_chunks_exclusion_sibling_source",
+        client=chromadb.EphemeralClient(),
+    )
+    store.add(
+        [
+            Chunk(
+                id="disabled",
+                artifact_id="artifact-disabled",
+                filename="doc.md",
+                text="Text",
+                embedding=[1.0, 0.0],
+                connector_id="github",
+                connector_source_id="owner/disabled-repo",
+            ),
+            Chunk(
+                id="sibling",
+                artifact_id="artifact-sibling",
+                filename="doc.md",
+                text="Text",
+                embedding=[1.0, 0.0],
+                connector_id="github",
+                connector_source_id="owner/other-repo",
+            ),
+        ]
+    )
+
+    result = store.query(
+        embedding=[1.0, 0.0],
+        top_k=5,
+        min_score=0.0,
+        exclusions=SourceExclusions(
+            sources=frozenset({("github", "owner/disabled-repo")})
+        ),
+    )
+
+    assert [chunk.id for chunk in result] == ["sibling"]

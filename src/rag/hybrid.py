@@ -19,9 +19,10 @@ RRF_K = 60
 RRF_MIN_RATIO = 0.15
 SEMANTIC_ONLY_CHUNK_LIMIT = 10_000
 
-# When a role, source, or attribute filter is active we over-fetch from each
-# retriever so that, after excluded/filtered chunks are dropped, enough
-# candidates remain to fill ``top_k``.
+# First-guess over-fetch when a role, source, or attribute filter is active.
+# This is a round-trip optimisation only: both retrievers drop ineligible
+# candidates before truncating, and the semantic half widens its fetch until it
+# has enough eligible results, so correctness never depends on this factor.
 _ROLE_FILTER_OVERFETCH = 5
 
 
@@ -52,22 +53,73 @@ def to_scored_chunk(chunk: Chunk | ScoredChunk, score: float) -> ScoredChunk:
     )
 
 
-def _drop_excluded_roles(
-    chunks: list[ScoredChunk],
+def build_eligibility(
     exclude_roles: frozenset[SourceRole],
+    exclusions: SourceExclusions,
+    filters: RetrievalFilters | None,
+) -> "Callable[[Chunk | ScoredChunk], bool]":
+    """The single "may this chunk be retrieved?" predicate, for both retrievers.
+
+    Semantic and BM25 retrieval must agree on eligibility exactly — a chunk one
+    half considers foreign and the other serves is a project leak. Deriving both
+    from this one predicate is what keeps them from drifting apart.
+    """
+
+    def is_eligible(chunk: Chunk | ScoredChunk) -> bool:
+        if exclude_roles and chunk.source_role in exclude_roles:
+            return False
+        if is_excluded(chunk, exclusions):
+            return False
+        return matches_retrieval_filters(chunk, filters)
+
+    return is_eligible
+
+
+def _semantic_candidates(
+    store: VectorStore,
+    embedding: list[float],
+    target: int,
+    min_score: float,
+    corpus_size: int,
+    is_eligible: "Callable[[Chunk | ScoredChunk], bool]",
+    exclude_roles: frozenset[SourceRole],
+    exclusions: SourceExclusions,
+    filters: RetrievalFilters | None,
 ) -> list[ScoredChunk]:
-    if not exclude_roles:
-        return chunks
+    """Up to ``target`` eligible semantic hits, ranked, filtered before cutoff.
 
-    return [chunk for chunk in chunks if chunk.source_role not in exclude_roles]
+    The constraints are handed to the store so it can filter before it limits
+    (Chroma does this in its ``where`` clause). The predicate is re-applied here
+    and the fetch widens on a short result because the store is a Protocol: an
+    implementation that silently ignored a constraint, or a chunk whose
+    eligibility isn't expressible in the backend's query language, would
+    otherwise let higher-ranked ineligible chunks fill the window and hide every
+    eligible hit. Widening ends at the corpus size, so the invariant holds
+    without relying on a fixed over-fetch multiplier.
+    """
+    if corpus_size <= 0 or target <= 0:
+        return []
 
+    fetch_size = min(target, corpus_size)
 
-def _drop_excluded_sources(
-    chunks: list[ScoredChunk], exclusions: SourceExclusions
-) -> list[ScoredChunk]:
-    if not exclusions:
-        return chunks
-    return [c for c in chunks if not is_excluded(c, exclusions)]
+    while True:
+        candidates = store.query(
+            embedding=embedding,
+            top_k=fetch_size,
+            min_score=min_score,
+            filters=filters,
+            exclude_roles=exclude_roles,
+            exclusions=exclusions,
+        )
+        eligible = [chunk for chunk in candidates if is_eligible(chunk)]
+
+        # A short result means the corpus is exhausted at this score floor:
+        # scores fall monotonically, so nothing further down clears min_score.
+        exhausted = len(candidates) < fetch_size or fetch_size >= corpus_size
+        if len(eligible) >= target or exhausted:
+            return eligible[:target]
+
+        fetch_size = min(fetch_size * 2, corpus_size)
 
 
 def reciprocal_rank_fusion(
@@ -204,13 +256,11 @@ def hybrid_retrieve(
     ``exclude_roles`` drops chunks of the given :data:`SourceRole`\\ s (e.g.
     ``"test"``), ``exclusions`` drops chunks belonging to disabled
     connectors/sources, and ``filters`` drops chunks by project, source system
-    and time range — all from the candidates *before* fusion. The BM25 half
-    applies them inside its ranking, so ineligible chunks can never displace
-    eligible ones; the semantic half is filtered server-side on project and
-    attributes and over-fetches to absorb the role/source exclusions applied to
-    its results. Legacy chunks without a role or connector default to unfiltered
-    (``primary`` role, never excluded) — but a project filter is fail-closed, so
-    chunks without a project are dropped.
+    and time range. Both halves enforce all three the same way — rank, drop the
+    ineligible, *then* take the top results — so a run of higher-ranked
+    ineligible chunks can never hide the eligible ones. Legacy chunks without a
+    role or connector default to unfiltered (``primary`` role, never excluded) —
+    but a project filter is fail-closed, so chunks without a project are dropped.
     """
     chunk_count = store.count()
     has_filters = (
@@ -228,40 +278,30 @@ def hybrid_retrieve(
     )
     fetch_k = top_k * _ROLE_FILTER_OVERFETCH if has_filters else top_k
 
-    if chunk_count > SEMANTIC_ONLY_CHUNK_LIMIT:
-        embedding = llm.embed(question)
-        results = store.query(
-            embedding=embedding,
-            top_k=fetch_k,
+    is_eligible = build_eligibility(exclude_roles, exclusions, filters)
+
+    def semantic_candidates(target: int) -> list[ScoredChunk]:
+        return _semantic_candidates(
+            store=store,
+            embedding=llm.embed(question),
+            target=target,
             min_score=min_score,
+            corpus_size=chunk_count,
+            is_eligible=is_eligible,
+            exclude_roles=exclude_roles,
+            exclusions=exclusions,
             filters=filters,
         )
-        results = _drop_excluded_roles(results, exclude_roles)
-        results = _drop_excluded_sources(results, exclusions)
-        return results[:top_k]
+
+    if chunk_count > SEMANTIC_ONLY_CHUNK_LIMIT:
+        return semantic_candidates(top_k)
 
     bm25_index = bm25_cache.get(store)
 
-    def is_eligible(chunk: Chunk) -> bool:
-        if exclude_roles and chunk.source_role in exclude_roles:
-            return False
-        if is_excluded(chunk, exclusions):
-            return False
-        return matches_retrieval_filters(chunk, filters)
-
     with ThreadPoolExecutor(max_workers=2) as executor:
-        semantic_future = executor.submit(
-            lambda: store.query(
-                embedding=llm.embed(question),
-                top_k=fetch_k,
-                min_score=min_score,
-                filters=filters,
-            )
-        )
-
-        # The BM25 half filters inside the ranking (before truncation); the
-        # semantic half is filtered server-side by the store's ``where`` clause
-        # and only needs the role/source exclusions applied to its results.
+        # Both halves fetch the same budget of already-eligible candidates, so
+        # fusion sees two comparable rankings.
+        semantic_future = executor.submit(lambda: semantic_candidates(fetch_k))
         bm25_future = executor.submit(
             lambda: bm25_index.query(
                 question=question,
@@ -272,9 +312,6 @@ def hybrid_retrieve(
 
         semantic_results = semantic_future.result()
         bm25_results = bm25_future.result()
-
-    semantic_results = _drop_excluded_roles(semantic_results, exclude_roles)
-    semantic_results = _drop_excluded_sources(semantic_results, exclusions)
 
     if not semantic_results:
         return bm25_results[:top_k]
