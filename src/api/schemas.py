@@ -6,6 +6,7 @@ from pydantic.alias_generators import to_camel
 if TYPE_CHECKING:
     from onboarding.graph_models import ActiveCompetency, TombstonedCompetency
     from onboarding.models import Blueprint, PersonProfile
+    from onboarding.verification import ArtifactEvidence
 
 
 class IngestRequest(BaseModel):
@@ -1026,5 +1027,151 @@ class ProposeModuleRequest(BaseModel):
             "The corpus fingerprint recorded from the caller's previous proposal "
             "run for this competency, if any. Idempotency is per module, not "
             "corpus-wide -- modules are proposed one node at a time."
+        ),
+    )
+
+
+class MineStarterWorkRequest(BaseModel):
+    active_source_ids: list[str] = Field(
+        default=[],
+        description=(
+            "Issues already in the backend's starter-work pool (proposed or "
+            "approved). Drives dedup -- never re-proposed."
+        ),
+    )
+    active_competency_keys: list[str] = Field(
+        default=[],
+        description=(
+            "The backend's live competency graph keys, used to ground each "
+            "task's competency tags. A tag outside this set is dropped, not "
+            "invented; when empty, tags are kept as proposed."
+        ),
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded from the caller's previous "
+            "mining run, if any."
+        ),
+    )
+
+
+class AssembleOrientationRequest(BaseModel):
+    task_title: str = Field(description="The task the packet orients somebody for.")
+    task_body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    touched_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Repository paths the task is expected to touch, when known. Used to "
+            "aim retrieval at the right part of the codebase, never asserted."
+        ),
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this task's packet was last "
+            "assembled, if any. Idempotency is per task: an unchanged corpus "
+            "yields `unchanged` so a cached packet can be served, and a moved "
+            "corpus regenerates rather than describing code that changed."
+        ),
+    )
+
+
+class AssembleDiagramRequest(BaseModel):
+    subject: str = Field(
+        description=(
+            "The question the diagram answers -- 'how a request reaches the "
+            "database'. This is the one part of a diagram a model chooses, and "
+            "it only aims retrieval: every part that comes back is derived from "
+            "the corpus and cited, so a subject nothing supports yields "
+            "`skipped` rather than an invention."
+        )
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this subject was last drawn, "
+            "if any. Idempotency is per subject: an unchanged corpus yields "
+            "`unchanged` so a cached diagram can be served without a generation "
+            "-- which is what keeps a card that hydrates on every board load "
+            "from costing an LLM call every time."
+        ),
+    )
+
+
+class FileDiffSchema(BaseModel):
+    """One changed file's diff, budgeted backend-side."""
+
+    path: str
+    additions: int = 0
+    deletions: int = 0
+    patch: str | None = Field(
+        default=None,
+        description="None when GitHub reported no patch -- binary or too large.",
+    )
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "Whether the patch was cut, so a trimmed diff is not read as small."
+        ),
+    )
+
+
+class ArtifactEvidenceSchema(BaseModel):
+    pr_title: str = ""
+    pr_body: str = ""
+    pr_state: str = Field(
+        default="", description="e.g. 'OPEN'/'MERGED'/'CLOSED'; informational only."
+    )
+    files_changed: list[str] = Field(default_factory=list)
+    checks_passed: bool | None = Field(
+        default=None, description="None when CI status is unknown/not reported."
+    )
+    commit_messages: list[str] = Field(default_factory=list)
+    file_diffs: list[FileDiffSchema] = Field(
+        default_factory=list[FileDiffSchema],
+        description=(
+            "The changed files' diffs. Filenames alone cannot separate a real fix "
+            "from a whitespace edit to the right file."
+        ),
+    )
+    omitted_file_count: int = Field(
+        default=0,
+        description=(
+            "Changed files whose diff did not fit the budget -- sent so a partial "
+            "diff is never mistaken for a complete one."
+        ),
+    )
+
+    def to_model(self) -> "ArtifactEvidence":
+        from onboarding.verification import ArtifactEvidence
+
+        return ArtifactEvidence(**self.model_dump())
+
+
+class VerifyRequest(BaseModel):
+    type: str = Field(description="Grading type: knowledge/exact/attest/artifact.")
+    question: str = ""
+    answer: str = ""
+    attempt_no: int = Field(default=1, ge=1)
+    canonical_answer: str | None = Field(
+        default=None, description="Required for 'exact' grading."
+    )
+    rubric: str | None = Field(
+        default=None, description="Required for 'knowledge' and 'artifact' grading."
+    )
+    evidence: str = Field(
+        default="",
+        description=(
+            "Grounded evidence backing the rubric (e.g. the lesson body), used "
+            "only for 'knowledge' grading."
+        ),
+    )
+    artifact_evidence: ArtifactEvidenceSchema | None = Field(
+        default=None,
+        description=(
+            "Backend-gathered PR/repo state, used only for 'artifact' grading. "
+            "Missing/empty is treated as no evidence yet."
         ),
     )
