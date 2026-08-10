@@ -1,10 +1,38 @@
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 if TYPE_CHECKING:
     from onboarding.models import Blueprint, PersonProfile
+
+
+# Project ids are stored as a delimited string (``|id1|id2|``) in the chunk
+# metadata and appear verbatim in blueprint scopes (``project:<id>|global``).
+# An id containing the delimiter would decode back as two separate
+# memberships, so ``["a|b"]`` would grant access from both project ``a`` and
+# project ``b``. Every project id enters the service through this one type.
+ProjectId = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, pattern=r"^[^|]+$"),
+]
+
+
+def _deduplicate(project_ids: list[str]) -> list[str]:
+    return list(dict.fromkeys(project_ids))
+
+
+# Duplicates are dropped here rather than at each call site so that membership
+# lists are already normalized by the time they reach the store.
+ProjectIds = Annotated[list[ProjectId], AfterValidator(_deduplicate)]
 
 
 class IngestRequest(BaseModel):
@@ -37,7 +65,7 @@ class IngestRequest(BaseModel):
             "and chunk_count will be 0."
         )
     )
-    project_ids: list[str] = Field(
+    project_ids: ProjectIds = Field(
         default_factory=list,
         alias="projectIds",
         description=(
@@ -234,27 +262,14 @@ class ProjectScopedRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    project_id: str = Field(
+    project_id: ProjectId = Field(
         alias="projectId",
-        min_length=1,
         description=(
             "Project this request is scoped to. Retrieval only ever sees "
             "artifacts belonging to this project."
         ),
         examples=["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
     )
-
-    @field_validator("project_id")
-    @classmethod
-    def project_id_is_usable(cls, value: str) -> str:
-        # Project ids are stored delimited (``|id1|id2|``) in the chunk metadata
-        # and appear verbatim in blueprint scopes (``project:<id>|global``), so
-        # the delimiter must not occur inside an id.
-        if not value.strip():
-            raise ValueError("project_id cannot be blank")
-        if "|" in value:
-            raise ValueError("project_id must not contain '|'")
-        return value
 
 
 def _empty_history() -> list[HistoryEntry]:
@@ -735,7 +750,7 @@ class ArtifactRunIngestRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     artifact_id: str
-    project_ids: list[str] = Field(
+    project_ids: ProjectIds = Field(
         default_factory=list,
         description=(
             "Projects this artifact belongs to (the backend's "
@@ -782,8 +797,27 @@ class ArtifactRunIngestResponse(BaseModel):
     status: Literal["completed", "failed"] = "completed"
 
 
+class ArtifactDeindexResponse(BaseModel):
+    """Outcome of removing one artifact from the vector store.
+
+    Reported per artifact rather than swallowed, because a failed deindex
+    leaves the artifact retrievable: the backend has to know it must retry.
+    """
+
+    artifact_id: str
+    status: Literal["completed", "failed"] = "completed"
+    error_message: str | None = None
+
+
 class RunArtifactsSyncResponse(BaseModel):
     artifacts: list[ArtifactRunIngestResponse]
+    deindexed: list[ArtifactDeindexResponse] = Field(
+        default_factory=list[ArtifactDeindexResponse],
+        description=(
+            "One entry per requested deindex. A 'failed' entry means the "
+            "artifact may still be indexed and the removal must be retried."
+        ),
+    )
 
 
 # ── Connector / source enable-disable ───────────────────────────────────────

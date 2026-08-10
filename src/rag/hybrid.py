@@ -13,7 +13,7 @@ from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 RRF_K = 60
 RRF_MIN_RATIO = 0.15
@@ -112,7 +112,20 @@ class BM25Index:
             BM25Okapi(self.tokenized_corpus) if self.tokenized_corpus else None
         )
 
-    def query(self, question: str, top_k: int) -> list[ScoredChunk]:
+    def query(
+        self,
+        question: str,
+        top_k: int,
+        is_eligible: "Callable[[Chunk], bool] | None" = None,
+    ) -> list[ScoredChunk]:
+        """The ``top_k`` best-scoring *eligible* chunks.
+
+        ``is_eligible`` is applied to the full ranking before it is truncated.
+        Filtering the truncated list instead would let highly-ranked ineligible
+        chunks (another project's, an excluded connector's) crowd out every
+        eligible chunk and return nothing — over-fetching only lowers the odds
+        of that, it doesn't remove it.
+        """
         if not self.chunks or self.index is None:
             return []
 
@@ -126,11 +139,18 @@ class BM25Index:
             reverse=True,
         )
 
-        return [
-            to_scored_chunk(chunk, float(score))
-            for chunk, score in ranked[:top_k]
-            if score > 0
-        ]
+        results: list[ScoredChunk] = []
+        for chunk, score in ranked:
+            if score <= 0:
+                # Descending order: nothing below this scores above zero.
+                break
+            if is_eligible is not None and not is_eligible(chunk):
+                continue
+            results.append(to_scored_chunk(chunk, float(score)))
+            if len(results) == top_k:
+                break
+
+        return results
 
 
 class BM25IndexCache:
@@ -143,24 +163,28 @@ class BM25IndexCache:
         self._lock = threading.Lock()
 
     def get(self, store: VectorStore) -> BM25Index:
-        # Cheap fingerprint (ids only, no text/embeddings) so a cache hit never
-        # touches the lock or the network-heavy full-corpus fetch. Chunk ids are
-        # content-hashed, so an id-set match means the corpus text hasn't changed.
-        current_ids = store.all_ids()
+        # Fingerprint over ids *and* the metadata the index filters on (project
+        # membership, source role, connector, source system, timestamp), but not
+        # text or embeddings, so a cache hit stays cheap. Chunk ids are
+        # content-hashed and therefore cover the text; they do not cover
+        # membership, so an ids-only fingerprint would let an artifact moved
+        # from project A to project B keep serving BM25 hits to project A for as
+        # long as the cached index lived.
+        current_fingerprints = store.retrieval_fingerprints()
 
         snapshot = self._snapshot
-        if snapshot is not None and snapshot[0] == current_ids:
+        if snapshot is not None and snapshot[0] == current_fingerprints:
             return snapshot[1]
 
         with self._lock:
             # Another thread may have rebuilt for this exact corpus state while
             # we were computing the fingerprint above; avoid rebuilding twice.
             snapshot = self._snapshot
-            if snapshot is not None and snapshot[0] == current_ids:
+            if snapshot is not None and snapshot[0] == current_fingerprints:
                 return snapshot[1]
 
             index = BM25Index(store.all_chunks_without_embeddings())
-            self._snapshot = (current_ids, index)
+            self._snapshot = (current_fingerprints, index)
             return index
 
 
@@ -180,11 +204,13 @@ def hybrid_retrieve(
     ``exclude_roles`` drops chunks of the given :data:`SourceRole`\\ s (e.g.
     ``"test"``), ``exclusions`` drops chunks belonging to disabled
     connectors/sources, and ``filters`` drops chunks by project, source system
-    and time range — all from the candidates *before* fusion. Because each
-    retriever returns its own top-k, we over-fetch when any filter is active so
-    excluded chunks don't starve the result. Legacy chunks without a role or
-    connector default to unfiltered (``primary`` role, never excluded) — but a
-    project filter is fail-closed, so chunks without a project are dropped.
+    and time range — all from the candidates *before* fusion. The BM25 half
+    applies them inside its ranking, so ineligible chunks can never displace
+    eligible ones; the semantic half is filtered server-side on project and
+    attributes and over-fetches to absorb the role/source exclusions applied to
+    its results. Legacy chunks without a role or connector default to unfiltered
+    (``primary`` role, never excluded) — but a project filter is fail-closed, so
+    chunks without a project are dropped.
     """
     chunk_count = store.count()
     has_filters = (
@@ -216,6 +242,13 @@ def hybrid_retrieve(
 
     bm25_index = bm25_cache.get(store)
 
+    def is_eligible(chunk: Chunk) -> bool:
+        if exclude_roles and chunk.source_role in exclude_roles:
+            return False
+        if is_excluded(chunk, exclusions):
+            return False
+        return matches_retrieval_filters(chunk, filters)
+
     with ThreadPoolExecutor(max_workers=2) as executor:
         semantic_future = executor.submit(
             lambda: store.query(
@@ -226,10 +259,14 @@ def hybrid_retrieve(
             )
         )
 
+        # The BM25 half filters inside the ranking (before truncation); the
+        # semantic half is filtered server-side by the store's ``where`` clause
+        # and only needs the role/source exclusions applied to its results.
         bm25_future = executor.submit(
             lambda: bm25_index.query(
                 question=question,
                 top_k=fetch_k,
+                is_eligible=is_eligible,
             )
         )
 
@@ -237,12 +274,7 @@ def hybrid_retrieve(
         bm25_results = bm25_future.result()
 
     semantic_results = _drop_excluded_roles(semantic_results, exclude_roles)
-    bm25_results = _drop_excluded_roles(bm25_results, exclude_roles)
     semantic_results = _drop_excluded_sources(semantic_results, exclusions)
-    bm25_results = _drop_excluded_sources(bm25_results, exclusions)
-    bm25_results = [
-        chunk for chunk in bm25_results if matches_retrieval_filters(chunk, filters)
-    ]
 
     if not semantic_results:
         return bm25_results[:top_k]

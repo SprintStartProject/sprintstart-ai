@@ -49,7 +49,7 @@ from onboarding.similarity import (
     step_text,
 )
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.types import RetrievalFilters, ScoredChunk
+from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,19 @@ class _GenPayload(BaseModel):
 # --- corpus fingerprint (idempotency) --------------------------------------
 
 
+def _fingerprint_fields(chunk: Chunk) -> tuple[str, ...]:
+    """Everything that decides whether a chunk can ground a blueprint.
+
+    Chunk ids are content-hashed over ``artifact_id:position:content`` only, so
+    re-ingesting the same text under a different source role (``primary`` →
+    ``test``, which makes it ineligible for onboarding grounding) or a different
+    filename (which appears in citations) leaves the id untouched. A field left
+    out here is one whose change silently keeps a stale blueprint alive — extend
+    this record when a new field starts affecting eligibility or output.
+    """
+    return (chunk.id, chunk.text, chunk.source_role, chunk.filename)
+
+
 def corpus_fingerprint(store: VectorStore, project_id: str) -> str:
     """Stable hash of the project's corpus; changes iff that corpus changes.
 
@@ -103,10 +116,9 @@ def corpus_fingerprint(store: VectorStore, project_id: str) -> str:
     for chunk in sorted(store.all_chunks(), key=lambda c: c.id):
         if project_id not in chunk.project_ids:
             continue
-        digest.update(chunk.id.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(chunk.text.encode("utf-8"))
-        digest.update(b"\0")
+        for value in _fingerprint_fields(chunk):
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
     return digest.hexdigest()
 
 

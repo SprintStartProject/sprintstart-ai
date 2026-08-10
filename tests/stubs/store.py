@@ -1,4 +1,4 @@
-from rag.filters import matches_retrieval_filters
+from rag.filters import encode_project_ids, matches_retrieval_filters
 from rag.types import Chunk, RetrievalFilters, ScoredChunk
 
 
@@ -101,6 +101,30 @@ class StubVectorStore:
 
     def all_ids(self) -> frozenset[str]:
         return frozenset(chunk.id for chunk in self.chunks)
+
+    def retrieval_fingerprints(self) -> frozenset[str]:
+        return frozenset(
+            "\x00".join(
+                [
+                    chunk.id,
+                    encode_project_ids(chunk.project_ids),
+                    chunk.source_role,
+                    chunk.connector_id or "",
+                    chunk.connector_source_id or "",
+                    chunk.source_system or "",
+                    chunk.created_at or "",
+                ]
+            )
+            for chunk in self.chunks
+        )
+
+    def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
+        return frozenset(
+            project_id
+            for chunk in self.chunks
+            if chunk.artifact_id == artifact_id
+            for project_id in chunk.project_ids
+        )
 
     def count(self) -> int:
         return len(self.chunks)

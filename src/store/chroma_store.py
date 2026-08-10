@@ -306,8 +306,55 @@ class ChromaVectorStore:
         raw_result = self._collection.get(include=[])
         return frozenset(str(chunk_id) for chunk_id in raw_result["ids"])
 
+    def retrieval_fingerprints(self) -> frozenset[str]:
+        raw_result = self._collection.get(include=["metadatas"])
+        metadatas = cast(
+            list[Mapping[str, object]],
+            raw_result.get("metadatas") or [],
+        )
+        return frozenset(
+            _retrieval_fingerprint(str(chunk_id), metadata)
+            for chunk_id, metadata in zip(raw_result["ids"], metadatas, strict=True)
+        )
+
+    def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
+        raw_result = self._collection.get(
+            where={"artifact_id": artifact_id},
+            include=["metadatas"],
+        )
+        metadatas = cast(
+            list[Mapping[str, object]],
+            raw_result.get("metadatas") or [],
+        )
+        return frozenset(
+            project_id
+            for metadata in metadatas
+            for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
+        )
+
     def count(self) -> int:
         return self._collection.count()
+
+
+# Metadata a cached BM25 index filters on. Chunk ids are content-hashed, so an
+# id already stands for the chunk's text — but not for any of these, which the
+# backend can change without touching the content (moving an artifact between
+# projects, reclassifying it as test material, disabling its connector). They
+# belong in the fingerprint or a stale index keeps filtering on the old values.
+_FILTER_METADATA_KEYS = (
+    PROJECT_IDS_METADATA_KEY,
+    "source_role",
+    "connector_id",
+    "connector_source_id",
+    "source_system",
+    "created_at",
+)
+
+
+def _retrieval_fingerprint(chunk_id: str, metadata: Mapping[str, object]) -> str:
+    parts = [chunk_id]
+    parts.extend(str(metadata.get(key, "")) for key in _FILTER_METADATA_KEYS)
+    return "\x00".join(parts)
 
 
 def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:

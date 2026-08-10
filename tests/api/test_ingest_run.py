@@ -132,7 +132,7 @@ def test_ingest_run_empty_body_returns_empty_list(client: TestClient) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json() == {"artifacts": []}
+    assert response.json() == {"artifacts": [], "deindexed": []}
 
 
 def test_ingest_run_artifact_with_no_content_returns_zero_chunks(
@@ -405,3 +405,160 @@ def test_ingest_run_without_project_ids_stores_none(
     record = metadata_store.get_artifact("uuid-1")
     assert record is not None
     assert record.project_ids == ()
+
+
+def test_ingest_run_reports_failed_deindex(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    """A deletion that raises must be reported, not just logged.
+
+    A silent failure leaves the artifact indexed while the backend reads the
+    200 as "revoked" and never retries.
+    """
+
+    def failing_delete(artifact_id: str, exclude_ids: list[str] | None = None) -> int:
+        raise RuntimeError("chroma unavailable")
+
+    vector_store.delete = failing_delete  # type: ignore[method-assign]
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [], "artifactsToDeindex": ["gone-artifact"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deindexed"] == [
+        {
+            "artifact_id": "gone-artifact",
+            "status": "failed",
+            "error_message": "chroma unavailable",
+        }
+    ]
+
+
+def test_ingest_run_reports_successful_deindex(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    vector_store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="old-artifact",
+                filename="doc.md",
+                text="text",
+                embedding=[1.0, 0.0],
+            )
+        ]
+    )
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [], "artifactsToDeindex": ["old-artifact"]},
+    )
+
+    assert response.json()["deindexed"] == [
+        {
+            "artifact_id": "old-artifact",
+            "status": "completed",
+            "error_message": None,
+        }
+    ]
+
+
+def test_ingest_run_revokes_lost_membership_when_embedding_fails(
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    """An artifact that leaves a project must not stay retrievable from it.
+
+    The re-ingest that would replace its chunks fails at the embedding step, so
+    without an up-front revocation the old chunks — still carrying project-a —
+    survive until the backend happens to retry.
+    """
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a"]
+
+    app.dependency_overrides[get_store] = lambda: vector_store
+    app.dependency_overrides[get_llm] = lambda: StubLLMClient()
+    app.dependency_overrides[get_ingestion_metadata_store] = lambda: metadata_store
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/ingest/sync",
+            json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+        )
+        assert vector_store.project_ids_for_artifact("uuid-1") == frozenset(
+            {"project-a"}
+        )
+
+        app.dependency_overrides[get_llm] = lambda: _FlakyEmbedLLMClient()
+        moved: Artifact = _file_artifact()
+        moved["projectIds"] = ["project-b"]
+
+        response = TestClient(app).post(
+            "/api/v1/ingest/sync",
+            json={"artifactsToIngest": [moved], "artifactsToDeindex": []},
+        )
+
+        assert response.json()["artifacts"][0]["status"] == "failed"
+        assert vector_store.project_ids_for_artifact("uuid-1") == frozenset()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ingest_run_keeps_chunks_when_membership_only_grows(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    """Adding a project is not a revocation — nothing should be dropped early."""
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a"]
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    grown: Artifact = _file_artifact()
+    grown["projectIds"] = ["project-a", "project-b"]
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [grown], "artifactsToDeindex": []},
+    )
+
+    assert vector_store.project_ids_for_artifact("uuid-1") == frozenset(
+        {"project-a", "project-b"}
+    )
+
+
+def test_ingest_run_rejects_project_id_containing_delimiter(
+    client: TestClient,
+) -> None:
+    """``["a|b"]`` would encode as ``|a|b|`` and read back as two memberships."""
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a|project-b"]
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 422
+
+
+def test_ingest_run_deduplicates_project_ids(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a", "project-a"]
+
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    chunks = vector_store.list_chunks_by_artifact("uuid-1", limit=10)
+    assert chunks
+    assert chunks[0].project_ids == ("project-a",)

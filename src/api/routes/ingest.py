@@ -18,6 +18,7 @@ from api.schemas import (
     ValidationErrorResponse,
 )
 from ingestion.mapper import to_chunk
+from ingestion.membership import revoke_removed_memberships
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
 from ingestion.models import ParsedChunk
 from ingestion.parser import parse
@@ -129,6 +130,9 @@ def ingest(
     existing = metadata_store.get_artifact(body.artifact_id)
     created_at = existing.created_at if existing is not None else request_time
 
+    project_ids = tuple(dict.fromkeys(pid for pid in body.project_ids if pid))
+    revoke_removed_memberships(store, body.artifact_id, project_ids)
+
     artifact = ArtifactRecord(
         id=body.artifact_id,
         filename=body.filename,
@@ -139,7 +143,7 @@ def ingest(
         status="processing",
         created_at=created_at,
         updated_at=request_time,
-        project_ids=tuple(dict.fromkeys(pid for pid in body.project_ids if pid)),
+        project_ids=project_ids,
     )
     metadata_store.save_artifact(artifact)
 

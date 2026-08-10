@@ -1,5 +1,6 @@
 import json
 
+from ingestion.source_role import SourceRole
 from onboarding.generation import (
     corpus_fingerprint,
     filter_semantic_duplicates,
@@ -377,3 +378,59 @@ def testfilter_semantic_duplicates_within_scope() -> None:
     assert first_id in kept_ids  # first occurrence wins
     assert dup_id not in kept_ids  # within-scope duplicate dropped
     assert docker_id in kept_ids  # genuinely different step survives
+
+
+def test_corpus_fingerprint_changes_when_source_role_changes() -> None:
+    """Reclassifying content as test material must invalidate blueprints.
+
+    Chunk ids hash artifact_id, position and content only, so the id survives
+    the reclassification — but test chunks are excluded from onboarding
+    grounding, and a blueprint drafted from them is no longer supportable.
+    """
+    store = StubVectorStore()
+
+    def chunk(source_role: SourceRole) -> Chunk:
+        return Chunk(
+            id="c1",
+            artifact_id="a1",
+            filename="doc.md",
+            text="backend onboarding deploy runbook",
+            embedding=_EMBED,
+            project_ids=(_PROJECT,),
+            source_role=source_role,
+        )
+
+    store.add([chunk("primary")])
+    before = corpus_fingerprint(store, _PROJECT)
+
+    store.add([chunk("test")])
+
+    assert corpus_fingerprint(store, _PROJECT) != before
+
+
+def test_corpus_fingerprint_changes_when_filename_changes() -> None:
+    """The filename appears in citations, so a rename changes the output."""
+    store = StubVectorStore()
+
+    def chunk(filename: str) -> Chunk:
+        return Chunk(
+            id="c1",
+            artifact_id="a1",
+            filename=filename,
+            text="backend onboarding deploy runbook",
+            embedding=_EMBED,
+            project_ids=(_PROJECT,),
+        )
+
+    store.add([chunk("runbook.md")])
+    before = corpus_fingerprint(store, _PROJECT)
+
+    store.add([chunk("docs/runbook.md")])
+
+    assert corpus_fingerprint(store, _PROJECT) != before
+
+
+def test_corpus_fingerprint_stable_for_unchanged_corpus() -> None:
+    store = _store("backend onboarding deploy runbook")
+
+    assert corpus_fingerprint(store, _PROJECT) == corpus_fingerprint(store, _PROJECT)

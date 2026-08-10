@@ -3,6 +3,7 @@ from pathlib import Path
 
 import chromadb
 
+from ingestion.source_role import SourceRole
 from rag.types import Chunk, RetrievalFilters
 from store.chroma_store import ChromaVectorStore
 
@@ -753,3 +754,119 @@ def test_chroma_reingest_replaces_project_membership() -> None:
             filters=RetrievalFilters(project_id="project-2"),
         )
     ] == ["chunk-1"]
+
+
+def test_chroma_retrieval_fingerprints_change_with_project_membership() -> None:
+    """The BM25 cache key must move when membership does, ids alone don't.
+
+    Content-hashed ids are identical before and after the move, so a cache
+    keyed on ids would keep an index whose chunks still carry project-1.
+    """
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_fingerprints_project",
+        client=client,
+    )
+
+    def chunk(project_ids: tuple[str, ...]) -> Chunk:
+        return Chunk(
+            id="chunk-1",
+            artifact_id="artifact-1",
+            filename="doc.md",
+            text="Text",
+            embedding=[1.0, 0.0],
+            project_ids=project_ids,
+        )
+
+    store.add([chunk(("project-1",))])
+    before = store.retrieval_fingerprints()
+
+    store.add([chunk(("project-2",))])
+    after = store.retrieval_fingerprints()
+
+    assert store.all_ids() == frozenset({"chunk-1"})
+    assert len(before) == len(after) == 1
+    assert before != after
+
+
+def test_chroma_retrieval_fingerprints_change_with_source_role() -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_fingerprints_role",
+        client=client,
+    )
+
+    def chunk(source_role: SourceRole) -> Chunk:
+        return Chunk(
+            id="chunk-1",
+            artifact_id="artifact-1",
+            filename="doc.md",
+            text="Text",
+            embedding=[1.0, 0.0],
+            source_role=source_role,
+        )
+
+    store.add([chunk("primary")])
+    before = store.retrieval_fingerprints()
+
+    store.add([chunk("test")])
+
+    assert store.retrieval_fingerprints() != before
+
+
+def test_chroma_retrieval_fingerprints_stable_for_unchanged_corpus() -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_fingerprints_stable",
+        client=client,
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                text="Text",
+                embedding=[1.0, 0.0],
+                project_ids=("project-1",),
+            )
+        ]
+    )
+
+    assert store.retrieval_fingerprints() == store.retrieval_fingerprints()
+
+
+def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_project_ids_for_artifact",
+        client=client,
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                text="Text",
+                embedding=[1.0, 0.0],
+                project_ids=("project-1", "project-2"),
+            ),
+            Chunk(
+                id="chunk-2",
+                artifact_id="artifact-2",
+                filename="other.md",
+                text="Other",
+                embedding=[0.0, 1.0],
+                project_ids=("project-3",),
+            ),
+        ]
+    )
+
+    assert store.project_ids_for_artifact("artifact-1") == frozenset(
+        {"project-1", "project-2"}
+    )
+    assert store.project_ids_for_artifact("artifact-2") == frozenset({"project-3"})
+    assert store.project_ids_for_artifact("missing") == frozenset()
