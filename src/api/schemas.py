@@ -1175,3 +1175,188 @@ class VerifyRequest(BaseModel):
             "Missing/empty is treated as no evidence yet."
         ),
     )
+
+
+class BuddyToolCallSchema(BaseModel):
+    id: str = Field(
+        description="Provider-assigned id of this tool call; its result must echo it."
+    )
+    name: str = Field(description="Name of the tool the model wants to run.")
+    arguments: dict[str, object] = Field(
+        default_factory=dict, description="Arguments the model passed to the tool."
+    )
+
+
+class BuddyAgentMessageSchema(BaseModel):
+    role: str = Field(description="One of system | user | assistant | tool.")
+    content: str = Field(
+        default="", description="Text content; empty for a pure tool-call turn."
+    )
+    tool_calls: list[BuddyToolCallSchema] = Field(
+        default_factory=list[BuddyToolCallSchema],
+        description="Tool calls made on an assistant turn.",
+    )
+    tool_call_id: str | None = Field(
+        default=None,
+        description="On a tool-result turn, the id of the call it answers.",
+    )
+
+
+class BuddyToolSpecSchema(BaseModel):
+    name: str = Field(description="Tool name the model refers to when calling it.")
+    description: str = Field(
+        description="What the tool does, so the model knows when to use it."
+    )
+    parameters: dict[str, object] = Field(
+        default_factory=dict, description="JSON-schema of the tool's arguments."
+    )
+
+
+class BuddyCitationSchema(BaseModel):
+    artifact_id: str
+    start_line: int | None = None
+    start_page: int | None = None
+
+
+class BuddyVocabularySchema(BaseModel):
+    """What one unit of this hire's accepted work is called.
+
+    Every field defaults to the engineering wording, so a backend that sends no
+    vocabulary gets exactly the mentor it got before tracks existed. The noun is
+    bare because it is always rendered next to the verb -- "merged change",
+    "facilitated ceremony" -- and baking the verb in yields "merged merged change".
+    """
+
+    contribution_noun: str = Field(
+        default="change",
+        description='One unit of accepted work, bare: "change", "ceremony".',
+    )
+    contribution_noun_plural: str = Field(
+        default="changes",
+        description='The plural: "changes", "ceremonies".',
+    )
+    contribution_verb_past: str = Field(
+        default="merged",
+        description='Past tense of the hire\'s own act: "merged", "facilitated".',
+    )
+
+
+class BuddyAgentRequest(BaseModel):
+    messages: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "The running conversation, oldest first. First turn: the hire's history "
+            "plus their new question. Resume turn: everything the previous response "
+            "returned, with the backend's tool-result messages appended."
+        ),
+    )
+    backend_tools: list[BuddyToolSpecSchema] = Field(
+        default_factory=list[BuddyToolSpecSchema],
+        description=(
+            "Tools only the backend can execute (e.g. get_my_metrics). The AI reasons "
+            "about them and hands their calls back rather than running them. Mounted "
+            "per hire: the mentor's persona describes exactly these and no others, so "
+            "a role that cannot produce a kind of evidence is never told about the "
+            "tool for it."
+        ),
+    )
+    vocabulary: BuddyVocabularySchema = Field(
+        default_factory=BuddyVocabularySchema,
+        description=(
+            "The hire's track vocabulary, rendered into fixed slots in the persona. "
+            "Omit it for the engineering wording."
+        ),
+    )
+    prior_summary: str | None = Field(
+        default=None,
+        description=(
+            "The session's running summary of everything older than `messages` — "
+            "the conversation the window no longer carries. First hop of a turn only."
+        ),
+    )
+    project_ids: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "Scopes `search_docs` to the projects this hire is on. Several is "
+            "ordinary -- a hire onboarding on two projects should find material "
+            "from both and from neither of anybody else's. Empty searches "
+            "everything indexed, which is only right on a deployment serving a "
+            "single project. Material belonging to no project stays searchable "
+            "either way."
+        ),
+    )
+
+
+class BuddyAgentResponse(BaseModel):
+    final: bool = Field(
+        description=(
+            "True when `text` is the answer; false when `pending_tool_calls` run first."
+        )
+    )
+    text: str = Field(
+        default="", description="The answer to show the hire, when `final`."
+    )
+    messages: list[BuddyAgentMessageSchema] = Field(
+        description="The full running conversation to carry back verbatim on a resume."
+    )
+    pending_tool_calls: list[BuddyToolCallSchema] = Field(
+        default_factory=list[BuddyToolCallSchema],
+        description=(
+            "Backend tools to run; append each result as a `tool`, then re-call."
+        ),
+    )
+    citations: list[BuddyCitationSchema] = Field(
+        default_factory=list[BuddyCitationSchema],
+        description="Sources the grounded searches drew on.",
+    )
+
+
+class BuddyOpenRequest(BaseModel):
+    memory: str | None = Field(
+        default=None,
+        description=(
+            "The mentor's durable memory note about this hire; empty on the first "
+            "visit. Read from, never rewritten here — folding is "
+            "`/onboarding/buddy/compact`."
+        ),
+    )
+    recent: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "Messages since the memory was last updated (the previous visit), so the "
+            "greeting can be specific about it. May be empty."
+        ),
+    )
+    state: str = Field(
+        default="",
+        description=(
+            "A plain-text snapshot of the hire's current state (pull requests, tasks, "
+            "competencies) for the greeting to ground itself in."
+        ),
+    )
+
+
+class BuddyCompactRequest(BaseModel):
+    prior_summary: str | None = Field(
+        default=None,
+        description=(
+            "The mentor's durable memory note as it stands; empty before the first "
+            "fold."
+        ),
+    )
+    folded: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "The messages sliding out of the active window, oldest first. The caller "
+            "chooses how many — this side only rewrites the note."
+        ),
+    )
+
+
+class BuddyCompactResponse(BaseModel):
+    memory: str = Field(
+        description=(
+            "The rewritten memory note, covering the prior note plus `folded`. The "
+            "caller persists it and advances its cursor by exactly what it sent."
+        )
+    )

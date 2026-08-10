@@ -11,6 +11,7 @@ load_dotenv()
 from api.dependencies import get_llm  # noqa: E402
 from api.routes import (  # noqa: E402
     blueprints,
+    buddy,
     chat,
     competency_graph,
     diagram,
@@ -67,6 +68,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router)
 api_router.include_router(chat.router)
+api_router.include_router(buddy.router)
 api_router.include_router(ingest.router)
 api_router.include_router(ingest_run.router)
 api_router.include_router(title.router)
