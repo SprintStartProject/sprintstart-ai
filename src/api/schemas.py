@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.alias_generators import to_camel
 
 if TYPE_CHECKING:
+    from onboarding.graph_models import ActiveCompetency, TombstonedCompetency
     from onboarding.models import Blueprint, PersonProfile
 
 
@@ -914,3 +915,116 @@ class FaqGroupResponse(BaseModel):
             }
         }
     }
+
+
+class ProposedCompetencySchema(BaseModel):
+    key: str
+    label: str
+    description: str = ""
+    kind: str
+    area: str | None = None
+    repo_ref: str | None = None
+
+
+class TombstonedCompetencySchema(BaseModel):
+    key: str
+    label: str
+
+    def to_model(self) -> "TombstonedCompetency":
+        from onboarding.graph_models import TombstonedCompetency
+
+        return TombstonedCompetency(key=self.key, label=self.label)
+
+
+class GraphProvenanceSchema(BaseModel):
+    corpus_fingerprint: str | None = None
+    generated_at: str | None = None
+    model: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class ActiveCompetencySchema(BaseModel):
+    key: str
+    label: str
+    description: str = ""
+    kind: str
+    area: str | None = None
+    repo_ref: str | None = None
+
+    def to_model(self) -> "ActiveCompetency":
+        from onboarding.graph_models import ActiveCompetency
+
+        return ActiveCompetency(
+            key=self.key,
+            label=self.label,
+            description=self.description,
+            kind=self.kind,  # type: ignore[arg-type]
+            area=self.area,
+            repo_ref=self.repo_ref,
+        )
+
+
+class GraphProposalOutcomeSchema(BaseModel):
+    status: str
+    competencies: list[ProposedCompetencySchema] = Field(
+        default_factory=list[ProposedCompetencySchema]
+    )
+    provenance: GraphProvenanceSchema | None = None
+    chunks_retrieved: int = 0
+    notes: list[str] = Field(default_factory=list[str])
+
+
+class GenerateCompetencyGraphRequest(BaseModel):
+    active_competencies: list[ActiveCompetencySchema] = Field(
+        default=[],
+        description=(
+            "The backend's current live competency vocabulary. Drives dedup -- "
+            "an existing key is never re-proposed as new."
+        ),
+    )
+    existing_areas: list[str] = Field(
+        default=[],
+        description=(
+            "The grouping areas already in use. Sent so the generator reuses one "
+            "instead of coining a synonym -- the area is free text, and a "
+            "vocabulary split across 'auth', 'Authentication' and 'Auth & "
+            "Identity' groups nothing. The backend normalises on write too; this "
+            "is what lets the model choose rather than be corrected."
+        ),
+    )
+    tombstoned_competencies: list[TombstonedCompetencySchema] = Field(
+        default=[],
+        description=(
+            "Competencies a person deliberately removed. Blocked by key and by "
+            "embedding similarity, and named in the prompt as rejected -- a "
+            "deletion that only holds against the exact key leaks, because the "
+            "competency returns next crawl under a rephrasing."
+        ),
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded from the caller's previous proposal "
+            "run, if any. The AI service is stateless, so idempotency is driven "
+            "by this rather than by state kept here -- there is no persisted "
+            "'active proposal' the way a generated artifact's provenance carries one."
+        ),
+    )
+
+
+class ProposeModuleRequest(BaseModel):
+    competency_key: str = Field(description="The competency this module teaches.")
+    competency_label: str
+    competency_description: str = ""
+    level: str = Field(
+        default="beginner",
+        description="Target level to teach to: beginner/intermediate/advanced/expert.",
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded from the caller's previous proposal "
+            "run for this competency, if any. Idempotency is per module, not "
+            "corpus-wide -- modules are proposed one node at a time."
+        ),
+    )
