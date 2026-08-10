@@ -15,6 +15,9 @@ from rag.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
 
 _NO_POSITION: int = -1
 
+#: Separates project ids inside the single scalar Chroma will store for them.
+_PROJECT_DELIMITER = "|"
+
 
 class ChromaVectorStore:
     def __init__(
@@ -59,6 +62,10 @@ class ChromaVectorStore:
                 "source_system": chunk.source_system or "",
                 "created_at": chunk.created_at or "",
                 "created_at_ts": timestamp_from_iso(chunk.created_at),
+                # Chroma metadata holds scalars, so several projects become one
+                # delimited string. Delimited on both ends so a naive substring
+                # check can never match a partial id.
+                "project_ids": _encode_projects(chunk.project_ids),
             }
             if chunk.start_line is not None:
                 metadata["start_line"] = chunk.start_line
@@ -151,6 +158,7 @@ class ChromaVectorStore:
                     created_at=_optional_str(metadata.get("created_at")),
                     start_line=_optional_int(metadata.get("start_line")),
                     start_page=_optional_int(metadata.get("start_page")),
+                    project_ids=_decode_projects(metadata.get("project_ids")),
                 )
             )
 
@@ -272,6 +280,7 @@ class ChromaVectorStore:
                     created_at=_optional_str(metadata.get("created_at")),
                     start_line=_optional_int(metadata.get("start_line")),
                     start_page=_optional_int(metadata.get("start_page")),
+                    project_ids=_decode_projects(metadata.get("project_ids")),
                 )
             )
 
@@ -341,10 +350,31 @@ def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:
                 created_at=_optional_str(metadata.get("created_at")),
                 start_line=_optional_int(metadata.get("start_line")),
                 start_page=_optional_int(metadata.get("start_page")),
+                project_ids=_decode_projects(metadata.get("project_ids")),
             )
         )
 
     return chunks
+
+
+def _encode_projects(project_ids: tuple[str, ...]) -> str:
+    """Several project ids as one Chroma-storable scalar.
+
+    Delimited on both ends (``|a|b|``) so that a substring check can never match
+    half an id. Empty stays empty, which is what "belongs to no project" reads
+    back as.
+    """
+    if not project_ids:
+        return ""
+    joined = _PROJECT_DELIMITER.join(project_ids)
+    return f"{_PROJECT_DELIMITER}{joined}{_PROJECT_DELIMITER}"
+
+
+def _decode_projects(value: object) -> tuple[str, ...]:
+    """The inverse of :func:`_encode_projects`, tolerant of chunks written before it."""
+    if not isinstance(value, str) or not value:
+        return ()
+    return tuple(part for part in value.split(_PROJECT_DELIMITER) if part)
 
 
 def _source_role_from_metadata(metadata: Mapping[str, object]) -> SourceRole:

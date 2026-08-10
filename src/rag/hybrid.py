@@ -194,6 +194,11 @@ def hybrid_retrieve(
                 bool(filters.source_systems)
                 or filters.time_from is not None
                 or filters.time_to is not None
+                # Scoping to a project is applied after retrieval (see
+                # `where_filter_for_chroma`), so it must trigger the over-fetch
+                # or a project that is a small share of the corpus retrieves
+                # nothing at all.
+                or bool(filters.project_ids)
             )
         )
     )

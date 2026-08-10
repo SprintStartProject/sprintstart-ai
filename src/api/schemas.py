@@ -679,6 +679,15 @@ class ArtifactRunIngestRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     artifact_id: str
+    project_ids: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "The projects this artifact belongs to. Several is ordinary -- a "
+            "repository shared between two projects is one artifact serving both. "
+            "Empty means unscoped, which stays searchable from every project: "
+            "absent scope is not the same as excluded scope."
+        ),
+    )
     source_system: str | None = Field(
         default=None,
         alias="sourceSystem",
@@ -700,6 +709,26 @@ class ArtifactRunIngestRequest(BaseModel):
         default=None,
         alias="sourceUpdatedAt",
         description="Original source update timestamp, if known.",
+    )
+
+    state: str | None = Field(
+        default=None,
+        description="Issue state at the tracker ('OPEN'/'CLOSED'); null for non-issue.",
+    )
+    has_assignee: bool | None = Field(
+        default=None,
+        alias="hasAssignee",
+        description=(
+            "Whether somebody at the source is already assigned to this issue, or "
+            "null when the connector cannot tell. Starter-work mining withholds "
+            "an issue on a definite true -- taken work is not work a hire can "
+            "pick up. Null is 'unknown', never 'nobody': GitHub issues have "
+            "assignees this system does not ingest."
+        ),
+    )
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Issue labels (e.g. 'good first issue'); empty otherwise.",
     )
 
 

@@ -79,6 +79,49 @@ def test_chroma_query_round_trips_connector_fields() -> None:
     assert listed.connector_source_id == "owner/repo"
 
 
+def test_chroma_round_trips_several_project_ids_through_one_scalar() -> None:
+    # Chroma metadata holds scalars, so a chunk's projects are stored delimited
+    # and decoded on the way out. If that encoding is wrong the failure is silent
+    # -- material simply stops matching its own project.
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_project_ids",
+        client=client,
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                text="Some text",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            ),
+            Chunk(
+                id="chunk-2",
+                artifact_id="artifact-2",
+                filename="shared.md",
+                text="Other text",
+                embedding=[1.0, 0.0],
+            ),
+        ]
+    )
+
+    by_id = {
+        chunk.id: chunk
+        for chunk in store.query(embedding=[1.0, 0.0], top_k=5, min_score=0.0)
+    }
+
+    assert by_id["chunk-1"].project_ids == ("project-a", "project-b")
+    # Unscoped stays genuinely empty rather than becoming a one-element tuple of "".
+    assert by_id["chunk-2"].project_ids == ()
+
+    listed = {chunk.id: chunk for chunk in store.list_chunks(limit=5)}
+    assert listed["chunk-1"].project_ids == ("project-a", "project-b")
+
+
 def test_chroma_query_returns_empty_list_when_threshold_too_high() -> None:
     client = chromadb.EphemeralClient()
     store = ChromaVectorStore(

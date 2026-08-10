@@ -158,7 +158,9 @@ class AnthropicClient(LLMClient):
                 )
         return ChatResult(text="".join(text_parts), tool_calls=calls)
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         system, converted = _to_anthropic_messages(messages)
         try:
             response = self.client.messages.create(
@@ -166,6 +168,7 @@ class AnthropicClient(LLMClient):
                 max_tokens=self.max_tokens,
                 system=system,
                 messages=converted,
+                temperature=temperature if temperature is not None else omit,
             )
         except APIError as exc:
             raise LLMUnavailableError(

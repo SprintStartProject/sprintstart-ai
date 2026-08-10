@@ -41,8 +41,21 @@ def matches_retrieval_filters(
     chunk: Chunk | ScoredChunk,
     filters: RetrievalFilters | None,
 ) -> bool:
+    """Whether ``chunk`` survives ``filters``.
+
+    The project rule is the one worth stating. Material that belongs to **no**
+    project is visible to every project, for the same reason a chunk with no
+    ``connector_id`` is never excluded and a starter task with no track suits any
+    role: absent scope is not the same as excluded scope. Everything ingested
+    before this field existed has no project, and hiding all of it the moment a
+    caller starts scoping would look like the corpus had emptied.
+    """
     if filters is None:
         return True
+
+    if filters.project_ids and chunk.project_ids:
+        if not any(pid in filters.project_ids for pid in chunk.project_ids):
+            return False
 
     if filters.source_systems:
         if chunk.source_system not in filters.source_systems:
@@ -70,6 +83,17 @@ def matches_retrieval_filters(
 
 
 def where_filter_for_chroma(filters: RetrievalFilters | None) -> Any | None:
+    """The part of ``filters`` the store itself can apply.
+
+    ``project_ids`` is deliberately **not** pushed down. Chroma metadata values
+    are scalars, so a chunk's several projects are stored as one delimited
+    string, and there is no metadata operator that asks "contains this id" --
+    equality would silently drop every chunk shared between two projects, which
+    is the case the field exists for. It is applied in
+    :func:`matches_retrieval_filters` instead, and
+    :mod:`rag.hybrid` over-fetches when any filter is set so the post-filter has
+    candidates to work with.
+    """
     if filters is None:
         return None
 
