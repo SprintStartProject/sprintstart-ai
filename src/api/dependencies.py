@@ -12,8 +12,6 @@ from llm.base import LLMClient
 from llm.ollama_client import OllamaClient
 from llm.openai_client import OpenAIClient
 from llm.split_client import SplitLLMClient
-from onboarding.orchestrator import OnboardingOrchestrator
-from rag.retriever import get_bm25_cache
 from store.base import VectorStore
 from store.chroma_store import ChromaVectorStore
 
@@ -96,10 +94,3 @@ def get_orchestrator(
     source_state: SourceStateStore = Depends(get_source_state_store),
 ) -> ChatOrchestrator:
     return ChatOrchestrator(llm, store, source_state.get_exclusions())
-
-
-def get_onboarding_orchestrator(
-    llm: LLMClient = Depends(get_llm),
-    store: VectorStore = Depends(get_store),
-) -> OnboardingOrchestrator:
-    return OnboardingOrchestrator(llm, store, bm25_cache=get_bm25_cache())
