@@ -1,0 +1,16 @@
+title = "SprintStart gitleaks config"
+
+# Keep the full upstream ruleset; the allowlists below only carve out
+# patterns that cannot be secrets, so `gitleaks detect` stays meaningful.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Keyword arguments whose name ends in `key` but whose value is a bare Python
+identifier, e.g. `competency_key=_KEY`. The generic-api-key rule reads the
+`key=` prefix as an assignment and flags the rest of the argument list. A
+hardcoded secret would be a quoted literal, never an identifier.
+"""
+regexTarget = "line"
+regexes = ['''[A-Za-z_]*key\s*=\s*[A-Za-z_][A-Za-z0-9_]*\s*[,)]''']
