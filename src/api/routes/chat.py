@@ -4,10 +4,10 @@ from collections.abc import Iterator
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from agents.orchestrator import ChatOrchestrator
 from api.dependencies import (
+    OrchestratorFactory,
     get_llm,
-    get_orchestrator,
+    get_orchestrator_factory,
     get_source_state_store,
     get_store,
 )
@@ -35,23 +35,38 @@ _NO_FILTERED_RESULTS_MESSAGE = (
 )
 
 
-def _retrieval_filters_from_request(body: ChatRequest) -> RetrievalFilters | None:
+def _retrieval_filters_from_request(body: ChatRequest) -> RetrievalFilters:
+    """Build the retrieval filters for this request.
+
+    The project scope is always present — it is what keeps one project's
+    answers and citations out of another's. Source-system and time bounds are
+    optional and only set when the caller asked for them.
+    """
     if body.filters is None:
-        return None
-
-    source_systems = body.filters.source_systems or None
-
-    if (
-        source_systems is None
-        and body.filters.time_from is None
-        and body.filters.time_to is None
-    ):
-        return None
+        return RetrievalFilters(project_id=body.project_id)
 
     return RetrievalFilters(
-        source_systems=source_systems,
+        project_id=body.project_id,
+        source_systems=body.filters.source_systems or None,
         time_from=body.filters.time_from,
         time_to=body.filters.time_to,
+    )
+
+
+def _has_narrowing_filters(body: ChatRequest) -> bool:
+    """Whether the caller narrowed the corpus beyond the project scope.
+
+    Only a caller-chosen narrowing switches /chat from the agentic path to the
+    single-shot filtered retrieval below; the always-present project scope must
+    not, or the agent would never run again.
+    """
+    if body.filters is None:
+        return False
+
+    return bool(
+        body.filters.source_systems
+        or body.filters.time_from is not None
+        or body.filters.time_to is not None
     )
 
 
@@ -66,14 +81,14 @@ def chat(
     llm: LLMClient = Depends(get_llm),
     store: VectorStore = Depends(get_store),
     source_state: SourceStateStore = Depends(get_source_state_store),
-    orchestrator: ChatOrchestrator = Depends(get_orchestrator),
+    build_orchestrator: OrchestratorFactory = Depends(get_orchestrator_factory),
 ) -> StreamingResponse:
     def event_stream() -> Iterator[str]:
         try:
             filters = _retrieval_filters_from_request(body)
 
-            if filters is None:
-                yield from orchestrator.stream(
+            if not _has_narrowing_filters(body):
+                yield from build_orchestrator(filters).stream(
                     body.question,
                     body.history,
                 )

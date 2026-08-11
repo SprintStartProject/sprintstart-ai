@@ -11,12 +11,14 @@ from fastapi import APIRouter, Depends
 
 from api.dependencies import get_ingestion_metadata_store, get_llm, get_store
 from api.schemas import (
+    ArtifactDeindexResponse,
     ArtifactRunIngestRequest,
     ArtifactRunIngestResponse,
     RunArtifactsSyncRequest,
     RunArtifactsSyncResponse,
 )
 from ingestion.mapper import to_chunk
+from ingestion.membership import revoke_removed_memberships
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
 from ingestion.parser import parse
 from ingestion.source_role import classify_source_role
@@ -102,6 +104,9 @@ def _ingest_one(
 
     source_system = _source_system_for(artifact)
 
+    project_ids = tuple(dict.fromkeys(pid for pid in artifact.project_ids if pid))
+    revoke_removed_memberships(store, artifact.artifact_id, project_ids)
+
     record = ArtifactRecord(
         id=artifact.artifact_id,
         filename=filename,
@@ -116,6 +121,7 @@ def _ingest_one(
         source_url=artifact.source_url,
         artifact_type=artifact.artifact_type,
         language=artifact.language,
+        project_ids=project_ids,
     )
 
     if len(content) > max_length:
@@ -181,6 +187,7 @@ def _ingest_one(
                     source_created_at=artifact.source_created_at,
                     source_updated_at=artifact.source_updated_at,
                     source_system=source_system,
+                    project_ids=artifact.project_ids,
                 ),
                 position=index,
                 connector_id=source_system.lower(),
@@ -261,13 +268,25 @@ def ingest_run(
         len(body.artifacts_to_deindex),
     )
 
+    deindexed: list[ArtifactDeindexResponse] = []
     for artifact_id in body.artifacts_to_deindex:
         try:
             deleted_count = store.delete(artifact_id, exclude_ids=[])
             if deleted_count > 0:
                 metadata_store.mark_deindexed(artifact_id, _utc_now())
-        except Exception:
+        except Exception as exc:
+            # A failed deletion leaves the artifact retrievable. Report it so
+            # the backend retries instead of reading the 200 as "revoked".
             logger.exception("Failed to deindex artifact %s", artifact_id)
+            deindexed.append(
+                ArtifactDeindexResponse(
+                    artifact_id=artifact_id,
+                    status="failed",
+                    error_message=str(exc),
+                )
+            )
+        else:
+            deindexed.append(ArtifactDeindexResponse(artifact_id=artifact_id))
 
     results: list[ArtifactRunIngestResponse] = []
     if body.artifacts_to_ingest:
@@ -282,10 +301,12 @@ def ingest_run(
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             results = list(executor.map(_ingest, body.artifacts_to_ingest))
 
+    failed_deindexes = sum(1 for entry in deindexed if entry.status == "failed")
     logger.info(
-        "Sync complete: %d ingested, %d deindexed",
+        "Sync complete: %d ingested, %d deindexed (%d deindex failures)",
         len(results),
-        len(body.artifacts_to_deindex),
+        len(deindexed) - failed_deindexes,
+        failed_deindexes,
     )
 
-    return RunArtifactsSyncResponse(artifacts=results)
+    return RunArtifactsSyncResponse(artifacts=results, deindexed=deindexed)

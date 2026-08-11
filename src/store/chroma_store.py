@@ -7,10 +7,15 @@ from chromadb.api.types import Metadata, PyEmbeddings
 
 from ingestion.source_role import SourceRole
 from rag.filters import (
+    PROJECT_IDS_METADATA_KEY,
+    decode_project_ids,
+    encode_project_ids,
     normalize_source_system,
+    project_metadata_key,
     timestamp_from_iso,
     where_filter_for_chroma,
 )
+from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
 
 _NO_POSITION: int = -1
@@ -41,9 +46,9 @@ class ChromaVectorStore:
 
         embeddings: list[list[float]] = [chunk.embedding for chunk in chunks]
 
-        metadatas: list[dict[str, str | int | float]] = []
+        metadatas: list[dict[str, str | int | float | bool]] = []
         for chunk in chunks:
-            metadata: dict[str, str | int | float] = {
+            metadata: dict[str, str | int | float | bool] = {
                 "artifact_id": chunk.artifact_id,
                 "filename": chunk.filename,
                 "position": (
@@ -59,15 +64,30 @@ class ChromaVectorStore:
                 "source_system": chunk.source_system or "",
                 "created_at": chunk.created_at or "",
                 "created_at_ts": timestamp_from_iso(chunk.created_at),
+                PROJECT_IDS_METADATA_KEY: encode_project_ids(chunk.project_ids),
             }
+            # One boolean marker per project so Chroma can filter membership
+            # server-side ($eq on a key documents of other projects don't have);
+            # metadata values themselves cannot be lists.
+            for project_id in chunk.project_ids:
+                metadata[project_metadata_key(project_id)] = True
             if chunk.start_line is not None:
                 metadata["start_line"] = chunk.start_line
             if chunk.start_page is not None:
                 metadata["start_page"] = chunk.start_page
             metadatas.append(metadata)
 
+        ids = [chunk.id for chunk in chunks]
+
+        # Chroma's upsert *merges* metadata instead of replacing it, so a key
+        # that is no longer written would survive a re-ingest — including the
+        # ``project:<id>`` marker of a project the artifact was removed from,
+        # which would keep it retrievable from that project forever. Deleting
+        # first makes each chunk's metadata exactly what we write here.
+        self._collection.delete(ids=ids)
+
         self._collection.upsert(
-            ids=[chunk.id for chunk in chunks],
+            ids=ids,
             documents=[chunk.text for chunk in chunks],
             embeddings=cast(PyEmbeddings, embeddings),
             metadatas=cast(list[Metadata], metadatas),
@@ -79,11 +99,17 @@ class ChromaVectorStore:
         top_k: int,
         min_score: float,
         filters: RetrievalFilters | None = None,
+        exclude_roles: frozenset[SourceRole] = frozenset(),
+        exclusions: SourceExclusions = SourceExclusions(),
     ) -> list[ScoredChunk]:
-        if self._collection.count() == 0:
+        if self._collection.count() == 0 or top_k <= 0:
             return []
 
-        where_filter = where_filter_for_chroma(filters)
+        # Every constraint goes into the ``where`` clause, which Chroma applies
+        # before limiting to ``n_results``. Filtering the returned window
+        # instead would let higher-ranked ineligible chunks push every eligible
+        # one out of it.
+        where_filter = where_filter_for_chroma(filters, exclude_roles, exclusions)
 
         raw_result = self._collection.query(
             query_embeddings=[embedding],
@@ -151,6 +177,9 @@ class ChromaVectorStore:
                     created_at=_optional_str(metadata.get("created_at")),
                     start_line=_optional_int(metadata.get("start_line")),
                     start_page=_optional_int(metadata.get("start_page")),
+                    project_ids=decode_project_ids(
+                        metadata.get(PROJECT_IDS_METADATA_KEY)
+                    ),
                 )
             )
 
@@ -272,6 +301,9 @@ class ChromaVectorStore:
                     created_at=_optional_str(metadata.get("created_at")),
                     start_line=_optional_int(metadata.get("start_line")),
                     start_page=_optional_int(metadata.get("start_page")),
+                    project_ids=decode_project_ids(
+                        metadata.get(PROJECT_IDS_METADATA_KEY)
+                    ),
                 )
             )
 
@@ -281,8 +313,55 @@ class ChromaVectorStore:
         raw_result = self._collection.get(include=[])
         return frozenset(str(chunk_id) for chunk_id in raw_result["ids"])
 
+    def retrieval_fingerprints(self) -> frozenset[str]:
+        raw_result = self._collection.get(include=["metadatas"])
+        metadatas = cast(
+            list[Mapping[str, object]],
+            raw_result.get("metadatas") or [],
+        )
+        return frozenset(
+            _retrieval_fingerprint(str(chunk_id), metadata)
+            for chunk_id, metadata in zip(raw_result["ids"], metadatas, strict=True)
+        )
+
+    def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
+        raw_result = self._collection.get(
+            where={"artifact_id": artifact_id},
+            include=["metadatas"],
+        )
+        metadatas = cast(
+            list[Mapping[str, object]],
+            raw_result.get("metadatas") or [],
+        )
+        return frozenset(
+            project_id
+            for metadata in metadatas
+            for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
+        )
+
     def count(self) -> int:
         return self._collection.count()
+
+
+# Metadata a cached BM25 index filters on. Chunk ids are content-hashed, so an
+# id already stands for the chunk's text — but not for any of these, which the
+# backend can change without touching the content (moving an artifact between
+# projects, reclassifying it as test material, disabling its connector). They
+# belong in the fingerprint or a stale index keeps filtering on the old values.
+_FILTER_METADATA_KEYS = (
+    PROJECT_IDS_METADATA_KEY,
+    "source_role",
+    "connector_id",
+    "connector_source_id",
+    "source_system",
+    "created_at",
+)
+
+
+def _retrieval_fingerprint(chunk_id: str, metadata: Mapping[str, object]) -> str:
+    parts = [chunk_id]
+    parts.extend(str(metadata.get(key, "")) for key in _FILTER_METADATA_KEYS)
+    return "\x00".join(parts)
 
 
 def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:
@@ -341,6 +420,7 @@ def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:
                 created_at=_optional_str(metadata.get("created_at")),
                 start_line=_optional_int(metadata.get("start_line")),
                 start_page=_optional_int(metadata.get("start_page")),
+                project_ids=decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)),
             )
         )
 

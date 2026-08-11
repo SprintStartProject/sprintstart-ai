@@ -65,16 +65,27 @@ The service runs on port `8000`.
 | `CHUNK_OVERLAP` | `64` | Number of characters reused between consecutive chunks to preserve context when splitting large chunks |
 | `CONTEXT_AWARE_CHUNKING_MAX_CHARS` | `24000` | Character-count ceiling (a proxy for a token limit — there is no tokenizer in this project) for text/PDF content sent to the LLM-based context-aware chunker. Above this, ingestion falls back to the plain `chunk_text` strategy. See [Context-aware chunking](#context-aware-chunking). |
 
+## Project separation
+
+Artifacts belong to one or more **projects** (the backend's `artifact_projects` mapping), and every retrieval-backed feature is scoped to exactly one project. Concretely:
+
+- **Ingest** carries the membership: `projectIds` on `POST /api/v1/ingest` and on each artifact of `POST /api/v1/ingest/sync`. It is written into the chunk metadata (as a delimited `project_ids` string plus one `project:<id>` marker key that Chroma can filter on server-side) and into the ingestion index.
+- **Retrieval** takes a `project_id` filter that is enforced on both halves of hybrid retrieval — the Chroma `where` clause and the in-memory/BM25 path (`rag/filters.py`) — as well as in the corpus-scanning agent tools (`grep`, `fetch_file`).
+- **Requests** must name the project: `projectId` is required on `/chat`, `/onboarding/path`, `/onboarding/path/yaml`, `/onboarding/blueprints/generate`, `/insights/knowledge-gaps/detect`, and `/insights/faq/group`. The backend authorizes the caller for that project (`ProjectAuthorization`) and passes it through.
+- **Blueprints** are project-qualified: generated scopes are `project:<projectId>|global` and `project:<projectId>|area:<name>`, and the corpus fingerprint that makes generation idempotent covers only that project's chunks. Blueprints scoped to another project — or unqualified, i.e. generated before project separation — are ignored when a path is assembled.
+
+Filtering is **fail-closed**: a chunk with no project association is invisible to every project rather than visible to all of them. Chunks ingested before `projectIds` was sent therefore stop being retrievable — re-run a full `POST /api/v1/ingest/sync` with `projectIds` populated to backfill them.
+
 ## API Endpoints
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/health` | Reports service health including LLM backend status. Returns `503` if Ollama is unreachable. |
-| `POST` | `/api/v1/ingest` | Parses, chunks, and embeds a document and stores it in the vector store. Re-ingesting the same `artifact_id` replaces existing chunks. Supports text files and images (send image content as base64; requires `OLLAMA_VISION_MODEL`). Text/PDF content can optionally be chunked using the LLM-based [context-aware chunker](#context-aware-chunking) (opt-in, off by default). |
-| `POST` | `/api/v1/chat` | Retrieves relevant chunks and streams a generated answer as Server-Sent Events (SSE). |
+| `POST` | `/api/v1/ingest` | Parses, chunks, and embeds a document and stores it in the vector store. Re-ingesting the same `artifact_id` replaces existing chunks. `projectIds` records which projects may retrieve it (see [Project separation](#project-separation)). Supports text files and images (send image content as base64; requires `OLLAMA_VISION_MODEL`). Text/PDF content can optionally be chunked using the LLM-based [context-aware chunker](#context-aware-chunking) (opt-in, off by default). |
+| `POST` | `/api/v1/chat` | Retrieves relevant chunks from the given `projectId` and streams a generated answer as Server-Sent Events (SSE). |
 | `POST` | `/api/v1/title` | Generates a short descriptive title from a user prompt. |
-| `POST` | `/api/v1/onboarding/path` | Generates a personalized onboarding path (SSE). Blueprints are passed in by the backend on each request — the service is stateless. |
-| `POST` | `/api/v1/onboarding/blueprints/generate` | Batch job: generates `source: generated` blueprints from the corpus and returns them. The backend owns persistence — it passes its active blueprints in and stores the results. |
+| `POST` | `/api/v1/onboarding/path` | Generates a personalized onboarding path for one `projectId` (SSE). Blueprints are passed in by the backend on each request — the service is stateless. |
+| `POST` | `/api/v1/onboarding/blueprints/generate` | Batch job: generates `source: generated` blueprints from one project's corpus and returns them. The backend owns persistence — it passes its active blueprints in and stores the results. |
 
 ### Chat SSE stream
 
@@ -110,9 +121,9 @@ Resulting chunks carry extra metadata so context/overlap portions of a chunk's c
 
 ## AI-proposed onboarding blueprints
 
-Onboarding paths are assembled from versioned **blueprints** scoped by `global` or `area:<name>`. Blueprints carry a `source`: `authored` (human-written) or `generated` (drafted by the AI from the ingested corpus). The backend owns blueprint persistence, versioning, and rollback — the AI service is stateless and only returns generated data.
+Onboarding paths are assembled from versioned **blueprints** scoped by project and audience: `project:<projectId>|global` or `project:<projectId>|area:<name>`. Blueprints carry a `source`: `authored` (human-written) or `generated` (drafted by the AI from the ingested corpus). The backend owns blueprint persistence, versioning, and rollback — the AI service is stateless and only returns generated data.
 
-The generation job analyzes the corpus and returns proposed blueprints for the backend to persist. Every generated step is **grounded** (cites an ingested chunk), the job is **idempotent** (a blueprint records the `corpus_fingerprint` it was drafted from, so an unchanged corpus is a no-op), and **human-owned invariants are protected** — it may not remove or downgrade a `required` or `invariant: true` step; such changes are re-injected and the outcome is escalated, never silently applied.
+The generation job analyzes the requested project's corpus and returns proposed blueprints for the backend to persist. Every generated step is **grounded** (cites an ingested chunk), the job is **idempotent** (a blueprint records the `corpus_fingerprint` it was drafted from, so an unchanged corpus is a no-op), and **human-owned invariants are protected** — it may not remove or downgrade a `required` or `invariant: true` step; such changes are re-injected and the outcome is escalated, never silently applied.
 
 Blueprint management (trigger generation, list versions, rollback) is exposed through the backend API at `POST /api/v1/onboarding/blueprints/generate`, `GET /api/v1/onboarding/blueprints/{scope}/versions`, and `POST /api/v1/onboarding/blueprints/{scope}/rollback`.
 

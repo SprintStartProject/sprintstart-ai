@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+from src.ingestion.source_role import SourceRole
 from src.rag.hybrid import (
     BM25IndexCache,
     hybrid_retrieve,
@@ -18,16 +19,19 @@ def make_chunk(
     source_role: str = "primary",
     connector_id: str | None = None,
     connector_source_id: str | None = None,
+    project_ids: tuple[str, ...] = (),
+    artifact_id: str = "artifact-1",
 ) -> Chunk:
     return Chunk(
         id=chunk_id,
-        artifact_id="artifact-1",
+        artifact_id=artifact_id,
         filename="doc.md",
         text=text,
         embedding=embedding,
         source_role=source_role,  # type: ignore[arg-type]
         connector_id=connector_id,
         connector_source_id=connector_source_id,
+        project_ids=project_ids,
     )
 
 
@@ -438,3 +442,298 @@ def test_hybrid_retrieval_applies_source_and_time_filters() -> None:
     )
 
     assert [chunk.id for chunk in result] == ["chunk-recent-code"]
+
+
+def test_bm25_cache_invalidates_when_project_membership_changes() -> None:
+    """Reassigning an artifact between projects must invalidate the cache.
+
+    Chunk ids are content-hashed, so moving an unchanged artifact from one
+    project to another leaves the id set identical. An ids-only fingerprint
+    would keep serving the cached index, whose chunks still carry the old
+    membership, and BM25 would go on answering the project the artifact was
+    moved out of.
+    """
+    store = StubVectorStore()
+    cache = BM25IndexCache()
+
+    store.add(
+        [
+            make_chunk(
+                chunk_id="chunk-1",
+                text="deployment runbook",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a",),
+            )
+        ]
+    )
+    first_index = cache.get(store)
+    assert first_index.chunks[0].project_ids == ("project-a",)
+
+    store.add(
+        [
+            make_chunk(
+                chunk_id="chunk-1",
+                text="deployment runbook",
+                embedding=[1.0, 0.0],
+                project_ids=("project-b",),
+            )
+        ]
+    )
+    second_index = cache.get(store)
+
+    assert first_index is not second_index
+    assert second_index.chunks[0].project_ids == ("project-b",)
+
+
+def test_bm25_cache_invalidates_when_source_role_changes() -> None:
+    store = StubVectorStore()
+    cache = BM25IndexCache()
+
+    store.add([make_chunk("chunk-1", "fixture data", [1.0, 0.0])])
+    first_index = cache.get(store)
+
+    store.add([make_chunk("chunk-1", "fixture data", [1.0, 0.0], source_role="test")])
+    second_index = cache.get(store)
+
+    assert first_index is not second_index
+    assert second_index.chunks[0].source_role == "test"
+
+
+def test_bm25_keeps_project_chunk_ranked_below_foreign_chunks() -> None:
+    """Ineligible chunks must be dropped from the ranking before truncation.
+
+    The one chunk of project-b scores worst on BM25, and there are more
+    higher-scoring project-a chunks than the fetch budget. Filtering after
+    truncation would cut the ranking down to project-a chunks only and then
+    filter all of them away, leaving project-b with nothing.
+    """
+    llm = StubLLMClient(embedding=[0.0, 1.0])
+    store = StubVectorStore()
+
+    # Filler so the query terms stay discriminative enough for BM25 to score
+    # the documents below at all.
+    filler = [
+        make_chunk(
+            chunk_id=f"filler-{index}",
+            text=f"unrelated release notes topic {index}",
+            embedding=[1.0, 0.0],
+            project_ids=("project-a",),
+            artifact_id=f"artifact-filler-{index}",
+        )
+        for index in range(100)
+    ]
+    # 60 full-term matches from another project — four times the fetch budget
+    # (top_k * the filter over-fetch factor) — all ranked above the one chunk
+    # this project is allowed to see, which matches two of the three terms.
+    foreign = [
+        make_chunk(
+            chunk_id=f"foreign-{index}",
+            text="database migration rollback",
+            embedding=[1.0, 0.0],
+            project_ids=("project-a",),
+            artifact_id=f"artifact-foreign-{index}",
+        )
+        for index in range(60)
+    ]
+    mine = make_chunk(
+        chunk_id="mine",
+        text="database migration",
+        embedding=[1.0, 0.0],
+        project_ids=("project-b",),
+        artifact_id="artifact-mine",
+    )
+    store.add([*filler, *foreign, mine])
+
+    result = hybrid_retrieve(
+        question="database migration rollback",
+        llm=llm,
+        store=store,
+        top_k=3,
+        min_score=0.9,  # semantic half returns nothing: this is the BM25 path
+        bm25_cache=BM25IndexCache(),
+        filters=RetrievalFilters(project_id="project-b"),
+    )
+
+    assert [chunk.id for chunk in result] == ["mine"]
+
+
+class NonPushdownStore(StubVectorStore):
+    """A store that cannot apply role/source exclusions in its own query.
+
+    ``VectorStore`` is a Protocol and Chroma's ``where`` clause is not the only
+    possible backend, so ``hybrid_retrieve`` must not depend on the store having
+    filtered. This double ranks and truncates while ignoring the exclusions —
+    the worst case the widening fetch exists to cover.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.query_calls = 0
+
+    def query(
+        self,
+        embedding: list[float],
+        top_k: int,
+        min_score: float,
+        filters: RetrievalFilters | None = None,
+        exclude_roles: frozenset[SourceRole] = frozenset(),
+        exclusions: SourceExclusions = SourceExclusions(),
+    ) -> list[ScoredChunk]:
+        self.query_calls += 1
+        return super().query(
+            embedding=embedding,
+            top_k=top_k,
+            min_score=min_score,
+            filters=filters,
+        )
+
+
+def _crowded_corpus(store: StubVectorStore, excluded_count: int) -> None:
+    """``excluded_count`` test-role chunks ranked above one eligible chunk."""
+    store.add(
+        [
+            make_chunk(
+                chunk_id=f"excluded-{index}",
+                text="deployment runbook rollback",
+                embedding=[1.0, 0.0],  # perfect match: ranked top
+                source_role="test",
+                artifact_id=f"artifact-excluded-{index}",
+            )
+            for index in range(excluded_count)
+        ]
+    )
+    store.add(
+        [
+            make_chunk(
+                chunk_id="eligible",
+                text="deployment runbook rollback",
+                embedding=[1.0, 0.05],  # very slightly worse: ranked last
+                artifact_id="artifact-eligible",
+            )
+        ]
+    )
+
+
+def test_semantic_half_finds_eligible_chunk_behind_a_wall_of_excluded_ones() -> None:
+    """Regression: excluded chunks must be dropped before the semantic cutoff.
+
+    80 test-role chunks outrank the single eligible chunk — far more than the
+    fetch budget of ``top_k * 5``. Truncating to that budget first leaves
+    nothing but test chunks, which the role filter then removes entirely, so
+    retrieval returns nothing at all. Over-fetching by a fixed multiplier only
+    moves the threshold; it cannot fix the ordering.
+    """
+    store = NonPushdownStore()
+    _crowded_corpus(store, excluded_count=80)
+
+    result = hybrid_retrieve(
+        question="deployment runbook rollback",
+        llm=StubLLMClient(embedding=[1.0, 0.0]),
+        store=store,
+        top_k=3,
+        min_score=0.0,
+        bm25_cache=BM25IndexCache(),
+        exclude_roles=frozenset({"test"}),
+    )
+
+    assert [chunk.id for chunk in result] == ["eligible"]
+
+
+def test_semantic_only_path_finds_eligible_chunk_behind_excluded_ones() -> None:
+    """The same invariant on the large-corpus path, which skips BM25 entirely."""
+
+    class LargeNonPushdownStore(NonPushdownStore):
+        def count(self) -> int:
+            return 10_001
+
+    store = LargeNonPushdownStore()
+    _crowded_corpus(store, excluded_count=80)
+
+    result = hybrid_retrieve(
+        question="deployment runbook rollback",
+        llm=StubLLMClient(embedding=[1.0, 0.0]),
+        store=store,
+        top_k=3,
+        min_score=0.0,
+        bm25_cache=BM25IndexCache(),
+        exclude_roles=frozenset({"test"}),
+    )
+
+    assert [chunk.id for chunk in result] == ["eligible"]
+
+
+def test_disabled_source_cannot_crowd_out_eligible_chunk() -> None:
+    """The same invariant for connector/source exclusions, not just roles."""
+    store = NonPushdownStore()
+    store.add(
+        [
+            make_chunk(
+                chunk_id=f"disabled-{index}",
+                text="deployment runbook rollback",
+                embedding=[1.0, 0.0],
+                connector_id="github",
+                connector_source_id="owner/disabled-repo",
+                artifact_id=f"artifact-disabled-{index}",
+            )
+            for index in range(80)
+        ]
+    )
+    store.add(
+        [
+            make_chunk(
+                chunk_id="eligible",
+                text="deployment runbook rollback",
+                embedding=[1.0, 0.05],
+                connector_id="github",
+                connector_source_id="owner/enabled-repo",
+                artifact_id="artifact-eligible",
+            )
+        ]
+    )
+
+    result = hybrid_retrieve(
+        question="deployment runbook rollback",
+        llm=StubLLMClient(embedding=[1.0, 0.0]),
+        store=store,
+        top_k=3,
+        min_score=0.0,
+        bm25_cache=BM25IndexCache(),
+        exclusions=SourceExclusions(
+            sources=frozenset({("github", "owner/disabled-repo")})
+        ),
+    )
+
+    assert [chunk.id for chunk in result] == ["eligible"]
+
+
+def test_store_that_filters_server_side_is_queried_once() -> None:
+    """The widening fetch is a safety net, not the normal path.
+
+    A store that applies the exclusions itself returns a full page of eligible
+    results first time, so no second round-trip is needed.
+    """
+
+    class CountingStore(StubVectorStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.query_calls = 0
+
+        def query(self, *args: object, **kwargs: object) -> list[ScoredChunk]:
+            self.query_calls += 1
+            return super().query(*args, **kwargs)  # type: ignore[arg-type]
+
+    store = CountingStore()
+    _crowded_corpus(store, excluded_count=80)
+
+    result = hybrid_retrieve(
+        question="deployment runbook rollback",
+        llm=StubLLMClient(embedding=[1.0, 0.0]),
+        store=store,
+        top_k=3,
+        min_score=0.0,
+        bm25_cache=BM25IndexCache(),
+        exclude_roles=frozenset({"test"}),
+    )
+
+    assert [chunk.id for chunk in result] == ["eligible"]
+    assert store.query_calls == 1

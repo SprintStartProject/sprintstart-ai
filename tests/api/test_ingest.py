@@ -345,3 +345,128 @@ def test_ingest_contextualize_prepends_context_block(
     assert response.status_code == 200
     body = response.json()
     assert body["chunks"][0]["text"].startswith("Context: onboarding notes.")
+
+
+def test_ingest_stores_project_ids_on_chunks_and_record(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    response = client.post(
+        "/api/v1/ingest",
+        json={
+            "artifact_id": "artifact-1",
+            "filename": "notes.txt",
+            "content": "SprintStart uses OLLAMA_EMBED_MODEL for embeddings.",
+            "projectIds": ["project-1"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert vector_store.chunks
+    for chunk in vector_store.chunks:
+        assert chunk.project_ids == ("project-1",)
+
+    record = metadata_store.get_artifact("artifact-1")
+    assert record is not None
+    assert record.project_ids == ("project-1",)
+
+
+class FailingEmbedBatchLLMClient(StubLLMClient):
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        raise LLMUnavailableError("embedding backend unavailable")
+
+
+def test_ingest_revokes_lost_membership_before_embedding(
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    """Losing a project must take effect even if the re-ingest never completes.
+
+    Chunks are only replaced after embedding succeeds, so an embedding outage
+    would otherwise leave the old ``project-1`` chunks queryable from a project
+    the artifact no longer belongs to.
+    """
+    app.dependency_overrides[get_store] = lambda: vector_store
+    app.dependency_overrides[get_llm] = lambda: StubLLMClient()
+    app.dependency_overrides[get_ingestion_metadata_store] = lambda: metadata_store
+
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/ingest",
+            json={
+                "artifact_id": "artifact-1",
+                "filename": "notes.txt",
+                "content": "SprintStart uses OLLAMA_EMBED_MODEL for embeddings.",
+                "projectIds": ["project-1"],
+            },
+        )
+        assert vector_store.project_ids_for_artifact("artifact-1") == frozenset(
+            {"project-1"}
+        )
+
+        app.dependency_overrides[get_llm] = lambda: FailingEmbedBatchLLMClient()
+        response = TestClient(app).post(
+            "/api/v1/ingest",
+            json={
+                "artifact_id": "artifact-1",
+                "filename": "notes.txt",
+                "content": "SprintStart uses OLLAMA_EMBED_MODEL for embeddings.",
+                "projectIds": ["project-2"],
+            },
+        )
+
+        assert response.status_code == 503
+        assert vector_store.project_ids_for_artifact("artifact-1") == frozenset()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ingest_rejects_project_id_containing_delimiter(client: TestClient) -> None:
+    """``|`` is the metadata delimiter: ``"a|b"`` would decode as two projects."""
+    response = client.post(
+        "/api/v1/ingest",
+        json={
+            "artifact_id": "artifact-1",
+            "filename": "notes.txt",
+            "content": "content",
+            "projectIds": ["project-1|project-2"],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_ingest_rejects_blank_project_id(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/ingest",
+        json={
+            "artifact_id": "artifact-1",
+            "filename": "notes.txt",
+            "content": "content",
+            "projectIds": ["   "],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_ingest_normalizes_whitespace_and_duplicate_project_ids(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    response = client.post(
+        "/api/v1/ingest",
+        json={
+            "artifact_id": "artifact-1",
+            "filename": "notes.txt",
+            "content": "SprintStart uses OLLAMA_EMBED_MODEL for embeddings.",
+            "projectIds": [" project-1 ", "project-1"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert vector_store.chunks
+    for chunk in vector_store.chunks:
+        assert chunk.project_ids == ("project-1",)

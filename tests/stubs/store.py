@@ -1,4 +1,6 @@
-from rag.filters import matches_retrieval_filters
+from ingestion.source_role import SourceRole
+from rag.filters import encode_project_ids, matches_retrieval_filters
+from rag.source_filter import SourceExclusions, is_excluded
 from rag.types import Chunk, RetrievalFilters, ScoredChunk
 
 
@@ -27,11 +29,20 @@ class StubVectorStore:
         top_k: int,
         min_score: float,
         filters: RetrievalFilters | None = None,
+        exclude_roles: frozenset[SourceRole] = frozenset(),
+        exclusions: SourceExclusions = SourceExclusions(),
     ) -> list[ScoredChunk]:
+        """Like Chroma: every constraint is applied before the ``top_k`` cutoff."""
         scored: list[ScoredChunk] = []
 
         for chunk in self.chunks:
             if not matches_retrieval_filters(chunk, filters):
+                continue
+
+            if exclude_roles and chunk.source_role in exclude_roles:
+                continue
+
+            if is_excluded(chunk, exclusions):
                 continue
 
             score = cosine_similarity(embedding, chunk.embedding)
@@ -58,6 +69,7 @@ class StubVectorStore:
                     created_at=chunk.created_at,
                     start_line=chunk.start_line,
                     start_page=chunk.start_page,
+                    project_ids=chunk.project_ids,
                 )
             )
 
@@ -100,6 +112,30 @@ class StubVectorStore:
 
     def all_ids(self) -> frozenset[str]:
         return frozenset(chunk.id for chunk in self.chunks)
+
+    def retrieval_fingerprints(self) -> frozenset[str]:
+        return frozenset(
+            "\x00".join(
+                [
+                    chunk.id,
+                    encode_project_ids(chunk.project_ids),
+                    chunk.source_role,
+                    chunk.connector_id or "",
+                    chunk.connector_source_id or "",
+                    chunk.source_system or "",
+                    chunk.created_at or "",
+                ]
+            )
+            for chunk in self.chunks
+        )
+
+    def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
+        return frozenset(
+            project_id
+            for chunk in self.chunks
+            if chunk.artifact_id == artifact_id
+            for project_id in chunk.project_ids
+        )
 
     def count(self) -> int:
         return len(self.chunks)

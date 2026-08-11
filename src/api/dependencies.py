@@ -1,5 +1,6 @@
 import logging
 import os
+from collections.abc import Callable
 from functools import lru_cache
 
 from fastapi import Depends
@@ -14,6 +15,7 @@ from llm.openai_client import OpenAIClient
 from llm.split_client import SplitLLMClient
 from onboarding.orchestrator import OnboardingOrchestrator
 from rag.retriever import get_bm25_cache
+from rag.types import RetrievalFilters
 from store.base import VectorStore
 from store.chroma_store import ChromaVectorStore
 
@@ -90,12 +92,26 @@ def get_source_state_store() -> SourceStateStore:
     return SourceStateStore(path=path)
 
 
-def get_orchestrator(
+OrchestratorFactory = Callable[[RetrievalFilters | None], ChatOrchestrator]
+
+
+def get_orchestrator_factory(
     llm: LLMClient = Depends(get_llm),
     store: VectorStore = Depends(get_store),
     source_state: SourceStateStore = Depends(get_source_state_store),
-) -> ChatOrchestrator:
-    return ChatOrchestrator(llm, store, source_state.get_exclusions())
+) -> OrchestratorFactory:
+    """Build chat orchestrators bound to a request's retrieval filters.
+
+    The filters (notably the project scope) come from the request body, which
+    a dependency cannot see, so the route gets a factory rather than a
+    ready-made orchestrator.
+    """
+    exclusions = source_state.get_exclusions()
+
+    def build(filters: RetrievalFilters | None) -> ChatOrchestrator:
+        return ChatOrchestrator(llm, store, exclusions, filters)
+
+    return build
 
 
 def get_onboarding_orchestrator(

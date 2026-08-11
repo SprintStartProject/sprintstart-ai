@@ -1,7 +1,8 @@
 """AI-authoring of onboarding blueprints from the ingested corpus.
 
-A batch, re-runnable job that drafts/updates blueprints (``scope: global`` and
-``scope: area:<name>``) as ``source: generated`` artifacts. It reuses the
+A batch, re-runnable job that drafts/updates one project's blueprints
+(``scope: project:<id>|global`` and ``scope: project:<id>|area:<name>``) as
+``source: generated`` artifacts. It reuses the
 existing retrieval layer (:func:`rag.hybrid.hybrid_retrieve`) and the
 ``LLMClient`` abstraction — there is no separate ingest or retrieval path.
 
@@ -41,19 +42,21 @@ from onboarding.models import (
     StepRecord,
 )
 from onboarding.registry import resolve, upsert_step
-from onboarding.scope import GLOBAL, Scope
+from onboarding.scope import Scope
 from onboarding.similarity import (
     SIMILARITY_THRESHOLD,
     cosine_similarity,
     step_text,
 )
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.types import ScoredChunk
+from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
-OutcomeStatus = Literal["created", "updated", "unchanged", "escalated", "skipped"]
+OutcomeStatus = Literal[
+    "created", "updated", "unchanged", "escalated", "skipped", "invalidated"
+]
 
 _TOP_K = 12
 _MIN_SCORE = 0.3
@@ -92,25 +95,57 @@ class _GenPayload(BaseModel):
 # --- corpus fingerprint (idempotency) --------------------------------------
 
 
-def corpus_fingerprint(store: VectorStore) -> str:
-    """Stable hash of the corpus contents; changes iff the corpus changes."""
+def _fingerprint_fields(chunk: Chunk) -> tuple[str, ...]:
+    """Everything that decides whether a chunk can ground a blueprint.
+
+    Chunk ids are content-hashed over ``artifact_id:position:content`` only, so
+    re-ingesting the same text under a different source role (``primary`` →
+    ``test``, which makes it ineligible for onboarding grounding) or a different
+    filename (which appears in citations) leaves the id untouched. A field left
+    out here is one whose change silently keeps a stale blueprint alive — extend
+    this record when a new field starts affecting eligibility or output.
+    """
+    return (chunk.id, chunk.text, chunk.source_role, chunk.filename)
+
+
+def corpus_fingerprint(store: VectorStore, project_id: str) -> str:
+    """Stable hash of the project's corpus; changes iff that corpus changes.
+
+    Scoped per project so a change in project A cannot invalidate (or, worse,
+    silently validate) project B's generated blueprints.
+    """
     digest = hashlib.sha256()
     for chunk in sorted(store.all_chunks(), key=lambda c: c.id):
-        digest.update(chunk.id.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(chunk.text.encode("utf-8"))
-        digest.update(b"\0")
+        if project_id not in chunk.project_ids:
+            continue
+        for value in _fingerprint_fields(chunk):
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
     return digest.hexdigest()
 
 
 # --- scope helpers ---------------------------------------------------------
 
 
-def default_scopes(active: list[Blueprint]) -> list[str]:
-    """``global`` plus every area scope present among the active blueprints."""
-    scopes = {b.scope for b in active}
-    scopes.add(GLOBAL)
+def default_scopes(active: list[Blueprint], project_id: str) -> list[str]:
+    """The project's ``global`` scope plus its active blueprints' area scopes.
+
+    Active blueprints belonging to another project (or to none, i.e. from
+    before project separation) do not contribute a scope.
+    """
+    scopes = {b.scope for b in active if Scope.parse(b.scope).project == project_id}
+    scopes.add(Scope.build(project_id).raw)
     return sorted(scopes)
+
+
+def qualify_scopes(scopes: list[str], project_id: str) -> list[str]:
+    """Qualify caller-supplied scope names with the project.
+
+    The backend can keep passing plain ``global`` / ``area:<name>`` names;
+    already-qualified scopes for the same project pass through unchanged.
+    """
+    qualified = [Scope.parse(s).with_project(project_id).raw for s in scopes]
+    return list(dict.fromkeys(qualified))
 
 
 def _scope_label(scope: str) -> str:
@@ -337,6 +372,29 @@ def _enforce_invariants(
 # --- job -------------------------------------------------------------------
 
 
+def _no_evidence_outcome(
+    scope: str, active: Blueprint | None, reason: str
+) -> GenerationOutcome:
+    """The outcome for a scope whose eligible grounding evidence is all gone.
+
+    ``skipped`` means "nothing to do", which leaves an already-active blueprint
+    serving steps and citations grounded in evidence this project can no longer
+    see — an artifact moved to another project, reclassified as test material,
+    or deleted. ``invalidated`` tells the backend to deactivate that generated
+    blueprint and stop serving its citations.
+
+    Only ``source: generated`` blueprints are invalidated: human-owned content
+    is never withdrawn on the strength of a retrieval result. With nothing
+    active to withdraw, this is an ordinary ``skipped``.
+    """
+    invalidates = active is not None and active.source == "generated"
+    return GenerationOutcome(
+        scope=scope,
+        status="invalidated" if invalidates else "skipped",
+        notes=[reason],
+    )
+
+
 def _next_version(active: Blueprint | None) -> str:
     if active is None:
         return "1"
@@ -350,6 +408,7 @@ def _generate_scope(
     scope: str,
     *,
     fingerprint: str,
+    project_id: str,
     llm: LLMClient,
     store: VectorStore,
     bm25_cache: BM25IndexCache,
@@ -369,9 +428,7 @@ def _generate_scope(
         )
 
     if store.count() == 0:
-        return GenerationOutcome(
-            scope=scope, status="skipped", notes=["corpus is empty"]
-        )
+        return _no_evidence_outcome(scope, active, "corpus is empty")
 
     chunks = hybrid_retrieve(
         question=_scope_query(scope),
@@ -381,10 +438,11 @@ def _generate_scope(
         min_score=_MIN_SCORE,
         bm25_cache=bm25_cache,
         exclude_roles=GROUNDING_EXCLUDED_ROLES,
+        filters=RetrievalFilters(project_id=project_id),
     )
     if not chunks:
-        return GenerationOutcome(
-            scope=scope, status="skipped", notes=["no grounding evidence retrieved"]
+        return _no_evidence_outcome(
+            scope, active, "no grounding evidence retrieved for this project"
         )
 
     # Strip chunks already cited by global steps from the area evidence pool.
@@ -395,10 +453,8 @@ def _generate_scope(
         global_chunk_ids = {ref.chunk_id for s in global_steps for ref in s.citations}
         chunks = [c for c in chunks if c.id not in global_chunk_ids]
     if not chunks:
-        return GenerationOutcome(
-            scope=scope,
-            status="skipped",
-            notes=["no area-specific evidence after excluding global citations"],
+        return _no_evidence_outcome(
+            scope, active, "no area-specific evidence after excluding global citations"
         )
 
     pool: dict[str, StepRecord] = {}
@@ -421,6 +477,10 @@ def _generate_scope(
         )
     refs = _draft_steps(scope, chunks, llm, pool, global_steps)
     if not refs:
+        # Deliberately *not* an invalidation: eligible evidence exists, the LLM
+        # just failed to ground a step in it this run. Withdrawing an active
+        # blueprint over that would make a retry-able model failure look like
+        # the evidence had disappeared.
         return GenerationOutcome(
             scope=scope, status="skipped", notes=["no grounded steps proposed"]
         )
@@ -466,48 +526,61 @@ def generate_blueprints(
     llm: LLMClient,
     store: VectorStore,
     *,
+    project_id: str,
     scopes: list[str] | None = None,
     active: list[Blueprint] | None = None,
 ) -> list[GenerationOutcome]:
-    """Draft/update blueprints for each scope; returns data without persisting.
+    """Draft/update the project's blueprints; returns data without persisting.
+
+    Generation is project-scoped end to end: evidence is retrieved with a
+    project filter, the produced scopes are project-qualified
+    (``project:<id>|global``, ``project:<id>|area:<name>``), and the corpus
+    fingerprint that drives idempotency covers only this project's chunks.
 
     ``active`` is the set of currently-active blueprints owned by the backend.
     They drive idempotency (skip when the corpus fingerprint is unchanged) and
-    version numbering; the AI service holds no state of its own.
+    version numbering; the AI service holds no state of its own. Active
+    blueprints from other projects are ignored — they cannot match a
+    project-qualified scope.
     """
-    fingerprint = corpus_fingerprint(store)
+    fingerprint = corpus_fingerprint(store, project_id)
     bm25_cache = BM25IndexCache()
     model = llm.model_name
 
     active_by_scope = {b.scope: b for b in (active or [])}
     outcomes: list[GenerationOutcome] = []
-    resolved_scopes = scopes or default_scopes(active or [])
+    resolved_scopes = (
+        qualify_scopes(scopes, project_id)
+        if scopes
+        else default_scopes(active or [], project_id)
+    )
 
     # Generate global first so area scopes can exclude its steps.
-    if GLOBAL in resolved_scopes:
-        resolved_scopes = [GLOBAL] + [s for s in resolved_scopes if s != GLOBAL]
+    global_scope = Scope.build(project_id).raw
+    if global_scope in resolved_scopes:
+        resolved_scopes = [global_scope] + [
+            s for s in resolved_scopes if s != global_scope
+        ]
 
     global_steps: list[BlueprintStep] | None = None
     for scope in resolved_scopes:
+        is_global = scope == global_scope
         try:
             outcome = _generate_scope(
                 scope,
                 fingerprint=fingerprint,
+                project_id=project_id,
                 llm=llm,
                 store=store,
                 bm25_cache=bm25_cache,
                 model=model,
                 active=active_by_scope.get(scope),
-                global_steps=global_steps if scope != GLOBAL else None,
+                global_steps=global_steps if not is_global else None,
             )
             outcomes.append(outcome)
             # After global is generated, capture its steps for area scopes
             # from the outcome (no disk reads).
-            if (
-                scope == GLOBAL
-                and global_steps is None
-                and outcome.blueprint is not None
-            ):
+            if is_global and global_steps is None and outcome.blueprint is not None:
                 global_steps = outcome.blueprint.steps
         except GenerationError as exc:
             logger.warning("Generation failed for scope %s: %s", scope, exc)

@@ -50,6 +50,7 @@ def to_chunk(
     source_created_at: str | None = None,
     source_updated_at: str | None = None,
     source_system: SourceSystem | str | None = None,
+    project_ids: list[str] | tuple[str, ...] = (),
 ) -> Chunk:
     position = int(parsed.metadata.get("chunk_index", "0"))
     effective_source_system = normalize_source_system(
@@ -82,4 +83,7 @@ def to_chunk(
         ),
         start_line=_optional_int(parsed.metadata, "start_line"),
         start_page=_optional_int(parsed.metadata, "page_number"),
+        # Deduplicated while preserving order so the stored metadata is stable
+        # for the same artifact across re-ingests.
+        project_ids=tuple(dict.fromkeys(pid for pid in project_ids if pid)),
     )

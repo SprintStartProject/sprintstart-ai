@@ -1,5 +1,7 @@
 from typing import Protocol
 
+from ingestion.source_role import SourceRole
+from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters, ScoredChunk
 
 
@@ -12,7 +14,18 @@ class VectorStore(Protocol):
         top_k: int,
         min_score: float,
         filters: RetrievalFilters | None = None,
-    ) -> list[ScoredChunk]: ...
+        exclude_roles: frozenset[SourceRole] = frozenset(),
+        exclusions: SourceExclusions = SourceExclusions(),
+    ) -> list[ScoredChunk]:
+        """The ``top_k`` best-scoring chunks that satisfy every constraint.
+
+        All of ``filters``, ``exclude_roles`` and ``exclusions`` must be applied
+        *before* the result set is limited to ``top_k``. An implementation that
+        cannot push a constraint down to its backend must still not return an
+        ineligible chunk; callers treat a short result as "the corpus is
+        exhausted at this score floor" and stop widening their search.
+        """
+        ...
 
     def delete(
         self,
@@ -40,5 +53,9 @@ class VectorStore(Protocol):
     ) -> list[Chunk]: ...
 
     def all_ids(self) -> frozenset[str]: ...
+
+    def retrieval_fingerprints(self) -> frozenset[str]: ...
+
+    def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]: ...
 
     def count(self) -> int: ...

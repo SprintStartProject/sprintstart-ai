@@ -69,7 +69,11 @@ def onboarding_path(
     orchestrator: OnboardingOrchestrator = Depends(get_onboarding_orchestrator),
 ) -> StreamingResponse:
     return StreamingResponse(
-        orchestrator.stream(body.to_profile(), blueprints=body.blueprints),
+        orchestrator.stream(
+            body.to_profile(),
+            blueprints=body.blueprints,
+            project_id=body.project_id,
+        ),
         media_type="text/event-stream",
     )
 
@@ -108,7 +112,11 @@ def onboarding_path_yaml(
     orchestrator: OnboardingOrchestrator = Depends(get_onboarding_orchestrator),
 ) -> Response:
     try:
-        path = orchestrator.run(body.to_profile(), blueprints=body.blueprints)
+        path = orchestrator.run(
+            body.to_profile(),
+            blueprints=body.blueprints,
+            project_id=body.project_id,
+        )
     except LLMUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return Response(content=path.to_yaml(), media_type="application/x-yaml")
