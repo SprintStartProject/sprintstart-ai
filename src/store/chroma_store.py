@@ -4,6 +4,7 @@ from typing import Any, cast
 import chromadb
 import chromadb.api
 from chromadb.api.types import Metadata, PyEmbeddings
+from chromadb.config import Settings
 
 from ingestion.source_role import SourceRole
 from rag.filters import (
@@ -25,7 +26,7 @@ _CLIENT_CACHE: dict[str, chromadb.api.ClientAPI] = {}
 
 def _get_persistent_client(path: str) -> chromadb.api.ClientAPI:
     if path not in _CLIENT_CACHE:
-        settings = chromadb.Settings(
+        settings = Settings(
             anonymized_telemetry=False,
             is_persistent=True,
             allow_reset=True,
