@@ -20,6 +20,19 @@ from rag.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
 
 _NO_POSITION: int = -1
 
+_CLIENT_CACHE: dict[str, chromadb.api.ClientAPI] = {}
+
+
+def _get_persistent_client(path: str) -> chromadb.api.ClientAPI:
+    if path not in _CLIENT_CACHE:
+        settings = chromadb.Settings(
+            anonymized_telemetry=False,
+            is_persistent=True,
+            allow_reset=True,
+        )
+        _CLIENT_CACHE[path] = chromadb.PersistentClient(path=path, settings=settings)
+    return _CLIENT_CACHE[path]
+
 
 class ChromaVectorStore:
     def __init__(
@@ -31,7 +44,7 @@ class ChromaVectorStore:
         if client is not None:
             self._client: chromadb.api.ClientAPI = client
         elif path is not None:
-            self._client = chromadb.PersistentClient(path=path)
+            self._client = _get_persistent_client(path)
         else:
             self._client = chromadb.EphemeralClient()
 

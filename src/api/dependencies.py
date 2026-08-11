@@ -22,7 +22,7 @@ from store.chroma_store import ChromaVectorStore
 logger = logging.getLogger(__name__)
 
 
-def _build_client(backend: str) -> LLMClient:
+def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
     backend = backend.lower()
 
     if backend in {"ollama", "local"}:
@@ -37,9 +37,19 @@ def _build_client(backend: str) -> LLMClient:
         )
 
     if backend in {"openai", "openai-compatible", "litellm"}:
+        base_url = (
+            (os.getenv("OPENAI_EMBED_BASE_URL") if is_embed else None)
+            or os.getenv("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        )
+        api_key = (
+            (os.getenv("OPENAI_EMBED_API_KEY") if is_embed else None)
+            or os.getenv("OPENAI_API_KEY")
+            or "unused"
+        )
         return OpenAIClient(
-            base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            api_key=os.getenv("OPENAI_API_KEY") or "unused",
+            base_url=base_url,
+            api_key=api_key,
             chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
             embed_model=os.getenv("OPENAI_EMBED_MODEL"),
             vision_model=os.getenv("OPENAI_VISION_MODEL"),
@@ -60,13 +70,17 @@ def _build_client(backend: str) -> LLMClient:
 @lru_cache
 def get_llm() -> LLMClient:
     chat = _build_client(
-        os.getenv("LLM_BACKEND") or os.getenv("LLM_PROVIDER") or "local"
+        os.getenv("LLM_BACKEND") or os.getenv("LLM_PROVIDER") or "local",
+        is_embed=False,
     )
     embed_backend = os.getenv("EMBED_BACKEND") or os.getenv("EMBED_PROVIDER")
     if embed_backend is None:
         return chat
 
-    return SplitLLMClient(chat=chat, embed=_build_client(embed_backend))
+    return SplitLLMClient(
+        chat=chat,
+        embed=_build_client(embed_backend, is_embed=True),
+    )
 
 
 @lru_cache
