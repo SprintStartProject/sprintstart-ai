@@ -76,10 +76,11 @@ def test_group_faqs_clusters_similar_questions_by_llm_grouping() -> None:
 
     assert [g.count for g in groups] == [2, 1]
     assert groups[0].question == "How do I get VPN access?"
-    assert groups[0].questions == [
-        "How do I get VPN access?",
-        "Can someone enable VPN for me?",
+    assert [(q.id, q.text) for q in groups[0].questions] == [
+        ("q1", "How do I get VPN access?"),
+        ("q2", "Can someone enable VPN for me?"),
     ]
+    assert groups[0].question_ids == ["q1", "q2"]
     assert groups[1].question == "How do I reset my password?"
 
 
@@ -316,4 +317,4 @@ def test_group_faqs_redacts_names_from_returned_questions() -> None:
 
     assert len(groups) == 1
     assert groups[0].question == "Ask [NAME] for VPN access"
-    assert groups[0].questions == ["Ask [NAME] for VPN access"]
+    assert [q.text for q in groups[0].questions] == ["Ask [NAME] for VPN access"]

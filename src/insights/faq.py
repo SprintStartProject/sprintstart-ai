@@ -63,12 +63,26 @@ class FaqDocument:
 
 
 @dataclass(frozen=True)
+class FaqSampleQuestion:
+    """One redacted sample question, carrying the id it came in as.
+
+    The id lets the caller tie the sample back to the message that was asked,
+    and with it to when it was asked — which is what the FAQ's trend and
+    recency signals are built from.
+    """
+
+    id: str
+    text: str
+
+
+@dataclass(frozen=True)
 class FaqGroup:
     question: str
     count: int
-    questions: list[str]
+    questions: list[FaqSampleQuestion]
     documents: list[FaqDocument]
     category: str = UNCATEGORIZED
+    question_ids: list[str] = field(default_factory=list[str])
 
 
 @dataclass
@@ -264,36 +278,43 @@ def group_faqs(
     # Redact every representative + sample question in a single batched LLM
     # call rather than one call per group.
     sample_texts: list[str] = []
+    sample_ids: list[str] = []
     sample_bounds: list[tuple[int, int]] = []
     for cluster in clusters:
-        seen: list[str] = []
+        seen: dict[str, str] = {}
         for member in cluster.members:
             if len(seen) >= _MAX_SAMPLE_QUESTIONS:
                 break
-            if member.text not in seen:
-                seen.append(member.text)
+            # Keyed by text so a question asked twice verbatim contributes one
+            # sample; the first asker's id is the one kept.
+            seen.setdefault(member.text, member.id)
         start = len(sample_texts)
-        sample_texts.extend(seen)
+        sample_texts.extend(seen.keys())
+        sample_ids.extend(seen.values())
         sample_bounds.append((start, start + len(seen)))
 
     redacted = redact_pii(sample_texts, llm)
 
     groups: list[FaqGroup] = []
     for cluster, (start, end) in zip(clusters, sample_bounds, strict=True):
-        redacted_samples = redacted[start:end]
+        samples = [
+            FaqSampleQuestion(id=qid, text=text)
+            for qid, text in zip(
+                sample_ids[start:end], redacted[start:end], strict=True
+            )
+        ]
         representative_text = cluster.members[0].text
-        representative_redacted = (
-            redacted_samples[0] if redacted_samples else representative_text
-        )
+        representative_redacted = samples[0].text if samples else representative_text
         groups.append(
             FaqGroup(
                 question=representative_redacted,
                 count=len(cluster.members),
-                questions=redacted_samples,
+                questions=samples,
                 documents=documents_for(
                     representative_text, llm, store, metadata_store, project_id
                 ),
                 category=cluster.category,
+                question_ids=[member.id for member in cluster.members],
             )
         )
 

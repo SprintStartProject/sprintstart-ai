@@ -12,6 +12,7 @@ from api.schemas import (
     FaqMergeGroupsRequest,
     FaqMergeResponse,
     FaqMergeSchema,
+    FaqSampleQuestionSchema,
 )
 from ingestion.metadata_store import IngestionMetadataStore
 from insights.faq import FaqQuestionInput, group_faqs
@@ -78,12 +79,15 @@ def group_faq_questions(
             FaqGroupSchema(
                 question=g.question,
                 count=g.count,
-                questions=g.questions,
+                questions=[
+                    FaqSampleQuestionSchema(id=q.id, text=q.text) for q in g.questions
+                ],
                 documents=[
                     FaqDocumentSchema(id=d.id, title=d.title, source=d.source)
                     for d in g.documents
                 ],
                 category=g.category,
+                question_ids=g.question_ids,
             )
             for g in groups
         ]

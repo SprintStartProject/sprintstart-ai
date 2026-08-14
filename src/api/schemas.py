@@ -964,7 +964,22 @@ class FaqDocumentSchema(BaseModel):
     )
 
 
+class FaqSampleQuestionSchema(BaseModel):
+    id: Annotated[
+        str,
+        Field(
+            description=(
+                "Id this question came in as. Ties the sample back to the "
+                "message it was asked in, and with it to when it was asked."
+            )
+        ),
+    ]
+    text: Annotated[str, Field(description="The question's text, PII-redacted.")]
+
+
 class FaqGroupSchema(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     question: Annotated[
         str,
         Field(description="Representative question for the group, PII-redacted."),
@@ -979,12 +994,24 @@ class FaqGroupSchema(BaseModel):
         ),
     ]
     questions: Annotated[
-        list[str],
+        list[FaqSampleQuestionSchema],
         Field(description="PII-redacted sample of questions in the group."),
     ]
     documents: Annotated[
         list[FaqDocumentSchema],
         Field(description="Documents that answered the group's questions."),
+    ]
+    question_ids: Annotated[
+        list[str],
+        Field(
+            default_factory=list[str],
+            description=(
+                "Ids of every question in the group, not just the sample. The "
+                "caller knows when each was asked, so this is what lets it "
+                "rebuild the group's recency and trend without the service "
+                "retaining any history."
+            ),
+        ),
     ]
     category: Annotated[
         str,
@@ -1008,8 +1035,8 @@ class FaqGroupResponse(BaseModel):
                         "question": "How do I get VPN access?",
                         "count": 14,
                         "questions": [
-                            "How do I get VPN access?",
-                            "Can someone enable VPN for me?",
+                            {"id": "q_1", "text": "How do I get VPN access?"},
+                            {"id": "q_2", "text": "Can someone enable VPN for me?"},
                         ],
                         "documents": [
                             {
@@ -1019,6 +1046,7 @@ class FaqGroupResponse(BaseModel):
                             }
                         ],
                         "category": "Access & Accounts",
+                        "questionIds": ["q_1", "q_2"],
                     }
                 ]
             }
