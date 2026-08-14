@@ -12,6 +12,7 @@ from api.dependencies import get_llm  # noqa: E402
 from api.routes import (  # noqa: E402
     blueprints,
     chat,
+    diagram,
     grading,
     health,
     ingest,
@@ -19,7 +20,9 @@ from api.routes import (  # noqa: E402
     insights,
     knowledge_gaps,
     onboarding,
+    orientation,
     sources,
+    starter_work,
     summaries,
     title,
     vector_db,
@@ -66,6 +69,9 @@ api_router.include_router(ingest_run.router)
 api_router.include_router(title.router)
 api_router.include_router(vector_db.router)
 api_router.include_router(onboarding.router)
+api_router.include_router(orientation.router)
+api_router.include_router(diagram.router)
+api_router.include_router(starter_work.router)
 api_router.include_router(blueprints.router)
 api_router.include_router(summaries.router)
 api_router.include_router(sources.router)
