@@ -5,11 +5,12 @@ issue #66). ``/chat`` is stateless and this service does not retain question
 history itself, so the backend sends the full set of questions to group on
 every request.
 
-Two levels of structure come out of this (issue #285): a *group* is one
-recurring question (the same thing asked in different words), a *category* is
-the topic bucket a group belongs to. Categories are what keeps the view
-readable as the question set grows — a flat list of 200 groups is exactly the
-"drowning in questions" problem the grouping is meant to solve.
+A *group* is one recurring question — the same thing asked in different words.
+Each carries a short generated **title** naming what is being asked (issue
+#285). The title is what keeps the view readable as the set grows: a list of
+verbatim questions makes a PM read a whole sentence to work out what each entry
+is about, while "Getting VPN access" is scannable, and one title stays stable
+while the phrasings under it vary.
 
 This full rebuild is the expensive path: its cost grows with the total number
 of questions, so it is the manual-refresh fallback rather than something to run
@@ -40,13 +41,6 @@ _DOCS_TOP_K = 5
 _DOCS_MIN_SCORE = 0.3
 # Cap on distinct documents returned per group.
 _MAX_DOCUMENTS = 5
-# Default ceiling on distinct categories. The caller (backend) owns the real
-# limit and passes it in; this is only the fallback for direct calls.
-DEFAULT_MAX_CATEGORIES = 12
-# Category assigned when the model gave us nothing usable. Never invented by
-# the model itself — it is the honest "we don't know" bucket, and the backend
-# can re-classify those groups later instead of guessing a topic now.
-UNCATEGORIZED = "Uncategorized"
 
 
 @dataclass(frozen=True)
@@ -81,19 +75,19 @@ class FaqGroup:
     count: int
     questions: list[FaqSampleQuestion]
     documents: list[FaqDocument]
-    category: str = UNCATEGORIZED
+    title: str = ""
     question_ids: list[str] = field(default_factory=list[str])
 
 
 @dataclass
 class _Cluster:
     members: list[FaqQuestionInput] = field(default_factory=list[FaqQuestionInput])
-    category: str = UNCATEGORIZED
+    title: str = ""
 
 
 class _GroupEntry(BaseModel):
     ids: list[str] = []
-    category: str = ""
+    title: str = ""
 
 
 class _GroupPayload(BaseModel):
@@ -101,11 +95,19 @@ class _GroupPayload(BaseModel):
     discard_ids: list[str] = []
 
 
-_GROUPING_SYSTEM_TEMPLATE = (
+TITLE_RULE = (
+    "a short title naming what is being asked: 3-8 words, sentence case, no "
+    "trailing punctuation, e.g. 'Getting VPN access', 'Starting the backend "
+    "locally', 'Submitting a travel expense report'. It must summarise the "
+    "request rather than copy a question verbatim, keep whatever component or "
+    "product the questions name, and be specific enough to tell this entry "
+    "apart from a neighbouring one — 'Setup' or 'Access' alone is too generic"
+)
+
+_GROUPING_SYSTEM = (
     "You group recurring end-user questions asked to a docs chatbot into FAQ "
-    "clusters for a PM-facing dashboard, and sort those clusters into topic "
-    "categories. Each input question is prefixed with its id in square "
-    "brackets.\n\n"
+    "entries for a PM-facing dashboard. Each input question is prefixed with "
+    "its id in square brackets.\n\n"
     "Rules:\n"
     "1. First set aside anything that is not a genuine, documentation-relevant "
     "question — greetings, smalltalk, or chit-chat (e.g. 'hey', 'hey there, "
@@ -122,52 +124,23 @@ _GROUPING_SYSTEM_TEMPLATE = (
     "request belong in the same group.\n"
     "4. Every input id must appear exactly once, in exactly one group or in "
     "discard_ids.\n"
-    "5. Give every group a category: a short topic label (2-4 words, Title "
-    "Case) naming the area the question belongs to, e.g. 'Local Setup', "
-    "'Deployment & CI', 'Authentication', 'Testing'. Categories are a level "
-    "ABOVE groups — several groups share one category. Reuse the exact same "
-    "spelling for every group in the same category.\n"
-    "6. Use at most {max_categories} distinct categories in total. If you "
-    "would need more, merge the least distinct ones into a broader label. "
-    "Prefer categories that stay meaningful as the question set grows: name "
-    "the topic, not the individual question.\n\n"
+    f"5. Give every group {TITLE_RULE}.\n\n"
     "Return STRICT JSON only (no prose, no markdown fences): "
-    '{{"groups": [{{"ids": [id, ...], "category": str}}, ...], '
-    '"discard_ids": [id, ...]}}'
+    '{"groups": [{"ids": [id, ...], "title": str}, ...], '
+    '"discard_ids": [id, ...]}'
 )
 
 
-def _build_grouping_prompt(
-    questions: list[FaqQuestionInput], max_categories: int
-) -> list[Message]:
+def _build_grouping_prompt(questions: list[FaqQuestionInput]) -> list[Message]:
     listing = "\n".join(f"[{q.id}] {q.text}" for q in questions)
     return [
-        Message(
-            role="system",
-            content=_GROUPING_SYSTEM_TEMPLATE.format(max_categories=max_categories),
-        ),
+        Message(role="system", content=_GROUPING_SYSTEM),
         Message(role="user", content=listing),
     ]
 
 
-def _normalize_category(raw: str, seen: dict[str, str]) -> str:
-    """Map a model-supplied category onto a single canonical spelling.
-
-    The model is asked to reuse spellings but does not always: "Local Setup"
-    and "local setup" would otherwise become two categories that a PM reads as
-    one. First spelling wins, later case/whitespace variants fold into it.
-    """
-    label = " ".join(raw.split())
-    if not label:
-        return UNCATEGORIZED
-    key = label.casefold()
-    if key not in seen:
-        seen[key] = label
-    return seen[key]
-
-
 def _cluster_questions(
-    questions: list[FaqQuestionInput], llm: LLMClient, max_categories: int
+    questions: list[FaqQuestionInput], llm: LLMClient
 ) -> list[_Cluster]:
     """Group questions into FAQ clusters with a single batched LLM call.
 
@@ -183,7 +156,7 @@ def _cluster_questions(
         return []
 
     order = {qid: i for i, qid in enumerate(by_id)}
-    raw = llm.generate(_build_grouping_prompt(list(by_id.values()), max_categories))
+    raw = llm.generate(_build_grouping_prompt(list(by_id.values())))
     try:
         payload = _GroupPayload.model_validate_json(extract_json_object(raw))
     except (ValidationError, json.JSONDecodeError, ValueError) as exc:
@@ -196,7 +169,6 @@ def _cluster_questions(
 
     clusters: list[_Cluster] = []
     claimed: set[str] = set(payload.discard_ids)
-    canonical_categories: dict[str, str] = {}
     for entry in payload.groups:
         unique_ids = list(
             dict.fromkeys(
@@ -209,10 +181,7 @@ def _cluster_questions(
                 (by_id[gid] for gid in unique_ids), key=lambda q: order[q.id]
             )
             clusters.append(
-                _Cluster(
-                    members=members,
-                    category=_normalize_category(entry.category, canonical_categories),
-                )
+                _Cluster(members=members, title=" ".join(entry.title.split()))
             )
 
     # Defensive: never silently drop a question the model didn't classify.
@@ -266,14 +235,13 @@ def group_faqs(
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
     project_id: str,
-    max_categories: int = DEFAULT_MAX_CATEGORIES,
 ) -> list[FaqGroup]:
-    """Group questions, categorize the groups, and attach answering documents.
+    """Group questions, title the groups, and attach answering documents.
 
     The documents come from retrieval, so they are scoped to ``project_id`` —
     a group must never point a PM at a document from another project.
     """
-    clusters = _cluster_questions(questions, llm, max_categories)
+    clusters = _cluster_questions(questions, llm)
 
     # Redact every representative + sample question in a single batched LLM
     # call rather than one call per group.
@@ -313,7 +281,10 @@ def group_faqs(
                 documents=documents_for(
                     representative_text, llm, store, metadata_store, project_id
                 ),
-                category=cluster.category,
+                # Falls back to the representative question rather than to a
+                # placeholder: a wordy entry still says what it is about, an
+                # "Untitled" one says nothing at all.
+                title=cluster.title or representative_redacted,
                 question_ids=[member.id for member in cluster.members],
             )
         )

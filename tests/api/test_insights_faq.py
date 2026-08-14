@@ -39,11 +39,11 @@ class _EchoLLM(StubLLMClient):
         self,
         groups: list[list[str]] | None = None,
         embed_fn: Callable[[str], list[float]] | None = None,
-        categories: list[str] | None = None,
+        titles: list[str] | None = None,
     ) -> None:
         super().__init__(embed_fn=embed_fn)
         self._groups = groups if groups is not None else [["q1", "q2"], ["q3"]]
-        self._categories = categories or ["Access & Accounts"] * len(self._groups)
+        self._titles = titles or ["Getting VPN access"] * len(self._groups)
         self._calls = 0
 
     def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
@@ -52,10 +52,8 @@ class _EchoLLM(StubLLMClient):
             return json.dumps(
                 {
                     "groups": [
-                        {"ids": ids, "category": label}
-                        for ids, label in zip(
-                            self._groups, self._categories, strict=True
-                        )
+                        {"ids": ids, "title": label}
+                        for ids, label in zip(self._groups, self._titles, strict=True)
                     ],
                     "discard_ids": [],
                 }
@@ -152,6 +150,8 @@ def test_group_endpoint_groups_and_returns_documents(
     # Every member id, not just the sampled ones: the backend maps these back
     # to the messages they were asked in to rebuild recency and trend.
     assert vpn_group["questionIds"] == ["q1", "q2"]
+    # The title is what a PM scans the list by, not the verbatim question.
+    assert vpn_group["title"] == "Getting VPN access"
     assert vpn_group["documents"] == [
         {"id": "doc_001", "title": "VPN Setup Guide.md", "source": "confluence"}
     ]
@@ -210,7 +210,7 @@ def test_classify_endpoint_returns_the_matched_group_in_camel_case(
         {
             "relevant": True,
             "group_id": "g1",
-            "category": "Access & Accounts",
+            "title": "Getting VPN access",
             "redacted_question": "Can someone enable VPN for me?",
         }
     )
@@ -220,14 +220,11 @@ def test_classify_endpoint_returns_the_matched_group_in_camel_case(
         json={
             "projectId": _PROJECT,
             "question": "Can someone enable VPN for me?",
-            "categories": [
-                {"name": "Access & Accounts", "groupCount": 1, "questionCount": 3}
-            ],
             "groups": [
                 {
                     "id": "g1",
                     "question": "How do I get VPN access?",
-                    "category": "Access & Accounts",
+                    "title": "Getting VPN access",
                     "count": 3,
                 }
             ],
@@ -238,7 +235,7 @@ def test_classify_endpoint_returns_the_matched_group_in_camel_case(
     assert response.json() == {
         "relevant": True,
         "question": "Can someone enable VPN for me?",
-        "category": "Access & Accounts",
+        "title": "Getting VPN access",
         "groupId": "g1",
         "documents": [],
     }
@@ -247,12 +244,12 @@ def test_classify_endpoint_returns_the_matched_group_in_camel_case(
 def test_classify_endpoint_works_without_any_existing_structure(
     client: TestClient,
 ) -> None:
-    """The very first question of a project has no categories or groups yet."""
+    """The very first question of a project has no entries to match against."""
     app.dependency_overrides[get_llm] = lambda: _ScriptedLLM(
         {
             "relevant": True,
             "group_id": None,
-            "category": "Access & Accounts",
+            "title": "Getting VPN access",
             "redacted_question": "How do I get VPN access?",
         }
     )
@@ -292,29 +289,6 @@ def test_classify_endpoint_rejects_a_missing_project(client: TestClient) -> None
     assert response.status_code == 422
 
 
-def test_consolidate_endpoint_returns_a_merge_plan(client: TestClient) -> None:
-    app.dependency_overrides[get_llm] = lambda: _ScriptedLLM(
-        {"merges": [{"into": "Local Setup", "sources": ["Backend Setup"]}]}
-    )
-
-    response = client.post(
-        "/api/v1/insights/faq/categories/consolidate",
-        json={
-            "categories": [
-                {"name": "Local Setup", "groupCount": 4},
-                {"name": "Backend Setup", "groupCount": 1},
-                {"name": "Testing", "groupCount": 2},
-            ],
-            "targetMax": 2,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "merges": [{"into": "Local Setup", "sources": ["Backend Setup"]}]
-    }
-
-
 def test_merge_groups_endpoint_returns_a_merge_plan(client: TestClient) -> None:
     app.dependency_overrides[get_llm] = lambda: _ScriptedLLM(
         {"merges": [{"into": "g1", "sources": ["g2"]}]}
@@ -336,10 +310,10 @@ def test_merge_groups_endpoint_returns_a_merge_plan(client: TestClient) -> None:
     assert response.json() == {"merges": [{"into": "g1", "sources": ["g2"]}]}
 
 
-def test_merge_endpoints_reject_a_zero_target(client: TestClient) -> None:
+def test_merge_endpoint_rejects_a_zero_target(client: TestClient) -> None:
     response = client.post(
-        "/api/v1/insights/faq/categories/consolidate",
-        json={"categories": [], "targetMax": 0},
+        "/api/v1/insights/faq/groups/merge",
+        json={"groups": [], "targetMax": 0},
     )
 
     assert response.status_code == 422

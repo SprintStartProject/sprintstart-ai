@@ -11,8 +11,6 @@ from pydantic import (
 )
 from pydantic.alias_generators import to_camel
 
-from insights.faq import DEFAULT_MAX_CATEGORIES, UNCATEGORIZED
-
 if TYPE_CHECKING:
     from onboarding.models import Blueprint, PersonProfile
 
@@ -929,16 +927,6 @@ class FaqGroupRequest(ProjectScopedRequest):
             "group is sent on every request."
         )
     )
-    max_categories: int = Field(
-        default=DEFAULT_MAX_CATEGORIES,
-        ge=1,
-        alias="maxCategories",
-        description=(
-            "Ceiling on distinct topic categories. The backend owns this limit "
-            "so a rebuild produces the same category budget the incremental "
-            "classification path enforces."
-        ),
-    )
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -949,7 +937,6 @@ class FaqGroupRequest(ProjectScopedRequest):
                     {"id": "q_1", "text": "How do I get VPN access?"},
                     {"id": "q_2", "text": "Can someone enable VPN for me?"},
                 ],
-                "maxCategories": 12,
             }
         },
     )
@@ -1013,15 +1000,16 @@ class FaqGroupSchema(BaseModel):
             ),
         ),
     ]
-    category: Annotated[
+    title: Annotated[
         str,
         Field(
             description=(
-                "Topic bucket this group belongs to. Several groups share one "
-                "category; the category is the level a PM browses by."
+                "Short generated title naming what the group is about. This is "
+                "what a PM scans the list by, rather than reading a verbatim "
+                "question per entry."
             ),
         ),
-    ] = UNCATEGORIZED
+    ] = ""
 
 
 class FaqGroupResponse(BaseModel):
@@ -1045,7 +1033,7 @@ class FaqGroupResponse(BaseModel):
                                 "source": "confluence",
                             }
                         ],
-                        "category": "Access & Accounts",
+                        "title": "Getting VPN access",
                         "questionIds": ["q_1", "q_2"],
                     }
                 ]
@@ -1057,23 +1045,18 @@ class FaqGroupResponse(BaseModel):
 # ── FAQ incremental classification (PM insights) ────────────────────────────
 
 
-class FaqCategorySchema(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-    name: str = Field(description="Category name, as already stored.")
-    group_count: int = Field(default=0, description="Groups in this category.")
-    question_count: int = Field(
-        default=0, description="Questions asked across this category's groups."
-    )
-
-
 class FaqGroupRefSchema(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     id: str = Field(description="Backend-assigned group identifier.")
     question: str = Field(description="The group's representative question.")
-    category: str = Field(
-        default=UNCATEGORIZED, description="Category the group sits in."
+    title: str = Field(
+        default="",
+        description=(
+            "The group's title. Sent alongside the question because a "
+            "summarised title can lose the component name that tells two "
+            "otherwise identical requests apart."
+        ),
     )
     count: int = Field(
         default=1, description="How often the group's question was asked."
@@ -1082,13 +1065,6 @@ class FaqGroupRefSchema(BaseModel):
 
 class FaqClassifyRequest(ProjectScopedRequest):
     question: str = Field(description="The question a user just asked the AI Buddy.")
-    categories: list[FaqCategorySchema] = Field(
-        default_factory=list[FaqCategorySchema],
-        description=(
-            "Categories the project already uses. Bounded by the backend's "
-            "category ceiling, which is what keeps this prompt small."
-        ),
-    )
     groups: list[FaqGroupRefSchema] = Field(
         default_factory=list[FaqGroupRefSchema],
         description=(
@@ -1105,14 +1081,11 @@ class FaqClassifyRequest(ProjectScopedRequest):
             "example": {
                 "projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11",
                 "question": "How do I get VPN access?",
-                "categories": [
-                    {"name": "Access & Accounts", "groupCount": 3, "questionCount": 21}
-                ],
                 "groups": [
                     {
                         "id": "b2c3d4e5-0000-4000-8000-000000000001",
                         "question": "How do I get VPN access?",
-                        "category": "Access & Accounts",
+                        "title": "Getting VPN access",
                         "count": 14,
                     }
                 ],
@@ -1131,11 +1104,11 @@ class FaqClassifyResponse(BaseModel):
         )
     )
     question: str = Field(default="", description="The question's text, PII-redacted.")
-    category: str = Field(
-        default=UNCATEGORIZED,
+    title: str = Field(
+        default="",
         description=(
-            "Category to file the question under. May be one the backend has "
-            "not seen before, which is how new categories are born."
+            "Title for the group the question belongs to. For a matched group "
+            "this is its existing title, unchanged."
         ),
     )
     group_id: str | None = Field(
@@ -1153,35 +1126,19 @@ class FaqClassifyResponse(BaseModel):
 
 class FaqMergeSchema(BaseModel):
     into: str = Field(
-        description=(
-            "Surviving category name (may be new) or surviving group id "
-            "(always an existing one)."
-        )
+        description="Surviving group id. Always one of the submitted groups."
     )
-    sources: list[str] = Field(
-        description="Categories/groups to fold into 'into' and delete."
-    )
-
-
-class FaqConsolidateCategoriesRequest(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-    categories: list[FaqCategorySchema] = Field(
-        description="Every category the project currently has."
-    )
-    target_max: int = Field(
-        ge=1, description="Ceiling the category set should be brought back under."
-    )
+    sources: list[str] = Field(description="Groups to fold into 'into' and delete.")
 
 
 class FaqMergeGroupsRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     groups: list[FaqGroupRefSchema] = Field(
-        description="Every group of the over-full category."
+        description="Every group the project currently has."
     )
     target_max: int = Field(
-        ge=1, description="Ceiling the category's group count should return under."
+        ge=1, description="Ceiling the group count should be brought back under."
     )
 
 
