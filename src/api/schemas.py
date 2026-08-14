@@ -781,6 +781,26 @@ class ArtifactRunIngestRequest(BaseModel):
         description="Original source update timestamp, if known.",
     )
 
+    state: str | None = Field(
+        default=None,
+        description="Issue state at the tracker ('OPEN'/'CLOSED'); null for non-issue.",
+    )
+    has_assignee: bool | None = Field(
+        default=None,
+        alias="hasAssignee",
+        description=(
+            "Whether somebody at the source is already assigned to this issue, or "
+            "null when the connector cannot tell. Starter-work mining withholds "
+            "an issue on a definite true -- taken work is not work a hire can "
+            "pick up. Null is 'unknown', never 'nobody': GitHub issues have "
+            "assignees this system does not ingest."
+        ),
+    )
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Issue labels (e.g. 'good first issue'); empty otherwise.",
+    )
+
 
 class RunArtifactsSyncRequest(BaseModel):
     """Batch payload sent by the backend after a GitHub ingestion run completes."""

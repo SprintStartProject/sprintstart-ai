@@ -76,6 +76,8 @@ class ScoredChunk:
     created_at: str | None = None
     start_line: int | None = None
     start_page: int | None = None
+    #: See :attr:`Chunk.project_ids`. Carried through retrieval so a citation can
+    #: say where the material belongs.
     project_ids: tuple[str, ...] = ()
 
 

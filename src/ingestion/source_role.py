@@ -19,8 +19,8 @@ DEFAULT_SOURCE_ROLE: SourceRole = "primary"
 
 # Roles that are searchable (for codebase Q&A) but never used as grounding
 # evidence for onboarding, because they don't represent how the project actually
-# works. Single source of truth for both the path pipeline and the blueprint
-# generator so their evidence policy can't drift apart.
+# works. Single source of truth for every consumer that grounds against the
+# corpus, so their evidence policy can't drift apart.
 GROUNDING_EXCLUDED_ROLES: frozenset[SourceRole] = frozenset({"test"})
 
 # Basename patterns that reliably indicate test material. The ingest API only

@@ -7,6 +7,7 @@ import ollama
 
 from llm.base import ChatResult, Message, ToolCall, ToolSpec
 from llm.errors import LLMUnavailableError
+from llm.tool_call_recovery import guard_stream, recover_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,15 @@ def _from_ollama_response(response: ollama.ChatResponse) -> ChatResult:
         )
         for call in message.tool_calls or []
     ]
-    return ChatResult(text=message.content or "", tool_calls=calls)
+    text = message.content or ""
+    # A local model may also emit tool calls as markup in the content instead of
+    # returning them structurally; recover them when none came through the API so
+    # the agent runs the tool rather than showing the hire the raw markup.
+    if not calls:
+        recovered, cleaned = recover_tool_calls(text)
+        if recovered:
+            return ChatResult(text=cleaned, tool_calls=recovered)
+    return ChatResult(text=text, tool_calls=calls)
 
 
 class OllamaBackend(Protocol):
@@ -63,6 +72,8 @@ class OllamaBackend(Protocol):
         self,
         model: str = "",
         messages: Sequence[Message] | None = None,
+        *,
+        options: Mapping[str, Any] | None = None,
     ) -> ollama.ChatResponse: ...
 
     def chat_tools(
@@ -131,9 +142,12 @@ class _OllamaAdapter:
         self,
         model: str = "",
         messages: Sequence[Message] | None = None,
+        *,
+        options: Mapping[str, Any] | None = None,
     ) -> ollama.ChatResponse:
+        merged = {**self._options, **options} if options else self._options
         response = self._client.chat(  # pyright: ignore[reportUnknownMemberType]
-            model=model, messages=list(messages or []), options=self._options
+            model=model, messages=list(messages or []), options=merged
         )
         self._warn_if_truncated(response)
         return response
@@ -235,20 +249,33 @@ class OllamaClient:
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         if self._model is None:
             raise ValueError("No model specified")
         try:
-            response = self._client.chat(model=self._model, messages=messages)
+            options = {"temperature": temperature} if temperature is not None else None
+            response = self._client.chat(
+                model=self._model, messages=messages, options=options
+            )
             return response.message.content or ""
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 
     def stream(self, messages: list[Message]) -> Iterator[str]:
+        # See OpenAiCompatibleClient.stream: the same models reach this client, and the
+        # streamed answer has no tool loop to hand a recovered call to.
         if self._model is None:
             raise ValueError("No model specified")
+        # The model is passed in rather than re-read off self: this method raises
+        # eagerly, the generator body does not, so the check here is only load-bearing
+        # if the value it checked is the one that reaches the call.
+        return guard_stream(self._stream_raw(self._model, messages))
+
+    def _stream_raw(self, model: str, messages: list[Message]) -> Iterator[str]:
         try:
-            for chunk in self._client.chat_stream(model=self._model, messages=messages):
+            for chunk in self._client.chat_stream(model=model, messages=messages):
                 yield chunk.message.content or ""
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc

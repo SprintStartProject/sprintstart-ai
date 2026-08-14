@@ -185,6 +185,43 @@ def test_ingest_run_filename_derived_for_issue(
     assert record.filename == "issue-42.md"
 
 
+def test_ingest_run_persists_issue_state_and_labels(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact = _issue_artifact("uuid-state")
+    artifact["state"] = "OPEN"
+    artifact["labels"] = ["bug", "good first issue"]
+
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    record = metadata_store.get_artifact("uuid-state")
+    assert record is not None
+    assert record.state == "OPEN"
+    assert record.labels == ["bug", "good first issue"]
+
+
+def test_ingest_run_defaults_state_and_labels_when_absent(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    client.post(
+        "/api/v1/ingest/sync",
+        json={
+            "artifactsToIngest": [_issue_artifact("uuid-no-state")],
+            "artifactsToDeindex": [],
+        },
+    )
+
+    record = metadata_store.get_artifact("uuid-no-state")
+    assert record is not None
+    assert record.state is None
+    assert record.labels == []
+
+
 class _FlakyEmbedLLMClient(StubLLMClient):
     """Raises LLMUnavailableError while embedding the file artifact's content,
     succeeds for everything else. Content-keyed (not a call counter) so the

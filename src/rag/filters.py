@@ -75,6 +75,13 @@ def matches_retrieval_filters(
     chunk: Chunk | ScoredChunk,
     filters: RetrievalFilters | None,
 ) -> bool:
+    """Whether ``chunk`` survives ``filters``.
+
+    The project rule is the one worth stating, and it is deliberately
+    fail-closed: material that belongs to **no** project is visible to **no**
+    project. A chunk ingested before the backend sent ``projectIds`` carries no
+    association, and stays unreachable until it is re-synced.
+    """
     if filters is None:
         return True
 

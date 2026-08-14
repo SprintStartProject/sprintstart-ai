@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import Literal, cast
@@ -26,6 +27,9 @@ _COLUMNS = (
     "artifact_type",
     "language",
     "project_ids",
+    "state",
+    "has_assignee",
+    "labels",
 )
 
 
@@ -48,6 +52,19 @@ class ArtifactRecord:
     # Projects the artifact belongs to; empty for artifacts ingested before the
     # backend started sending them (see ``list_artifacts``).
     project_ids: tuple[str, ...] = ()
+    # Issue state at the tracker (e.g. "OPEN"/"CLOSED") and labels (e.g. "good
+    # first issue"); both unset for non-issue artifacts. Used by starter-work
+    # mining to deterministically exclude closed issues rather than relying on
+    # an LLM to notice.
+    state: str | None = None
+    # Whether somebody at the source is already assigned to this issue, or None
+    # when the connector cannot tell. Mining withholds an issue on a definite
+    # True -- work somebody else has taken is not work a hire can pick up.
+    # None is "unknown", never "nobody": GitHub issues have assignees this
+    # system does not ingest, and reading that absence as "free" would be the
+    # same defect as reading an absent history as "beginner".
+    has_assignee: bool | None = None
+    labels: list[str] = field(default_factory=list[str])
 
 
 class IngestionMetadataStore:
@@ -81,11 +98,13 @@ class IngestionMetadataStore:
                     source_url TEXT,
                     artifact_type TEXT,
                     language TEXT,
-                    project_ids TEXT
+                    project_ids TEXT,
+                    state TEXT,
+                    has_assignee INTEGER,
+                    labels TEXT
                 )
                 """
             )
-
             self._migrate_columns()
 
             self._connection.execute("DROP TABLE IF EXISTS artifact_chunks")
@@ -94,16 +113,23 @@ class IngestionMetadataStore:
     def _migrate_columns(self) -> None:
         """Add columns introduced after a database was first created.
 
-        ``project_ids`` was added with the project-separation work; databases
-        created before it exist in the wild, and SQLite has no
+        ``project_ids`` was added with the project-separation work, and
+        ``state``/``has_assignee``/``labels`` with starter-work mining; databases
+        created before either exist in the wild, and SQLite has no
         ``ADD COLUMN IF NOT EXISTS``.
         """
         cursor = self._connection.execute("PRAGMA table_info(artifacts)")
         existing = {str(row["name"]) for row in cursor.fetchall()}
-        if "project_ids" not in existing:
-            self._connection.execute(
-                "ALTER TABLE artifacts ADD COLUMN project_ids TEXT"
-            )
+        for column, decl in (
+            ("project_ids", "TEXT"),
+            ("state", "TEXT"),
+            ("has_assignee", "INTEGER"),
+            ("labels", "TEXT"),
+        ):
+            if column not in existing:
+                self._connection.execute(
+                    f"ALTER TABLE artifacts ADD COLUMN {column} {decl}"
+                )
 
     def close(self) -> None:
         with self._lock:
@@ -220,6 +246,11 @@ class IngestionMetadataStore:
             ),
             language=None if row["language"] is None else str(row["language"]),
             project_ids=decode_project_ids(row["project_ids"]),
+            state=None if row["state"] is None else str(row["state"]),
+            has_assignee=(
+                None if row["has_assignee"] is None else bool(row["has_assignee"])
+            ),
+            labels=json.loads(row["labels"]) if row["labels"] else [],
         )
 
     def _upsert_artifact(self, artifact: ArtifactRecord) -> None:
@@ -243,5 +274,8 @@ class IngestionMetadataStore:
                 artifact.artifact_type,
                 artifact.language,
                 encode_project_ids(artifact.project_ids),
+                artifact.state,
+                artifact.has_assignee,
+                json.dumps(artifact.labels) if artifact.labels else None,
             ),
         )
