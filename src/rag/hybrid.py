@@ -270,6 +270,7 @@ def hybrid_retrieve(
             filters is not None
             and (
                 filters.project_id is not None
+                or filters.project_ids is not None
                 or bool(filters.source_systems)
                 or filters.time_from is not None
                 or filters.time_to is not None
