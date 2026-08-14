@@ -2,7 +2,7 @@ import json
 from collections.abc import Callable
 
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
-from insights.faq import FaqDocument, FaqQuestionInput, group_faqs
+from insights.faq import UNCATEGORIZED, FaqDocument, FaqQuestionInput, group_faqs
 from rag.types import Chunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
@@ -34,10 +34,18 @@ class _ScriptedFaqLLM(StubLLMClient):
         groups: list[list[str]],
         discard_ids: list[str] | None = None,
         embed_fn: Callable[[str], list[float]] = _embed_fn,
+        categories: list[str] | None = None,
     ) -> None:
         super().__init__(embed_fn=embed_fn)
+        labels = categories or ["General"] * len(groups)
         self._grouping_response = json.dumps(
-            {"groups": groups, "discard_ids": discard_ids or []}
+            {
+                "groups": [
+                    {"ids": ids, "category": label}
+                    for ids, label in zip(groups, labels, strict=True)
+                ],
+                "discard_ids": discard_ids or [],
+            }
         )
         self._calls = 0
 
@@ -236,6 +244,56 @@ def test_group_faqs_caps_sample_size_below_total_count() -> None:
     assert len(groups) == 1
     assert groups[0].count == 7
     assert len(groups[0].questions) <= 5
+
+
+def test_group_faqs_assigns_the_category_the_model_chose() -> None:
+    llm = _ScriptedFaqLLM(
+        groups=[["q1"], ["q2"]], categories=["Access & Accounts", "Local Setup"]
+    )
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q2", text="How do I start the backend?"),
+    ]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert {g.question: g.category for g in groups} == {
+        "How do I get VPN access?": "Access & Accounts",
+        "How do I start the backend?": "Local Setup",
+    }
+
+
+def test_group_faqs_folds_case_variants_of_a_category_together() -> None:
+    """Two spellings of one category would read as two topics to a PM."""
+    llm = _ScriptedFaqLLM(
+        groups=[["q1"], ["q2"]], categories=["Local Setup", "local  setup"]
+    )
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I start the backend?"),
+        FaqQuestionInput(id="q2", text="How do I start the frontend?"),
+    ]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert {g.category for g in groups} == {"Local Setup"}
+
+
+def test_group_faqs_falls_back_to_uncategorized_without_a_category() -> None:
+    llm = _ScriptedFaqLLM(groups=[["q1"]], categories=[""])
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert groups[0].category == UNCATEGORIZED
 
 
 def test_group_faqs_redacts_names_from_returned_questions() -> None:

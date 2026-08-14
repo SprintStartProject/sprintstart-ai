@@ -39,15 +39,27 @@ class _EchoLLM(StubLLMClient):
         self,
         groups: list[list[str]] | None = None,
         embed_fn: Callable[[str], list[float]] | None = None,
+        categories: list[str] | None = None,
     ) -> None:
         super().__init__(embed_fn=embed_fn)
         self._groups = groups if groups is not None else [["q1", "q2"], ["q3"]]
+        self._categories = categories or ["Access & Accounts"] * len(self._groups)
         self._calls = 0
 
     def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
         self._calls += 1
         if self._calls == 1:
-            return json.dumps({"groups": self._groups, "discard_ids": []})
+            return json.dumps(
+                {
+                    "groups": [
+                        {"ids": ids, "category": label}
+                        for ids, label in zip(
+                            self._groups, self._categories, strict=True
+                        )
+                    ],
+                    "discard_ids": [],
+                }
+            )
         payload = json.loads(messages[-1]["content"])  # type: ignore[index]
         return json.dumps({"texts": payload["texts"]})
 
@@ -173,5 +185,158 @@ def test_group_endpoint_llm_unavailable_returns_503(client: TestClient) -> None:
 
 def test_group_endpoint_rejects_missing_questions_field(client: TestClient) -> None:
     response = client.post("/api/v1/insights/faq/group", json={})
+
+    assert response.status_code == 422
+
+
+class _ScriptedLLM(StubLLMClient):
+    """Answers every `generate` with one fixed JSON payload."""
+
+    def __init__(self, payload: object) -> None:
+        super().__init__(embed_fn=_embed_fn)
+        self._payload = payload if isinstance(payload, str) else json.dumps(payload)
+
+    def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+        return self._payload
+
+
+def test_classify_endpoint_returns_the_matched_group_in_camel_case(
+    client: TestClient,
+) -> None:
+    app.dependency_overrides[get_llm] = lambda: _ScriptedLLM(
+        {
+            "relevant": True,
+            "group_id": "g1",
+            "category": "Access & Accounts",
+            "redacted_question": "Can someone enable VPN for me?",
+        }
+    )
+
+    response = client.post(
+        "/api/v1/insights/faq/classify",
+        json={
+            "projectId": _PROJECT,
+            "question": "Can someone enable VPN for me?",
+            "categories": [
+                {"name": "Access & Accounts", "groupCount": 1, "questionCount": 3}
+            ],
+            "groups": [
+                {
+                    "id": "g1",
+                    "question": "How do I get VPN access?",
+                    "category": "Access & Accounts",
+                    "count": 3,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "relevant": True,
+        "question": "Can someone enable VPN for me?",
+        "category": "Access & Accounts",
+        "groupId": "g1",
+        "documents": [],
+    }
+
+
+def test_classify_endpoint_works_without_any_existing_structure(
+    client: TestClient,
+) -> None:
+    """The very first question of a project has no categories or groups yet."""
+    app.dependency_overrides[get_llm] = lambda: _ScriptedLLM(
+        {
+            "relevant": True,
+            "group_id": None,
+            "category": "Access & Accounts",
+            "redacted_question": "How do I get VPN access?",
+        }
+    )
+
+    response = client.post(
+        "/api/v1/insights/faq/classify",
+        json={"projectId": _PROJECT, "question": "How do I get VPN access?"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["relevant"] is True
+    assert body["groupId"] is None
+
+
+def test_classify_endpoint_llm_unavailable_returns_503(client: TestClient) -> None:
+    class _FailingGenerateLLM(StubLLMClient):
+        def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+            raise LLMUnavailableError("local LLM unavailable")
+
+    app.dependency_overrides[get_llm] = lambda: _FailingGenerateLLM()
+
+    response = client.post(
+        "/api/v1/insights/faq/classify",
+        json={"projectId": _PROJECT, "question": "How do I get VPN access?"},
+    )
+
+    assert response.status_code == 503
+    assert "local LLM unavailable" in response.json()["detail"]
+
+
+def test_classify_endpoint_rejects_a_missing_project(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/insights/faq/classify", json={"question": "How do I get VPN access?"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_consolidate_endpoint_returns_a_merge_plan(client: TestClient) -> None:
+    app.dependency_overrides[get_llm] = lambda: _ScriptedLLM(
+        {"merges": [{"into": "Local Setup", "sources": ["Backend Setup"]}]}
+    )
+
+    response = client.post(
+        "/api/v1/insights/faq/categories/consolidate",
+        json={
+            "categories": [
+                {"name": "Local Setup", "groupCount": 4},
+                {"name": "Backend Setup", "groupCount": 1},
+                {"name": "Testing", "groupCount": 2},
+            ],
+            "targetMax": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "merges": [{"into": "Local Setup", "sources": ["Backend Setup"]}]
+    }
+
+
+def test_merge_groups_endpoint_returns_a_merge_plan(client: TestClient) -> None:
+    app.dependency_overrides[get_llm] = lambda: _ScriptedLLM(
+        {"merges": [{"into": "g1", "sources": ["g2"]}]}
+    )
+
+    response = client.post(
+        "/api/v1/insights/faq/groups/merge",
+        json={
+            "groups": [
+                {"id": "g1", "question": "How do I get VPN access?", "count": 4},
+                {"id": "g2", "question": "How do i get vpn access", "count": 1},
+                {"id": "g3", "question": "How do I reset my password?", "count": 2},
+            ],
+            "targetMax": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"merges": [{"into": "g1", "sources": ["g2"]}]}
+
+
+def test_merge_endpoints_reject_a_zero_target(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/insights/faq/categories/consolidate",
+        json={"categories": [], "targetMax": 0},
+    )
 
     assert response.status_code == 422
