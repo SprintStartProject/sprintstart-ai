@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
@@ -18,17 +18,17 @@ class Invocation:
 
 
 @dataclass(frozen=True)
-class Delegation:
-    name: str
-    answer: Callable[[], Iterator[str]]
-
-
-@dataclass(frozen=True)
 class ToolResult:
+    """What a tool found.
+
+    ``summary`` is the one-line fallback shown to the model when there is
+    nothing to show — an error, or a search that matched nothing. When
+    ``chunks`` is non-empty the model is given the chunks themselves instead;
+    see ``agents.chat_agent._format_evidence``.
+    """
+
     summary: str
     chunks: list[ScoredChunk] = field(default_factory=list[ScoredChunk])
-    usages: list[Invocation] = field(default_factory=list[Invocation])
-    delegation: Delegation | None = None
 
     @classmethod
     def empty(cls, summary: str) -> "ToolResult":
@@ -57,13 +57,6 @@ class Tool[ArgsT: BaseModel](ABC):
 
     @abstractmethod
     def run(self, args: ArgsT) -> ToolResult: ...
-
-
-@runtime_checkable
-class StreamingTool(Protocol):
-    def stream(
-        self, raw_args: dict[str, object]
-    ) -> Generator[Invocation, None, ToolResult]: ...
 
 
 AnyTool = Tool[Any]

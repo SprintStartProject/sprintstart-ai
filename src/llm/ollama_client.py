@@ -94,9 +94,16 @@ class OllamaBackend(Protocol):
 
 class _OllamaAdapter:
     def __init__(
-        self, host: str | None, temperature: float, num_ctx: int | None = None
+        self,
+        host: str | None,
+        temperature: float,
+        num_ctx: int | None = None,
+        timeout: float | None = None,
     ) -> None:
-        self._client = ollama.Client(host=host)
+        # Unlike the hosted SDKs, ollama-python defaults to no timeout at all,
+        # so an unreachable or wedged daemon hangs the request forever. Passing
+        # ``timeout=None`` reproduces that default when nothing is configured.
+        self._client = ollama.Client(host=host, timeout=timeout)
         self._options: dict[str, Any] = {"temperature": temperature}
         # num_ctx must be set explicitly: Ollama otherwise defaults to a small
         # context (typically 4096) and silently truncates oversized prompts,
@@ -205,6 +212,7 @@ class OllamaClient:
         client: OllamaBackend | None = None,
         temperature: float = _DEFAULT_TEMPERATURE,
         num_ctx: int | None = None,
+        timeout: float | None = None,
     ) -> None:
         self._host = host
         self._model = model
@@ -213,7 +221,12 @@ class OllamaClient:
         self._client: OllamaBackend = (
             client
             if client is not None
-            else _OllamaAdapter(host=host, temperature=temperature, num_ctx=num_ctx)
+            else _OllamaAdapter(
+                host=host,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                timeout=timeout,
+            )
         )
 
     @property

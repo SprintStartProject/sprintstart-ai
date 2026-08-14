@@ -3,7 +3,7 @@ import json
 from collections.abc import Iterator
 from typing import Any, cast
 
-from openai import OpenAI, OpenAIError, omit
+from openai import NOT_GIVEN, OpenAI, OpenAIError, omit
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionChunk,
@@ -136,6 +136,7 @@ class OpenAIClient(LLMClient):
         embed_model: str | None,
         vision_model: str | None = None,
         http_client: Any | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.base_url = _normalize_base_url(base_url)
         self.chat_model = chat_model
@@ -146,6 +147,9 @@ class OpenAIClient(LLMClient):
             base_url=self.base_url,
             api_key=api_key,
             http_client=http_client,
+            # Same reasoning as the Anthropic client: ``timeout=None`` disables
+            # the timeout, so an unset setting must leave the parameter unset.
+            timeout=NOT_GIVEN if timeout is None else timeout,
         )
 
     @property
