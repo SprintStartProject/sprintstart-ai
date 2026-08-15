@@ -22,8 +22,28 @@ from store.chroma_store import ChromaVectorStore
 logger = logging.getLogger(__name__)
 
 
+# Matches the Anthropic and OpenAI SDKs' own default. Applied to Ollama too,
+# which otherwise waits forever: a wedged daemon would hang the request rather
+# than surfacing as an error the route can turn into an SSE `error` event.
+_DEFAULT_LLM_TIMEOUT_SECONDS = 600.0
+
+
+def _llm_timeout() -> float | None:
+    """Request timeout for every LLM backend, in seconds.
+
+    ``LLM_TIMEOUT_SECONDS=0`` disables it — the pre-existing behaviour for
+    Ollama, and worth keeping reachable for a long-running local batch.
+    """
+    raw = os.getenv("LLM_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_LLM_TIMEOUT_SECONDS
+    timeout = float(raw)
+    return timeout if timeout > 0 else None
+
+
 def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
     backend = backend.lower()
+    timeout = _llm_timeout()
 
     if backend in {"ollama", "local"}:
         num_ctx = os.getenv("OLLAMA_NUM_CTX", "").strip()
@@ -34,6 +54,7 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
             vision_model=os.getenv("OLLAMA_VISION_MODEL"),
             temperature=float(os.getenv("OLLAMA_TEMPERATURE", "0.1")),
             num_ctx=int(num_ctx) if num_ctx else None,
+            timeout=timeout,
         )
 
     if backend in {"openai", "openai-compatible", "litellm"}:
@@ -53,6 +74,7 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
             chat_model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
             embed_model=os.getenv("OPENAI_EMBED_MODEL"),
             vision_model=os.getenv("OPENAI_VISION_MODEL"),
+            timeout=timeout,
         )
 
     if backend in {"anthropic", "claude"}:
@@ -62,6 +84,7 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
             vision_model=os.getenv("ANTHROPIC_VISION_MODEL"),
             base_url=os.getenv("ANTHROPIC_BASE_URL") or None,
             max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096")),
+            timeout=timeout,
         )
 
     raise ValueError(f"Unknown LLM backend: {backend!r}")

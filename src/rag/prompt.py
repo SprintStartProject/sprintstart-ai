@@ -2,7 +2,8 @@ from llm.base import Message
 from rag.types import ScoredChunk
 
 
-def _chunk_header(chunk: ScoredChunk) -> str:
+def chunk_header(chunk: ScoredChunk) -> str:
+    """Label a chunk for the model — also used for the chat agent's tool results."""
     parts = [chunk.artifact_type or "FILE", chunk.filename]
     if chunk.language:
         parts.append(chunk.language)
@@ -20,7 +21,7 @@ def build_messages(
 
     if chunks:
         context = "\n\n".join(
-            f"{_chunk_header(chunk)}\n{chunk.text}" for chunk in chunks
+            f"{chunk_header(chunk)}\n{chunk.text}" for chunk in chunks
         )
         messages.append(
             Message(
