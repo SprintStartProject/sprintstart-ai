@@ -138,10 +138,14 @@ def test_only_the_last_block_is_marked() -> None:
     assert marked[0]["tool_use_id"] == "c2"
 
 
-def test_the_two_calls_of_one_turn_share_a_cached_prefix() -> None:
-    """The deciding call and the streaming answer call are the same
-    conversation plus tool results, so the second reads what the first wrote —
-    which is what makes caching pay for itself inside a single turn."""
+def test_a_turn_extends_the_previous_turns_cached_prefix() -> None:
+    """Appending tool results leaves the rendered prefix byte-identical.
+
+    That is what lets the next deciding call read what this turn wrote. Note
+    this covers the *messages* half only: `chat` sends tool definitions and
+    `stream` does not, and tools render first, so the answer call of a turn
+    cannot read its own deciding call's entry (see `_mark_last_block`).
+    """
     decide: list[Message] = [
         Message(role="system", content="sys"),
         Message(role="user", content="what broke?"),

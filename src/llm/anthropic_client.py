@@ -69,11 +69,17 @@ def _mark_last_block(messages: list[MessageParam]) -> None:
     """Put a cache breakpoint on the final content block, in place.
 
     Anthropic renders a request as tools → system → messages and caches by
-    exact prefix match, so a breakpoint here covers everything before it. The
-    chat agent's two calls per turn — one to decide, one to stream the answer —
-    share every byte up to this point, so the deciding call writes the entry
-    and the streaming call reads it. That alone beats sending both uncached
-    (1.25x write + 0.1x read against 2x), before any reuse across turns.
+    exact prefix match, so a breakpoint here covers everything before it. What
+    reads it is the *next* deciding call: successive turns of a conversation
+    share the whole prefix up to the previous turn's last block, so each turn
+    pays a 0.1x read where it would otherwise pay 1x.
+
+    The streaming call that answers a turn cannot read what that turn's
+    deciding call wrote: `chat` sends tool definitions and `stream` does not,
+    so the two prefixes differ at the first rendered byte. Passing the same
+    tools to `stream` would fix the prefix but needs a policy for tool_use
+    blocks arriving mid-answer — silently dropping them would lose a tool call
+    the model asked for. Don't add `tools` there without deciding that.
     """
     if not messages:
         return

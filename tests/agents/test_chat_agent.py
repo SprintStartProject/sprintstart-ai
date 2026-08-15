@@ -144,6 +144,87 @@ def test_evidence_ends_the_search_without_another_decision_call() -> None:
     assert len(llm.chat_calls) == 1  # the second scripted turn is never reached
 
 
+def test_partly_empty_turn_is_retried_so_the_missing_part_gets_another_hop() -> None:
+    """A multi-part question whose parts don't all resolve in one turn.
+
+    One search landing must not strand the other: the model gets another
+    tool-capable turn to retry the one that came back empty.
+    """
+    llm = _llm([_RETRIEVE, _GREP_MISS], [_GREP])
+
+    events = _run(_agent(llm), "blockers, and anything on xyzzy?")
+
+    assert _invoked(events) == ["retrieve", "grep", "grep"]
+    assert len(llm.chat_calls) == 2
+
+
+def _flooded_store(count: int, text: str) -> StubVectorStore:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id=f"c{i}",
+                artifact_id="d1",
+                filename="retro.md",
+                text=text.format(i=i),
+                embedding=_EMBEDDING,
+            )
+            for i in range(count)
+        ]
+    )
+    return store
+
+
+def test_many_small_matches_are_capped_by_chunk_count() -> None:
+    """`grep` returns every match in the corpus, so the cap has to be here.
+
+    Without it a broad pattern puts the whole corpus in one tool message.
+    """
+    llm = _llm([_GREP])
+
+    events = _run(_agent(llm, _flooded_store(50, "login note {i}")))
+
+    tool_message = _tool_messages(llm.stream_calls[0])[0]
+    assert _cited(events) == [f"c{i}" for i in range(12)]  # _MAX_EVIDENCE_CHUNKS
+    # The model is told what it isn't seeing, and never shown a dropped chunk.
+    assert "38 further match(es) omitted." in tool_message
+    assert "login note 12" not in tool_message
+
+
+def test_few_large_matches_are_capped_by_total_chars() -> None:
+    """The chunk count alone would let 12 full-size chunks through."""
+    llm = _llm([_GREP])
+
+    events = _run(_agent(llm, _flooded_store(12, "login " + "x" * 5_000)))
+
+    # Each chunk counts _SOURCE_CHARS against the 8k budget, so 10 fit.
+    assert _cited(events) == [f"c{i}" for i in range(10)]
+    assert "2 further match(es) omitted." in _tool_messages(llm.stream_calls[0])[0]
+
+
+def test_a_single_oversized_match_is_truncated_not_dropped() -> None:
+    """Returning nothing for a search that did match would be a lie."""
+    llm = _llm([_GREP])
+
+    events = _run(_agent(llm, _flooded_store(1, "login " + "x" * 50_000)))
+
+    assert _cited(events) == ["c0"]
+    tool_message = _tool_messages(llm.stream_calls[0])[0]
+    assert "omitted" not in tool_message
+    assert len(tool_message) < 2_000  # truncated by _SOURCE_CHARS
+
+
+def test_citations_never_outrun_what_the_model_was_shown() -> None:
+    """A citation for a source the model never saw would be a fabrication."""
+    llm = _llm([_GREP])
+
+    events = _run(_agent(llm, _flooded_store(50, "login note {i}")))
+
+    tool_message = _tool_messages(llm.stream_calls[0])[0]
+    for chunk_id in _cited(events):
+        assert f"login note {int(chunk_id[1:])}" in tool_message
+
+
 def test_empty_search_is_retried_with_the_remaining_budget() -> None:
     llm = _llm([_GREP_MISS], [_RETRIEVE])
 

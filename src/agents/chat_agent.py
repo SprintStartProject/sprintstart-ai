@@ -24,7 +24,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from agents.tools.base import Invocation, ToolRegistry, ToolResult
-from agents.tools.fetch_file import FetchFileTool
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
 from llm.base import LLMClient, Message, ToolCall
@@ -34,12 +33,30 @@ from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 # Search hops before the model is made to answer with what it has. Reached only
-# when a hop finds nothing at all — any evidence ends the loop (see `run`).
+# when hops keep coming back partly empty — a turn whose searches all landed
+# ends the loop (see `run`).
 _MAX_STEPS = 3
 
 # Per-chunk cap on what goes back to the model, so a handful of large chunks
 # can't crowd out the conversation.
 _SOURCE_CHARS = 800
+
+# Caps on a *whole* tool result. The per-chunk limit alone bounds nothing:
+# `grep` returns every match in the scoped corpus, so a broad pattern can
+# return hundreds of chunks that are individually small and collectively
+# larger than the context window.
+#
+# Both are needed, and each has to bite where the other doesn't: the char
+# budget bounds full-size chunks (it stops at 10 of them), the chunk count
+# bounds a long tail of small ones. Keep `_MAX_EVIDENCE_CHUNKS * _SOURCE_CHARS`
+# above `_MAX_EVIDENCE_CHARS` or the char budget becomes unreachable.
+#
+# Applied per call rather than per turn, so what one search returns never
+# depends on which others shared its turn; a step is therefore bounded by
+# `_MAX_PARALLEL_TOOLS` times this — ~32k chars, which the smallest configured
+# Ollama context can still be too tight for (see `OLLAMA_NUM_CTX`).
+_MAX_EVIDENCE_CHUNKS = 12
+_MAX_EVIDENCE_CHARS = 8_000
 
 # Searches asked for in the same turn run together. The cap is low because each
 # `retrieve` already forks a pair of threads internally (`rag.hybrid`), so the
@@ -63,8 +80,6 @@ guessing. When a question has several distinct parts, request every search you
 need in the same turn instead of one per turn.
 
 Prefer `retrieve` for conceptual questions and `grep` for exact identifiers.
-Use `fetch_file` only for a filename that appeared in an earlier result — never
-guess or invent one.
 
 Search results come back to you in full, so answer from them directly. Base the
 answer only on what they contain, and say so plainly when they do not cover the
@@ -103,14 +118,43 @@ class Evidence:
 ChatEvent = Invocation | Evidence | Token
 
 
-def _format_evidence(result: ToolResult) -> str:
-    """What the model sees for one tool call — the sources themselves."""
-    if not result.chunks:
+def _limit_evidence(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
+    """The prefix of ``chunks`` that fits the budget, in the order given.
+
+    Deterministic and order-preserving: the tools already return their best
+    matches first, so taking a prefix keeps the most relevant sources. The
+    first chunk is always kept, so an oversized one is truncated by
+    ``_SOURCE_CHARS`` rather than dropped entirely.
+    """
+    selected: list[ScoredChunk] = []
+    used = 0
+    for chunk in chunks:
+        if len(selected) >= _MAX_EVIDENCE_CHUNKS:
+            break
+        size = min(len(chunk.text), _SOURCE_CHARS)
+        if selected and used + size > _MAX_EVIDENCE_CHARS:
+            break
+        selected.append(chunk)
+        used += size
+    return selected
+
+
+def _format_evidence(result: ToolResult, chunks: list[ScoredChunk]) -> str:
+    """What the model sees for one tool call — the sources themselves.
+
+    ``chunks`` is what survived the budget, which is what the caller cites; a
+    dropped chunk is counted but never quoted, so the model is not asked to
+    answer from text it cannot see.
+    """
+    if not chunks:
         return result.summary or "No matches."
-    return "\n\n---\n\n".join(
-        f"{chunk_header(chunk)}\n{chunk.text[:_SOURCE_CHARS]}"
-        for chunk in result.chunks
+    body = "\n\n---\n\n".join(
+        f"{chunk_header(chunk)}\n{chunk.text[:_SOURCE_CHARS]}" for chunk in chunks
     )
+    omitted = len(result.chunks) - len(chunks)
+    if omitted:
+        body += f"\n\n---\n\n({omitted} further match(es) omitted.)"
+    return body
 
 
 class ChatAgent:
@@ -126,7 +170,6 @@ class ChatAgent:
             [
                 RetrieveTool(llm, store, exclusions=exclusions, filters=filters),
                 GrepTool(store, exclusions=exclusions, filters=filters),
-                FetchFileTool(store, exclusions=exclusions, filters=filters),
             ]
         )
 
@@ -200,28 +243,33 @@ class ChatAgent:
                 if tool is not None:
                     yield Invocation(kind=tool.kind, name=call.name)
 
-            found_evidence = False
+            all_found = True
             for call, tool_result in zip(
                 result.tool_calls, self._run_tools(result.tool_calls), strict=True
             ):
-                if tool_result.chunks:
-                    found_evidence = True
-                    yield Evidence(tool_result.chunks)
+                chunks = _limit_evidence(tool_result.chunks)
+                if chunks:
+                    yield Evidence(chunks)
+                else:
+                    all_found = False
 
                 messages.append(
                     Message(
                         role="tool",
-                        content=_format_evidence(tool_result),
+                        content=_format_evidence(tool_result, chunks),
                         tool_call_id=call.id,
                         name=call.name,
                     )
                 )
 
-            # Anything found ends the search: the sources are in the
-            # conversation, so a further hop would spend a round-trip deciding
-            # to stop. Only a hop that found nothing is worth retrying with a
-            # different query, which is what the remaining budget is for.
-            if found_evidence:
+            # A turn where every search landed ends the loop: the sources are
+            # in the conversation, so a further hop would spend a round-trip
+            # deciding to stop — and it would spend it on a non-streaming call,
+            # delaying the first token rather than just the last. A turn where
+            # any search came back empty is worth retrying with a different
+            # query, which is what the remaining budget is for. That covers the
+            # multi-part question whose parts don't all resolve in one turn.
+            if all_found:
                 break
 
         for token in self._llm.stream(messages):

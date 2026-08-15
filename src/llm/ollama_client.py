@@ -11,7 +11,15 @@ from llm.errors import LLMUnavailableError
 logger = logging.getLogger(__name__)
 
 
-def _to_ollama_messages(messages: list[Message]) -> list[dict[str, Any]]:
+def _to_ollama_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """Internal messages in Ollama's wire shape.
+
+    Every path that sends messages to the daemon goes through this. Our
+    ``Message`` carries ``ToolCall`` objects and a ``name``/``tool_call_id``
+    pair; Ollama expects ``{"function": {...}}`` and ``tool_name``. Handing it
+    the internal shape fails validation or silently loses the tool
+    association, so no caller may skip the conversion.
+    """
     out: list[dict[str, Any]] = []
     for message in messages:
         item: dict[str, Any] = {
@@ -62,7 +70,7 @@ class OllamaBackend(Protocol):
     def chat(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> ollama.ChatResponse: ...
 
     def chat_tools(
@@ -75,7 +83,7 @@ class OllamaBackend(Protocol):
     def chat_stream(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]: ...
 
     def embed(
@@ -137,7 +145,7 @@ class _OllamaAdapter:
     def chat(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> ollama.ChatResponse:
         response = self._client.chat(  # pyright: ignore[reportUnknownMemberType]
             model=model, messages=list(messages or []), options=self._options
@@ -163,7 +171,7 @@ class _OllamaAdapter:
     def chat_stream(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]:
         stream: Iterator[ollama.ChatResponse] = self._client.chat(  # type: ignore[assignment]
             model=model,
@@ -252,7 +260,9 @@ class OllamaClient:
         if self._model is None:
             raise ValueError("No model specified")
         try:
-            response = self._client.chat(model=self._model, messages=messages)
+            response = self._client.chat(
+                model=self._model, messages=_to_ollama_messages(messages)
+            )
             return response.message.content or ""
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
@@ -261,7 +271,9 @@ class OllamaClient:
         if self._model is None:
             raise ValueError("No model specified")
         try:
-            for chunk in self._client.chat_stream(model=self._model, messages=messages):
+            for chunk in self._client.chat_stream(
+                model=self._model, messages=_to_ollama_messages(messages)
+            ):
                 yield chunk.message.content or ""
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
