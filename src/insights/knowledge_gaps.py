@@ -59,7 +59,9 @@ _SNIPPET_CHARS = 600
 # sample fed to the classifier (see ``_doc_priority``).
 _DOC_EXTENSIONS = (".md", ".mdx", ".rst", ".txt")
 
-# Filename substrings mapped to categories, used as the fallback classifier.
+# Filename keywords mapped to categories, used as the fallback classifier.
+# Matched at word boundaries rather than anywhere in the path -- see
+# ``_mentions_keyword`` for why.
 _HEURISTIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "readme": ("readme",),
     "setup": (
@@ -75,9 +77,41 @@ _HEURISTIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
     "architecture": ("architecture", "design"),
     "adr": ("adr", "decision-record", "decision_record"),
-    "api": ("api", "openapi", "swagger", "reference"),
-    "runbook": ("runbook", "playbook", "operations", "ops", "oncall", "on-call"),
+    # "reference" deliberately absent: it matched every file under a
+    # ``references/`` directory, so a wiki that files its conventions and
+    # working agreements there read as fully API-documented. An actual API
+    # reference is caught by "api" anyway.
+    "api": ("api", "openapi", "swagger"),
+    "runbook": (
+        "runbook",
+        "playbook",
+        "operations",
+        "ops",
+        "devops",
+        "oncall",
+        "on-call",
+    ),
 }
+
+
+def _mentions_keyword(name: str, keyword: str) -> bool:
+    """Whether ``name`` contains ``keyword`` starting at a word boundary.
+
+    A plain substring test is too eager on paths: "api" hides inside "rapid"
+    and "capital", "ops" inside "props". The heuristic can only ever *add*
+    categories (see ``_classify_present``), so a false positive here is one the
+    LLM can never take back -- it silently turns a real gap into full coverage.
+
+    Only the start of the match is anchored, not its end: "installation.md"
+    and "apis.md" are the documents their keywords are looking for, and
+    requiring a boundary on both sides would drop them.
+    """
+    start = 0
+    while (index := name.find(keyword, start)) != -1:
+        if index == 0 or not name[index - 1].isalnum():
+            return True
+        start = index + 1
+    return False
 
 
 @dataclass(frozen=True)
@@ -141,7 +175,7 @@ def _heuristic_present(records: list[ArtifactRecord]) -> set[str]:
     for record in records:
         name = record.filename.lower()
         for category, keywords in _HEURISTIC_KEYWORDS.items():
-            if any(keyword in name for keyword in keywords):
+            if any(_mentions_keyword(name, keyword) for keyword in keywords):
                 present.add(category)
     return present
 

@@ -69,6 +69,32 @@ def test_heuristic_present_maps_filenames_to_categories() -> None:
     assert _heuristic_present(records) == {"readme", "runbook", "api"}
 
 
+def test_heuristic_does_not_read_a_references_folder_as_api_docs() -> None:
+    """Regression: a wiki filing its conventions under ``references/`` read as
+    fully API-documented, which hid the whole component from the panel."""
+    records = [
+        _artifact("a1", "docs/source/references/working-agreements.md"),
+        _artifact("a2", "docs/source/references/testing-conventions.md"),
+    ]
+    assert "api" not in _heuristic_present(records)
+
+
+def test_heuristic_ignores_keywords_buried_inside_a_longer_word() -> None:
+    records = [
+        _artifact("a1", "rapid-prototyping.md"),
+        _artifact("a2", "capital-planning.md"),
+        _artifact("a3", "component-props.md"),
+    ]
+    assert _heuristic_present(records) == set()
+
+
+def test_heuristic_still_matches_a_keyword_that_starts_a_longer_word() -> None:
+    """The boundary is only anchored at the start -- these are exactly the
+    documents their keywords are meant to find."""
+    assert _heuristic_present([_artifact("a1", "installation.md")]) == {"setup"}
+    assert _heuristic_present([_artifact("a2", "docs/apis.md")]) == {"api"}
+
+
 # ── severity heuristic ───────────────────────────────────────────────────────
 
 
