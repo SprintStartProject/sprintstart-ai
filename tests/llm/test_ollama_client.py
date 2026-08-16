@@ -7,7 +7,7 @@ import httpx
 import ollama
 import pytest
 
-from llm.base import Message, ToolSpec
+from llm.base import Message, ToolCall, ToolSpec
 from llm.errors import LLMUnavailableError
 from llm.ollama_client import OllamaBackend, OllamaClient
 from tests.conftest import vision_required
@@ -59,7 +59,9 @@ class _FakeOllamaClient:
         self._tool_calls = tool_calls or []
         self.last_tools: list[Mapping[str, Any]] | None = None
         self.last_chat_model: str | None = None
-        self.last_chat_messages: list[Message] | None = None
+        # Wire-shape dicts, not our internal `Message`: what reaches the
+        # daemon is whatever `_to_ollama_messages` produced.
+        self.last_chat_messages: list[Mapping[str, Any]] | None = None
         self.last_embed_model: str | None = None
         self.last_embed_input: list[str] | None = None
         self.last_vision_model: str | None = None
@@ -68,7 +70,7 @@ class _FakeOllamaClient:
     def chat(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> ollama.ChatResponse:
         self.last_chat_model = model
         self.last_chat_messages = list(messages) if messages is not None else None
@@ -105,7 +107,7 @@ class _FakeOllamaClient:
     def chat_stream(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]:
         self.last_chat_model = model
         self.last_chat_messages = list(messages) if messages is not None else None
@@ -251,6 +253,47 @@ class TestStreamHappyPath:
         result = list(client.stream([Message(role="user", content="Hi")]))
 
         assert result == ["Hi!"]
+
+    def test_tool_messages_are_converted_to_the_ollama_schema(self) -> None:
+        """Regression: the chat agent streams the post-tool conversation.
+
+        `stream` used to hand the daemon our internal shape — `ToolCall`
+        objects and `tool_call_id` — which Ollama neither validates nor
+        understands, so every answer that followed a successful search either
+        failed or lost the tool association.
+        """
+        fake = _FakeOllamaClient(chat_content="Done.")
+        client = _make_client(inner_client=fake)
+
+        list(
+            client.stream(
+                [
+                    Message(role="user", content="what broke?"),
+                    Message(
+                        role="assistant",
+                        content="",
+                        tool_calls=[
+                            ToolCall(id="c1", name="retrieve", arguments={"q": "x"})
+                        ],
+                    ),
+                    Message(
+                        role="tool",
+                        content="a chunk",
+                        tool_call_id="c1",
+                        name="retrieve",
+                    ),
+                ]
+            )
+        )
+
+        sent = fake.last_chat_messages
+        assert sent is not None
+        assert sent[1]["tool_calls"] == [
+            {"function": {"name": "retrieve", "arguments": {"q": "x"}}}
+        ]
+        assert sent[2]["tool_name"] == "retrieve"
+        # The internal shape must not leak through alongside it.
+        assert "tool_call_id" not in sent[2]
 
 
 @ollama_required

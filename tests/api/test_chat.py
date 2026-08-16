@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from api.app import app
 from api.dependencies import get_llm, get_source_state_store, get_store
 from ingestion.source_state_store import SourceStateStore
-from llm.base import Message
+from llm.base import ChatResult, Message, ToolSpec
 from llm.errors import LLMUnavailableError
 from rag.types import Chunk
 from tests.conftest import llm_required, parse_sse_events
@@ -104,12 +104,7 @@ def test_chat_emits_citation_when_chunks_exist(
     http_client, _, store = client
     # Use a non-zero embedding so cosine similarity is > 0
     embedding = [1.0] + [0.0] * 767
-    script: list[Turn] = [
-        [("synthesis", {"task": "blockers"})],
-        [("retrieve", {"query": "blockers"})],
-        [],
-        [],
-    ]
+    script: list[Turn] = [[("retrieve", {"query": "blockers"})]]
     app.dependency_overrides[get_llm] = lambda: ScriptedLLMClient(
         script, embedding=embedding
     )
@@ -145,11 +140,7 @@ def test_chat_emits_citation_when_chunks_exist(
         for e in events
         if e["type"] == "tool_use"
     ]
-    assert tool_uses == [
-        {"name": "synthesis", "kind": "agent"},
-        {"name": "retrieve", "kind": "tool"},
-        {"name": "retrieve", "kind": "tool"},
-    ]
+    assert tool_uses == [{"name": "retrieve", "kind": "tool"}]
     assert events[-1] == {"type": "done"}
 
 
@@ -201,12 +192,7 @@ def test_chat_does_not_cite_another_projects_chunks(
     """The agentic path must stay inside the requesting project."""
     http_client, _, store = client
     embedding = [1.0] + [0.0] * 767
-    script: list[Turn] = [
-        [("synthesis", {"task": "blockers"})],
-        [("retrieve", {"query": "blockers"})],
-        [],
-        [],
-    ]
+    script: list[Turn] = [[("retrieve", {"query": "blockers"})]]
     app.dependency_overrides[get_llm] = lambda: ScriptedLLMClient(
         script, embedding=embedding
     )
@@ -322,9 +308,16 @@ def test_chat_llm_unavailable_emits_error_event(
 
     embedding = [1.0] + [0.0] * 767
 
-    class StreamFailingLLM(StubLLMClient):
+    class UnavailableLLM(StubLLMClient):
+        """Down however the agent reaches it — deciding or streaming."""
+
         def __init__(self) -> None:
             super().__init__(embedding=embedding)
+
+        def chat(
+            self, messages: list[Message], tools: list[ToolSpec] | None = None
+        ) -> ChatResult:
+            raise LLMUnavailableError("http://localhost:11434")
 
         def stream(self, messages: list[Message]) -> Iterator[str]:
             raise LLMUnavailableError("http://localhost:11434")
@@ -342,7 +335,7 @@ def test_chat_llm_unavailable_emits_error_event(
         ]
     )
 
-    app.dependency_overrides[get_llm] = lambda: StreamFailingLLM()
+    app.dependency_overrides[get_llm] = lambda: UnavailableLLM()
 
     response = http_client.post(
         "/api/v1/chat",
@@ -501,12 +494,7 @@ def test_chat_applies_source_exclusions_in_unfiltered_path(
     http_client, _, store = client
     embedding = [1.0] + [0.0] * 767
 
-    script: list[Turn] = [
-        [("synthesis", {"task": "blockers"})],
-        [("retrieve", {"query": "blockers"})],
-        [],
-        [],
-    ]
+    script: list[Turn] = [[("retrieve", {"query": "blockers"})]]
     app.dependency_overrides[get_llm] = lambda: ScriptedLLMClient(
         script, embedding=embedding
     )
