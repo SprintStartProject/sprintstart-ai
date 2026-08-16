@@ -51,7 +51,7 @@ rephrases a question.
 The rebuild is no longer the normal path. It is the fallback.
 
 ```
-user asks the AI Buddy
+user asks a question in the chat
   → chat stores the message, publishes ChatQuestionAskedEvent (async, fire-and-forget)
   → insights calls POST /insights/faq/classify with: the question
                                                    + candidate entries (≤ candidate limit)
@@ -185,6 +185,6 @@ sprintstart:
 
 | Endpoint                          | Cost grows with           | Called when                |
 | --------------------------------- | ------------------------- | -------------------------- |
-| `POST /insights/faq/classify`     | the candidate list        | every AI Buddy question    |
+| `POST /insights/faq/classify`     | the candidate list        | every chat question        |
 | `POST /insights/faq/groups/merge` | the number of entries     | the entry ceiling is crossed |
 | `POST /insights/faq/group`        | every question ever asked | a PM rebuilds the grouping |

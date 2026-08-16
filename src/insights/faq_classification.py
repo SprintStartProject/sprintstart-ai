@@ -3,7 +3,7 @@
 The full rebuild in :mod:`insights.faq` costs one LLM pass over *every*
 question a project ever asked. That is fine as a manual fallback and impossible
 as a per-message operation, which is what issues #284/#285 need: the FAQ should
-be current the moment someone asks the AI Buddy something, without a PM
+be current the moment someone asks a question in the chat, without a PM
 pressing refresh.
 
 This module is the cheap online counterpart. Two operations, each with a prompt

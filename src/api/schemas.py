@@ -1066,7 +1066,7 @@ class FaqGroupRefSchema(BaseModel):
 
 
 class FaqClassifyRequest(ProjectScopedRequest):
-    question: str = Field(description="The question a user just asked the AI Buddy.")
+    question: str = Field(description="The question a user just asked in the chat.")
     groups: list[FaqGroupRefSchema] = Field(
         default_factory=list[FaqGroupRefSchema],
         description=(

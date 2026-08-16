@@ -101,7 +101,7 @@ def group_faq_questions(
         "whether it is a real documentation question at all, and whether it "
         "joins an existing entry or opens a new one with its own title. The "
         "returned question text is PII-redacted. Called by the backend on "
-        "every AI Buddy interaction, which is why the prompt is bounded by a "
+        "every chat question, which is why the prompt is bounded by a "
         "candidate list of entries instead of the full question history."
     ),
 )
