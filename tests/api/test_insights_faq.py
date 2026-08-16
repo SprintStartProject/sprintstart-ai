@@ -144,8 +144,8 @@ def test_group_endpoint_groups_and_returns_documents(
     assert vpn_group["count"] == 2
     assert vpn_group["question"] == "How do I get VPN access?"
     assert vpn_group["questions"] == [
-        {"id": "q1", "text": "How do I get VPN access?"},
-        {"id": "q2", "text": "Can someone enable VPN for me?"},
+        {"ids": ["q1"], "text": "How do I get VPN access?"},
+        {"ids": ["q2"], "text": "Can someone enable VPN for me?"},
     ]
     # Every member id, not just the sampled ones: the backend maps these back
     # to the messages they were asked in to rebuild recency and trend.

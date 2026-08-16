@@ -76,9 +76,9 @@ def test_group_faqs_clusters_similar_questions_by_llm_grouping() -> None:
 
     assert [g.count for g in groups] == [2, 1]
     assert groups[0].question == "How do I get VPN access?"
-    assert [(q.id, q.text) for q in groups[0].questions] == [
-        ("q1", "How do I get VPN access?"),
-        ("q2", "Can someone enable VPN for me?"),
+    assert [(q.ids, q.text) for q in groups[0].questions] == [
+        (["q1"], "How do I get VPN access?"),
+        (["q2"], "Can someone enable VPN for me?"),
     ]
     assert groups[0].question_ids == ["q1", "q2"]
     assert groups[1].question == "How do I reset my password?"
@@ -227,6 +227,42 @@ def test_group_faqs_empty_input_returns_no_groups() -> None:
     metadata_store = _metadata_store()
 
     assert group_faqs([], llm, store, metadata_store, project_id=_PROJECT) == []
+
+
+def test_group_faqs_keeps_every_asker_of_a_repeated_phrasing() -> None:
+    """A verbatim repeat is what makes a question recurring, so it must survive
+    the sampling — one phrasing, but every ask that used it."""
+    llm = _ScriptedFaqLLM(groups=[["q1", "q2", "q3"]])
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q2", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q3", text="Can someone enable VPN for me?"),
+    ]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert [q.ids for q in groups[0].questions] == [["q1", "q2"], ["q3"]]
+
+
+def test_group_faqs_caps_distinct_phrasings_not_asks() -> None:
+    """The cap limits how many wordings come back, not how many asks they
+    stand for — otherwise a heavily repeated question would look rare."""
+    ids = [f"q{i}" for i in range(8)]
+    llm = _ScriptedFaqLLM(groups=[ids])
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [
+        FaqQuestionInput(id=qid, text="How do I get VPN access?") for qid in ids
+    ]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert len(groups[0].questions) == 1
+    assert groups[0].questions[0].ids == ids
 
 
 def test_group_faqs_caps_sample_size_below_total_count() -> None:

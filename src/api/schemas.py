@@ -952,12 +952,14 @@ class FaqDocumentSchema(BaseModel):
 
 
 class FaqSampleQuestionSchema(BaseModel):
-    id: Annotated[
-        str,
+    ids: Annotated[
+        list[str],
         Field(
             description=(
-                "Id this question came in as. Ties the sample back to the "
-                "message it was asked in, and with it to when it was asked."
+                "Every id that came in with exactly this wording. Ties each ask "
+                "back to the message it was made in, and with it to when — a "
+                "phrasing used four times is four asks at four moments, and the "
+                "caller needs all of them for its trend and recency."
             )
         ),
     ]
@@ -1023,8 +1025,8 @@ class FaqGroupResponse(BaseModel):
                         "question": "How do I get VPN access?",
                         "count": 14,
                         "questions": [
-                            {"id": "q_1", "text": "How do I get VPN access?"},
-                            {"id": "q_2", "text": "Can someone enable VPN for me?"},
+                            {"ids": ["q_1"], "text": "How do I get VPN access?"},
+                            {"ids": ["q_2"], "text": "Can someone enable VPN for me?"},
                         ],
                         "documents": [
                             {

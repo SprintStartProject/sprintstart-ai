@@ -78,7 +78,7 @@ def group_faq_questions(
                 question=g.question,
                 count=g.count,
                 questions=[
-                    FaqSampleQuestionSchema(id=q.id, text=q.text) for q in g.questions
+                    FaqSampleQuestionSchema(ids=q.ids, text=q.text) for q in g.questions
                 ],
                 documents=[
                     FaqDocumentSchema(id=d.id, title=d.title, source=d.source)

@@ -58,14 +58,15 @@ class FaqDocument:
 
 @dataclass(frozen=True)
 class FaqSampleQuestion:
-    """One redacted sample question, carrying the id it came in as.
+    """One redacted phrasing, with every ask that used it.
 
-    The id lets the caller tie the sample back to the message that was asked,
-    and with it to when it was asked — which is what the FAQ's trend and
-    recency signals are built from.
+    All of them, not just the first: a phrasing used four times is four asks at
+    four different moments, and the caller needs each one to keep its trend
+    exact and to say when the phrasing was *last* used. Collapsing them to a
+    single id here would push both of those onto a guess.
     """
 
-    id: str
+    ids: list[str]
     text: str
 
 
@@ -246,28 +247,30 @@ def group_faqs(
     # Redact every representative + sample question in a single batched LLM
     # call rather than one call per group.
     sample_texts: list[str] = []
-    sample_ids: list[str] = []
+    sample_ids: list[list[str]] = []
     sample_bounds: list[tuple[int, int]] = []
     for cluster in clusters:
-        seen: dict[str, str] = {}
+        # Grouped by text, so a question asked twice verbatim is one sample —
+        # but keeping every asker, because the repeats are what make it a
+        # recurring question and dropping them would understate it. The cap
+        # limits distinct wordings, not asks.
+        ids_by_text: dict[str, list[str]] = {}
         for member in cluster.members:
-            if len(seen) >= _MAX_SAMPLE_QUESTIONS:
-                break
-            # Keyed by text so a question asked twice verbatim contributes one
-            # sample; the first asker's id is the one kept.
-            seen.setdefault(member.text, member.id)
+            ids_by_text.setdefault(member.text, []).append(member.id)
+
+        kept = list(ids_by_text.items())[:_MAX_SAMPLE_QUESTIONS]
         start = len(sample_texts)
-        sample_texts.extend(seen.keys())
-        sample_ids.extend(seen.values())
-        sample_bounds.append((start, start + len(seen)))
+        sample_texts.extend(text for text, _ in kept)
+        sample_ids.extend(ids for _, ids in kept)
+        sample_bounds.append((start, start + len(kept)))
 
     redacted = redact_pii(sample_texts, llm)
 
     groups: list[FaqGroup] = []
     for cluster, (start, end) in zip(clusters, sample_bounds, strict=True):
         samples = [
-            FaqSampleQuestion(id=qid, text=text)
-            for qid, text in zip(
+            FaqSampleQuestion(ids=ids, text=text)
+            for ids, text in zip(
                 sample_ids[start:end], redacted[start:end], strict=True
             )
         ]
