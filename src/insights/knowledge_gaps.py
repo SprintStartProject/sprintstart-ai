@@ -17,6 +17,7 @@ question history. The backend enriches the returned ``component`` with those.
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -67,6 +68,7 @@ _HEURISTIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "setup": (
         "setup",
         "install",
+        "installation",
         "getting-started",
         "getting_started",
         "quickstart",
@@ -76,14 +78,15 @@ _HEURISTIC_KEYWORDS: dict[str, tuple[str, ...]] = {
         "env.example",
     ),
     "architecture": ("architecture", "design"),
-    "adr": ("adr", "decision-record", "decision_record"),
+    "adr": ("adr", "adrs", "decision-record", "decision_record"),
     # "reference" deliberately absent: it matched every file under a
     # ``references/`` directory, so a wiki that files its conventions and
     # working agreements there read as fully API-documented. An actual API
     # reference is caught by "api" anyway.
-    "api": ("api", "openapi", "swagger"),
+    "api": ("api", "apis", "openapi", "swagger"),
     "runbook": (
         "runbook",
+        "runbooks",
         "playbook",
         "operations",
         "ops",
@@ -95,23 +98,23 @@ _HEURISTIC_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 
 def _mentions_keyword(name: str, keyword: str) -> bool:
-    """Whether ``name`` contains ``keyword`` starting at a word boundary.
+    """Whether ``name`` contains ``keyword`` as a whole word.
 
-    A plain substring test is too eager on paths: "api" hides inside "rapid"
-    and "capital", "ops" inside "props". The heuristic can only ever *add*
-    categories (see ``_classify_present``), so a false positive here is one the
-    LLM can never take back -- it silently turns a real gap into full coverage.
+    A plain substring test is far too eager on paths: "api" hides inside
+    "rapid" and "capital", "ops" inside "props", "adr" inside "adrenaline".
+    The heuristic can only ever *add* categories (see ``_classify_present``),
+    so a false positive here is one the LLM can never take back -- it silently
+    turns a real gap into full coverage, which is the failure mode this whole
+    function exists to prevent.
 
-    Only the start of the match is anchored, not its end: "installation.md"
-    and "apis.md" are the documents their keywords are looking for, and
-    requiring a boundary on both sides would drop them.
+    Both ends are anchored. Legitimate suffixed forms are not inferred from an
+    open-ended prefix match but listed outright in ``_HEURISTIC_KEYWORDS``
+    ("apis", "installation", "adrs"), so the set of things that count as
+    documentation stays something you can read off the table rather than a
+    consequence of how the matcher happens to work.
     """
-    start = 0
-    while (index := name.find(keyword, start)) != -1:
-        if index == 0 or not name[index - 1].isalnum():
-            return True
-        start = index + 1
-    return False
+    pattern = rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])"
+    return re.search(pattern, name) is not None
 
 
 @dataclass(frozen=True)

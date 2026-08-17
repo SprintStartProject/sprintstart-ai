@@ -80,19 +80,27 @@ def test_heuristic_does_not_read_a_references_folder_as_api_docs() -> None:
 
 
 def test_heuristic_ignores_keywords_buried_inside_a_longer_word() -> None:
+    """Both ends are anchored. A prefix match alone let `helper` count as
+    `help`, `apiary` as `api` and `adrenaline` as `adr` -- and because the
+    heuristic is unioned with the LLM's answer, the LLM could never take those
+    back."""
     records = [
         _artifact("a1", "rapid-prototyping.md"),
         _artifact("a2", "capital-planning.md"),
         _artifact("a3", "component-props.md"),
+        _artifact("a4", "helper-functions.md"),
+        _artifact("a5", "apiary.md"),
+        _artifact("a6", "adrenaline.md"),
     ]
     assert _heuristic_present(records) == set()
 
 
-def test_heuristic_still_matches_a_keyword_that_starts_a_longer_word() -> None:
-    """The boundary is only anchored at the start -- these are exactly the
-    documents their keywords are meant to find."""
+def test_heuristic_matches_the_listed_suffixed_forms() -> None:
+    """Spelled out in the keyword table rather than inferred from an open-ended
+    prefix match, so what counts as documentation stays readable off the table."""
     assert _heuristic_present([_artifact("a1", "installation.md")]) == {"setup"}
     assert _heuristic_present([_artifact("a2", "docs/apis.md")]) == {"api"}
+    assert _heuristic_present([_artifact("a3", "docs/adrs/index.md")]) == {"adr"}
 
 
 # ── severity heuristic ───────────────────────────────────────────────────────
