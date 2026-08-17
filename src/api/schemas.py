@@ -896,8 +896,10 @@ class KnowledgeGapSchema(BaseModel):
         description="ISO-8601 timestamp of the component's most recently updated "
         "artifact."
     )
-    severity: Literal["high", "medium", "low"] = Field(
-        description="Gap severity, from missing-critical-category count and staleness."
+    severity: Literal["high", "medium", "low", "covered"] = Field(
+        description="Gap severity, from missing-critical-category count and "
+        "staleness. 'covered' means the component is missing nothing; those are "
+        "reported too, so the response is the project's full component roster."
     )
 
 

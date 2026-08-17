@@ -10,6 +10,11 @@ setup, adr, …) are present versus missing. Detection is hybrid — the LLM
 classifies a component's documents into categories, with a filename heuristic as
 a fallback when the LLM output can't be used.
 
+Every component of the project is reported, including the ones missing nothing;
+those carry the "covered" severity. The result is therefore a coverage roster
+rather than a list of problems: a component in good shape is a finding of its
+own, and leaving it out made it look like it had never been ingested.
+
 Owners and related-question counts are deliberately NOT produced here: the
 ingestion index holds no user/ownership data and this service retains no
 question history. The backend enriches the returned ``component`` with those.
@@ -29,7 +34,7 @@ from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
-Severity = Literal["high", "medium", "low"]
+Severity = Literal["high", "medium", "low", "covered"]
 
 # Documentation categories every component should ideally have, ordered from
 # most to least foundational. This is the "expected-type checklist" the corpus
@@ -263,6 +268,10 @@ def _is_stale(last_updated: str) -> bool:
 def _severity(missing: list[str], last_updated: str) -> Severity:
     """Rank a gap.
 
+    A component with nothing missing is "covered" rather than scored: staleness
+    alone would otherwise push a fully documented component to "low", which is
+    indistinguishable from one that is actually missing something.
+
     Missing critical categories (readme/setup) weigh far more than missing
     optional ones: each missing critical type is worth 3 points, so missing
     even one already reaches "medium" and missing both reaches "high" on its
@@ -272,6 +281,9 @@ def _severity(missing: list[str], last_updated: str) -> Severity:
     without the cap, e.g. 4 missing optional categories alone would already
     cross the "high" threshold even though readme/setup both exist.
     """
+    if not missing:
+        return "covered"
+
     missing_set = set(missing)
     critical_missing = len(missing_set & CRITICAL_TYPES)
     noncritical_missing = min(len(missing_set - CRITICAL_TYPES), 3)
@@ -285,7 +297,7 @@ def _severity(missing: list[str], last_updated: str) -> Severity:
     return "low"
 
 
-_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
+_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "covered": 3}
 
 
 def detect_knowledge_gaps(
@@ -294,7 +306,11 @@ def detect_knowledge_gaps(
     metadata_store: IngestionMetadataStore,
     project_id: str,
 ) -> list[KnowledgeGap]:
-    """Detect per-component documentation-coverage gaps within one project.
+    """Report documentation coverage for every component of one project.
+
+    Components missing nothing are included with severity "covered", so the
+    result is the project's full roster and an absence means "not ingested"
+    rather than "nothing to report".
 
     Only artifacts belonging to ``project_id`` are considered, so a component
     is never reported to — or judged by the documents of — another project.
@@ -310,8 +326,10 @@ def detect_knowledge_gaps(
     for component, records in sorted(components.items()):
         present = _classify_present(component, records, llm, store)
         missing = [t for t in EXPECTED_TYPES if t not in present]
-        if not missing:
-            continue
+        # Fully covered components are reported too, as "covered". Dropping them
+        # made a component that is in good shape indistinguishable from one that
+        # was never ingested, and "this repository has no gaps" is a finding a PM
+        # wants to see rather than infer from an absence.
         last_updated = max(record.updated_at for record in records)
         gaps.append(
             KnowledgeGap(

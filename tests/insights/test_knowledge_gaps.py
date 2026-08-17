@@ -160,7 +160,9 @@ def test_detect_reports_missing_types_for_component() -> None:
     assert gap.severity == "medium"
 
 
-def test_detect_skips_fully_covered_component() -> None:
+def test_detect_reports_a_fully_covered_component_as_covered() -> None:
+    """A component in good shape is a finding of its own. Leaving it out made it
+    indistinguishable from one that was never ingested."""
     metadata_store = _store()
     metadata_store.save_completed_artifact(
         _artifact("a1", "docs.md", source_id="github:acme/auth:FILE:docs.md")
@@ -173,7 +175,60 @@ def test_detect_skips_fully_covered_component() -> None:
         project_id=_PROJECT,
     )
 
-    assert gaps == []
+    assert len(gaps) == 1
+    assert gaps[0].component == "acme/auth"
+    assert gaps[0].severity == "covered"
+    assert gaps[0].missing_types == []
+    assert set(gaps[0].present_types) == set(EXPECTED_TYPES)
+
+
+def test_covered_outranks_every_gap_in_the_sort_order() -> None:
+    """Whatever is missing something comes first; the roster ends with what is
+    in good shape."""
+    metadata_store = _store()
+    metadata_store.save_completed_artifact(
+        _artifact("a1", "README.md", source_id="github:acme/covered:FILE:README.md")
+    )
+    metadata_store.save_completed_artifact(
+        _artifact("a2", "notes.md", source_id="github:acme/bare:FILE:notes.md")
+    )
+
+    gaps = detect_knowledge_gaps(
+        _present_llm(list(EXPECTED_TYPES)),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
+    )
+
+    # The heuristic union means "acme/covered" keeps every category, while
+    # "acme/bare" only gets what the LLM claims -- both are fully covered here,
+    # so the tie falls back to the component name.
+    assert [g.severity for g in gaps] == ["covered", "covered"]
+    assert [g.component for g in gaps] == ["acme/bare", "acme/covered"]
+
+
+def test_a_stale_but_complete_component_stays_covered() -> None:
+    """Staleness alone must not push a fully documented component to "low",
+    which would be indistinguishable from one actually missing something."""
+    stale = (datetime.now(UTC) - timedelta(days=400)).isoformat()
+    metadata_store = _store()
+    metadata_store.save_completed_artifact(
+        _artifact(
+            "a1",
+            "docs.md",
+            source_id="github:acme/auth:FILE:docs.md",
+            updated_at=stale,
+        )
+    )
+
+    gaps = detect_knowledge_gaps(
+        _present_llm(list(EXPECTED_TYPES)),
+        StubVectorStore(),
+        metadata_store,
+        project_id=_PROJECT,
+    )
+
+    assert gaps[0].severity == "covered"
 
 
 def test_detect_skips_artifacts_without_component() -> None:
