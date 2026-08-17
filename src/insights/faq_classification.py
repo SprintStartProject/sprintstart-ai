@@ -31,11 +31,11 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 
 from ingestion.metadata_store import IngestionMetadataStore
 from insights.faq import TITLE_RULE, FaqDocument, documents_for
-from insights.redaction import redact_pii
+from insights.redaction import redact_pii, redact_structured
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from store.base import VectorStore
@@ -96,6 +96,17 @@ class _ClassifyPayload(BaseModel):
     group_id: str | None = None
     title: str = ""
     redacted_question: str = ""
+
+    @model_validator(mode="after")
+    def require_redacted_question(self) -> "_ClassifyPayload":
+        # Rejected rather than defaulted: the caller's contract says this field
+        # is redacted, and the only text available to stand in for a missing one
+        # is the raw question. Failing here routes the answer into the fallback,
+        # which redacts properly, instead of returning PII through a field
+        # documented as carrying none.
+        if self.relevant and not self.redacted_question.strip():
+            raise ValueError("redacted_question is required when relevant is true")
+        return self
 
 
 class _MergeEntry(BaseModel):
@@ -176,7 +187,13 @@ def _build_classify_prompt(question: str, groups: list[ExistingGroup]) -> list[M
     ]
 
 
-def _fallback_classification(question: str, llm: LLMClient) -> Classification:
+def _fallback_classification(
+    question: str,
+    llm: LLMClient,
+    store: VectorStore,
+    metadata_store: IngestionMetadataStore,
+    project_id: str,
+) -> Classification:
     """Keep the question as its own entry when the classifier output is unusable.
 
     Dropping it would silently lose a real question. The redaction still runs —
@@ -184,10 +201,21 @@ def _fallback_classification(question: str, llm: LLMClient) -> Classification:
     dashboard — and ``redact_pii`` degrades to its regex pass on its own if the
     LLM is the thing that is broken. The redacted text doubles as the title,
     which is wordy but still says what the entry is about.
+
+    Retrieval runs here for the same reason it runs for any other newly opened
+    entry: only a *new* entry retrieves, so an entry that skipped it would stay
+    uncited forever — every later question matching it is treated as a repeat of
+    something that already carries its documents.
     """
     redacted = redact_pii([question], llm)
-    text = redacted[0] if redacted else question
-    return Classification(relevant=True, question=text, title=text, group_id=None)
+    text = redacted[0] if redacted else redact_structured(question)
+    return Classification(
+        relevant=True,
+        question=text,
+        title=text,
+        group_id=None,
+        documents=documents_for(question, llm, store, metadata_store, project_id),
+    )
 
 
 def classify_question(
@@ -212,7 +240,11 @@ def classify_question(
     if not text:
         return Classification(relevant=False)
 
-    raw = llm.generate(_build_classify_prompt(text, groups))
+    # The model never sees an address or a phone number: those are matched
+    # deterministically, so there is no reason to send them and then ask for
+    # them back. Retrieval below still runs on the original text, where a
+    # redaction marker would only make the query worse.
+    raw = llm.generate(_build_classify_prompt(redact_structured(text), groups))
     try:
         payload = _ClassifyPayload.model_validate_json(extract_json_object(raw))
     except (ValidationError, json.JSONDecodeError, ValueError) as exc:
@@ -221,7 +253,7 @@ def classify_question(
             "question as its own entry: %s",
             exc,
         )
-        return _fallback_classification(text, llm)
+        return _fallback_classification(text, llm, store, metadata_store, project_id)
 
     if not payload.relevant:
         return Classification(relevant=False)
@@ -237,9 +269,10 @@ def classify_question(
             payload.group_id,
         )
 
-    # A blank redaction would replace the question with nothing at all, which
-    # reads as a corrupted FAQ entry rather than a redacted one.
-    redacted = payload.redacted_question.strip() or text
+    # Re-applied to what came back: the model was asked to redact and its output
+    # is validated for presence, but a model is not a guarantee. The regex pass
+    # is, for the classes it covers.
+    redacted = redact_structured(payload.redacted_question.strip())
     # A matched entry keeps its own title: it is established, and re-titling it
     # every time someone rephrases its question would make the list churn.
     title = matched.title if matched else (" ".join(payload.title.split()) or redacted)
@@ -294,6 +327,11 @@ def _validated_merges(payload: _MergePayload, known: set[str]) -> list[Merge]:
     A merge plan is applied destructively, so anything ambiguous is discarded
     rather than guessed: unknown ids, a source claimed twice, or a target that
     is itself being merged away would each corrupt the result.
+
+    ``claimed`` holds accepted targets as well as sources, so an id appears in
+    at most one merge of the plan. Without the targets in there, two entries
+    could name the same ``into`` and the result would depend on how the caller
+    happened to apply them.
     """
     merges: list[Merge] = []
     claimed: set[str] = set()
@@ -312,8 +350,10 @@ def _validated_merges(payload: _MergePayload, known: set[str]) -> list[Merge]:
             continue
 
         claimed.update(sources)
+        claimed.add(target)
         merges.append(Merge(into=target, sources=sources))
 
-    # A target a *later* merge consumed as a source escapes the check above, and
-    # applying both would make the result depend on the order they run in.
-    return [m for m in merges if m.into not in claimed]
+    # No post-filter: with targets in `claimed`, a later merge can no longer take
+    # an earlier target as a source — it is dropped while its sources are built.
+    # The order the caller applies the plan in therefore cannot change its result.
+    return merges

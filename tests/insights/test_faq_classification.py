@@ -256,7 +256,10 @@ def test_classify_still_redacts_when_classification_is_unparseable() -> None:
     assert result.title == "Ask [NAME] for VPN access"
 
 
-def test_classify_keeps_the_original_text_when_redaction_comes_back_empty() -> None:
+def test_classify_never_returns_the_raw_question_when_redaction_is_missing() -> None:
+    """The field is documented as redacted, so a response that omits it must not
+    be answered with the original text. It is rejected into the fallback, which
+    redacts."""
     llm = _ScriptedLLM(
         {
             "relevant": True,
@@ -266,7 +269,76 @@ def test_classify_keeps_the_original_text_when_redaction_comes_back_empty() -> N
         }
     )
 
-    assert _classify(llm).question == "How do I get VPN access?"
+    result = _classify(llm, question="Mail admin@corp.example for VPN access")
+
+    assert "admin@corp.example" not in result.question
+    assert "[EMAIL]" in result.question
+
+
+def test_classify_redacts_what_the_model_hands_back() -> None:
+    """The model is asked to redact and checked for having answered, but it is
+    not trusted to have done it — the regex pass runs on its output too."""
+    llm = _ScriptedLLM(
+        {
+            "relevant": True,
+            "group_id": None,
+            "title": "Getting VPN access",
+            "redacted_question": "Mail admin@corp.example for VPN access",
+        }
+    )
+
+    assert _classify(llm).question == "Mail [EMAIL] for VPN access"
+
+
+def test_classify_keeps_addresses_out_of_the_prompt_entirely() -> None:
+    """No reason to send an address to a model and then ask for it back."""
+    captured: list[str] = []
+
+    class _CapturingLLM(_ScriptedLLM):
+        def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+            captured.append(str(messages[-1]["content"]))
+            return super().generate(messages)
+
+    llm = _CapturingLLM(
+        {
+            "relevant": True,
+            "group_id": None,
+            "title": "Getting VPN access",
+            "redacted_question": "Mail [EMAIL] for VPN access",
+        }
+    )
+
+    _classify(llm, question="Mail admin@corp.example for VPN access")
+
+    assert "admin@corp.example" not in captured[0]
+    assert "[EMAIL]" in captured[0]
+
+
+def test_classify_retrieves_documents_for_a_fallback_entry() -> None:
+    """A fallback opens a new entry like any other, and only new entries
+    retrieve — one that skipped it would stay uncited for good, because every
+    later match is treated as a repeat of an entry that already has documents."""
+    llm = _ScriptedLLM("not json")
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="doc_001",
+                filename="vpn-setup.md",
+                text="How to get VPN access set up",
+                embedding=_VPN,
+                project_ids=(_PROJECT,),
+            )
+        ]
+    )
+
+    result = _classify(llm, store=store)
+
+    assert result.group_id is None
+    assert result.documents == [
+        FaqDocument(id="doc_001", title="vpn-setup.md", source=None)
+    ]
 
 
 def test_classify_sends_both_the_title_and_the_wording_of_each_candidate() -> None:
@@ -341,13 +413,31 @@ def test_merge_groups_never_merges_one_group_into_two_places() -> None:
     assert [(m.into, m.sources) for m in merges] == [("g1", ["g2"])]
 
 
-def test_merge_groups_drops_a_merge_whose_target_is_merged_away_later() -> None:
-    """Applying both would make the result depend on the order they run in."""
+def test_merge_groups_drops_a_merge_whose_target_is_already_spoken_for() -> None:
+    """Applying both would make the result depend on the order they run in, so
+    the first claim on an id wins and the conflicting merge is dropped whole."""
     llm = _ScriptedLLM(
         {
             "merges": [
                 {"into": "g2", "sources": ["g3"]},
                 {"into": "g1", "sources": ["g2"]},
+            ]
+        }
+    )
+
+    merges = merge_groups(_groups("g1", "g2", "g3", "g4"), target_max=2, llm=llm)
+
+    assert [(m.into, m.sources) for m in merges] == [("g2", ["g3"])]
+
+
+def test_merge_groups_never_reuses_a_target_across_merges() -> None:
+    """An id may take part in at most one merge. Two entries naming the same
+    target left the outcome up to how the caller happened to apply them."""
+    llm = _ScriptedLLM(
+        {
+            "merges": [
+                {"into": "g1", "sources": ["g2"]},
+                {"into": "g1", "sources": ["g3"]},
             ]
         }
     )
