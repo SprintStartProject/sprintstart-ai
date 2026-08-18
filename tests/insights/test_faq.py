@@ -340,6 +340,65 @@ def test_group_faqs_titles_from_the_redacted_text_when_falling_back() -> None:
     assert groups[0].title == "Ask [NAME] for VPN access"
 
 
+def test_group_faqs_redacts_names_from_generated_titles() -> None:
+    """The title is written by the grouping model from the *raw* questions, so
+    it can carry the very name the samples had removed -- a title reading
+    "VPN access for John Doe" beside a sample reading "for [NAME]"."""
+
+    class _RedactingLLM(_ScriptedFaqLLM):
+        def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+            self._calls += 1
+            if self._calls == 1:
+                return self._grouping_response
+            payload = json.loads(messages[-1]["content"])  # type: ignore[index]
+            redacted = [t.replace("John Doe", "[NAME]") for t in payload["texts"]]
+            return json.dumps({"texts": redacted})
+
+    llm = _RedactingLLM(groups=[["q1"]], titles=["VPN access for John Doe"])
+    questions = [FaqQuestionInput(id="q1", text="Ask John Doe for VPN access")]
+
+    groups = group_faqs(
+        questions, llm, StubVectorStore(), _metadata_store(), project_id=_PROJECT
+    )
+
+    assert groups[0].title == "VPN access for [NAME]"
+    assert groups[0].question == "Ask [NAME] for VPN access"
+
+
+def test_group_faqs_redacts_addresses_from_generated_titles() -> None:
+    """Structured redaction runs on titles even when the model is the thing
+    that failed -- redact_pii degrades to its regex pass, and the title has to
+    ride along with it."""
+    llm = _ScriptedFaqLLM(groups=[["q1"]], titles=["Mail admin@corp.example about VPN"])
+    questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
+
+    groups = group_faqs(
+        questions, llm, StubVectorStore(), _metadata_store(), project_id=_PROJECT
+    )
+
+    assert groups[0].title == "Mail [EMAIL] about VPN"
+
+
+def test_group_faqs_keeps_titles_aligned_with_their_own_group() -> None:
+    """Titles are appended to the same batched redaction call as the samples,
+    so an off-by-one in the slicing would hand a group someone else's title."""
+    llm = _ScriptedFaqLLM(
+        groups=[["q1", "q2"], ["q3"]], titles=["First topic", "Second topic"]
+    )
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q2", text="How do I request VPN?"),
+        FaqQuestionInput(id="q3", text="Where is the changelog?"),
+    ]
+
+    groups = group_faqs(
+        questions, llm, StubVectorStore(), _metadata_store(), project_id=_PROJECT
+    )
+
+    by_count = {g.count: g.title for g in groups}
+    assert by_count == {2: "First topic", 1: "Second topic"}
+
+
 def test_group_faqs_redacts_names_from_returned_questions() -> None:
     class _RedactingLLM(_ScriptedFaqLLM):
         def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]

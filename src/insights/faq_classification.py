@@ -134,7 +134,9 @@ _CLASSIFY_SYSTEM = (
     "backend') are NOT the same entry even when they share a sentence "
     "template. When in doubt, open a new entry: set group_id to null.\n"
     "3. If you matched an existing entry, copy its title into title "
-    f"unchanged. If you opened a new one, give it {TITLE_RULE}.\n"
+    f"unchanged. If you opened a new one, give it {TITLE_RULE}. The title "
+    "must carry no personal data either: use the same [NAME], [EMAIL] and "
+    "[PHONE] placeholders there as in rule 4.\n"
     "4. Set redacted_question to the question's text with every person's name "
     "replaced by [NAME], every email by [EMAIL] and every phone number by "
     "[PHONE]. Change nothing else: keep wording, punctuation and meaning "
@@ -273,9 +275,17 @@ def classify_question(
     # is validated for presence, but a model is not a guarantee. The regex pass
     # is, for the classes it covers.
     redacted = redact_structured(payload.redacted_question.strip())
-    # A matched entry keeps its own title: it is established, and re-titling it
-    # every time someone rephrases its question would make the list churn.
-    title = matched.title if matched else (" ".join(payload.title.split()) or redacted)
+    # A matched entry keeps its own title: it is established, re-titling it
+    # every time someone rephrases its question would make the list churn, and
+    # the stored one was already redacted when that entry was created.
+    #
+    # A generated one is not safe yet. It is written from the *raw* question,
+    # so it can carry the very name the redaction just took out of the question
+    # itself -- a title reading "Ask Alice for VPN access" beside a question
+    # reading "Ask [NAME] for VPN access". The prompt asks for the placeholders;
+    # the regex pass is the half that does not depend on the model obliging.
+    generated_title = redact_structured(" ".join(payload.title.split()))
+    title = matched.title if matched else (generated_title or redacted)
 
     return Classification(
         relevant=True,

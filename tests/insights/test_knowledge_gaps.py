@@ -184,27 +184,41 @@ def test_detect_reports_a_fully_covered_component_as_covered() -> None:
 
 def test_covered_outranks_every_gap_in_the_sort_order() -> None:
     """Whatever is missing something comes first; the roster ends with what is
-    in good shape."""
+    in good shape.
+
+    The component names run the other way round on purpose -- "acme/zulu" has
+    the gap and sorts last alphabetically -- so this cannot pass on the
+    name tie-breaker alone.
+    """
+
+    class _PerComponentLLM(StubLLMClient):
+        """Answers the coverage question differently per component, so the
+        result actually contains a gap and a covered component."""
+
+        def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+            prompt = str(messages[-1]["content"])
+            present = list(EXPECTED_TYPES) if "acme/alpha" in prompt else []
+            return json.dumps({"present": present})
+
     metadata_store = _store()
     metadata_store.save_completed_artifact(
-        _artifact("a1", "README.md", source_id="github:acme/covered:FILE:README.md")
+        _artifact("a1", "docs.md", source_id="github:acme/alpha:FILE:docs.md")
     )
     metadata_store.save_completed_artifact(
-        _artifact("a2", "notes.md", source_id="github:acme/bare:FILE:notes.md")
+        _artifact("a2", "notes.md", source_id="github:acme/zulu:FILE:notes.md")
     )
 
     gaps = detect_knowledge_gaps(
-        _present_llm(list(EXPECTED_TYPES)),
+        _PerComponentLLM(),
         StubVectorStore(),
         metadata_store,
         project_id=_PROJECT,
     )
 
-    # The heuristic union means "acme/covered" keeps every category, while
-    # "acme/bare" only gets what the LLM claims -- both are fully covered here,
-    # so the tie falls back to the component name.
-    assert [g.severity for g in gaps] == ["covered", "covered"]
-    assert [g.component for g in gaps] == ["acme/bare", "acme/covered"]
+    assert [(g.component, g.severity) for g in gaps] == [
+        ("acme/zulu", "high"),
+        ("acme/alpha", "covered"),
+    ]
 
 
 def test_a_stale_but_complete_component_stays_covered() -> None:

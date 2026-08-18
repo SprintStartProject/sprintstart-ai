@@ -264,10 +264,19 @@ def group_faqs(
         sample_ids.extend(ids for _, ids in kept)
         sample_bounds.append((start, start + len(kept)))
 
-    redacted = redact_pii(sample_texts, llm)
+    # Titles ride along in the same batched call rather than getting one of
+    # their own: they are generated from the *raw* questions, so a title can
+    # carry the very name the samples just had removed -- "VPN access for
+    # Alice" beside a sample reading "VPN access for [NAME]".
+    cluster_titles = [cluster.title for cluster in clusters]
+    redacted_all = redact_pii(sample_texts + cluster_titles, llm)
+    redacted = redacted_all[: len(sample_texts)]
+    redacted_titles = redacted_all[len(sample_texts) :]
 
     groups: list[FaqGroup] = []
-    for cluster, (start, end) in zip(clusters, sample_bounds, strict=True):
+    for cluster, (start, end), redacted_title in zip(
+        clusters, sample_bounds, redacted_titles, strict=True
+    ):
         samples = [
             FaqSampleQuestion(ids=ids, text=text)
             for ids, text in zip(
@@ -287,7 +296,7 @@ def group_faqs(
                 # Falls back to the representative question rather than to a
                 # placeholder: a wordy entry still says what it is about, an
                 # "Untitled" one says nothing at all.
-                title=cluster.title or representative_redacted,
+                title=redacted_title or representative_redacted,
                 question_ids=[member.id for member in cluster.members],
             )
         )

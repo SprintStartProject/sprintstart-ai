@@ -290,6 +290,65 @@ def test_classify_redacts_what_the_model_hands_back() -> None:
     assert _classify(llm).question == "Mail [EMAIL] for VPN access"
 
 
+def test_classify_redacts_a_generated_title() -> None:
+    """The title is written from the raw question, so it can carry the name the
+    question itself just had removed."""
+    llm = _ScriptedLLM(
+        {
+            "relevant": True,
+            "group_id": None,
+            "title": "Mail admin@corp.example for VPN access",
+            "redacted_question": "Mail [EMAIL] for VPN access",
+        }
+    )
+
+    result = _classify(llm, question="Mail admin@corp.example for VPN access")
+
+    assert result.title == "Mail [EMAIL] for VPN access"
+    assert "admin@corp.example" not in result.title
+
+
+def test_classify_keeps_a_matched_entrys_stored_title_untouched() -> None:
+    """A matched entry keeps its own title, which was redacted when it was
+    created -- re-titling on every rephrasing would make the list churn."""
+    llm = _ScriptedLLM(
+        {
+            "relevant": True,
+            "group_id": "g1",
+            "title": "something the model made up",
+            "redacted_question": "Can someone enable VPN for me?",
+        }
+    )
+
+    result = _classify(llm, groups=[_vpn_group()])
+
+    assert result.title == "Getting VPN access"
+
+
+def test_classify_asks_the_model_to_keep_titles_pii_free() -> None:
+    """Belt and braces: the regex pass cannot catch names, so the prompt has to
+    ask for the placeholders in the title too."""
+    captured: list[str] = []
+
+    class _CapturingLLM(_ScriptedLLM):
+        def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+            captured.append(str(messages[0]["content"]))
+            return super().generate(messages)
+
+    llm = _CapturingLLM(
+        {
+            "relevant": True,
+            "group_id": None,
+            "title": "Getting VPN access",
+            "redacted_question": "How do I get VPN access?",
+        }
+    )
+
+    _classify(llm)
+
+    assert "title must carry no personal data" in captured[0]
+
+
 def test_classify_keeps_addresses_out_of_the_prompt_entirely() -> None:
     """No reason to send an address to a model and then ask for it back."""
     captured: list[str] = []
