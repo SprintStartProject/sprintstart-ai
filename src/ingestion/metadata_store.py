@@ -6,7 +6,11 @@ from pathlib import Path
 from threading import RLock
 from typing import Literal, cast
 
-from rag.filters import decode_project_ids, encode_project_ids
+from rag.filters import (
+    decode_project_ids,
+    encode_project_ids,
+    encoded_project_marker,
+)
 
 IngestionStatus = Literal["processing", "completed", "failed", "deindexed"]
 
@@ -197,6 +201,61 @@ class IngestionMetadataStore:
             return records
 
         return [record for record in records if project_id in record.project_ids]
+
+    def set_project_ids(
+        self,
+        artifact_id: str,
+        project_ids: tuple[str, ...],
+        updated_at: str,
+    ) -> bool:
+        """Replace an artifact's recorded project membership.
+
+        Kept in step with the vector store so project-scoped insights (which
+        read this index, not the chunks) see the same memberships retrieval
+        does. Returns whether a row was actually updated.
+        """
+        normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        with self._lock:
+            cursor = self._connection.execute(
+                """
+                UPDATE artifacts
+                SET project_ids = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (encode_project_ids(normalized), updated_at, artifact_id),
+            )
+            self._connection.commit()
+
+        return cursor.rowcount > 0
+
+    def remove_project(self, project_id: str, updated_at: str) -> int:
+        """Drop one project from every artifact that records it.
+
+        Matched on the encoded form (``|id|``) rather than a bare substring, so
+        an id that happens to be a prefix of another never matches.
+        """
+        marker = encoded_project_marker(project_id)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, project_ids FROM artifacts WHERE project_ids LIKE ?",
+                (f"%{marker}%",),
+            ).fetchall()
+
+            for row in rows:
+                remaining = tuple(
+                    pid
+                    for pid in decode_project_ids(row["project_ids"])
+                    if pid != project_id
+                )
+                self._connection.execute(
+                    "UPDATE artifacts SET project_ids = ?, updated_at = ? WHERE id = ?",
+                    (encode_project_ids(remaining), updated_at, str(row["id"])),
+                )
+
+            self._connection.commit()
+
+        return len(rows)
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:

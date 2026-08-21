@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, cast
 
 import chromadb
@@ -352,6 +353,56 @@ class ChromaVectorStore:
             for metadata in metadatas
             for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
         )
+
+    def set_project_ids_for_artifact(
+        self,
+        artifact_id: str,
+        project_ids: tuple[str, ...],
+    ) -> int:
+        chunks = self._chunks_where({"artifact_id": artifact_id})
+        if not chunks:
+            return 0
+
+        normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        self.add([replace(chunk, project_ids=normalized) for chunk in chunks])
+        return len(chunks)
+
+    def remove_project(self, project_id: str) -> int:
+        # Selected by the boolean marker rather than the delimited string,
+        # because the marker is what retrieval filters on -- a chunk that still
+        # carries it is still reachable, whatever the string says.
+        chunks = self._chunks_where({project_metadata_key(project_id): {"$eq": True}})
+        if not chunks:
+            return 0
+
+        self.add(
+            [
+                replace(
+                    chunk,
+                    project_ids=tuple(
+                        pid for pid in chunk.project_ids if pid != project_id
+                    ),
+                )
+                for chunk in chunks
+            ]
+        )
+        return len(chunks)
+
+    def _chunks_where(self, where: dict[str, Any]) -> list[Chunk]:
+        """Read whole chunks, embeddings included, so they can be re-written.
+
+        Membership lives in the chunk metadata, so moving an artifact between
+        projects has to rewrite the metadata -- and Chroma's upsert *merges*
+        metadata (see ``add``), which cannot drop a stale ``project:<id>`` key.
+        Round-tripping through ``add`` reuses the delete-then-upsert there, and
+        carries the existing embeddings back unchanged: no re-embedding, no LLM
+        call, no cost.
+        """
+        raw_result = self._collection.get(
+            where=cast(Any, where),
+            include=["documents", "metadatas", "embeddings"],
+        )
+        return _chunks_from_get_result(raw_result)
 
     def count(self) -> int:
         return self._collection.count()

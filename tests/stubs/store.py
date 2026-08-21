@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from ingestion.source_role import SourceRole
 from rag.filters import encode_project_ids, matches_retrieval_filters
 from rag.source_filter import SourceExclusions, is_excluded
@@ -136,6 +138,46 @@ class StubVectorStore:
             if chunk.artifact_id == artifact_id
             for project_id in chunk.project_ids
         )
+
+    def set_project_ids_for_artifact(
+        self,
+        artifact_id: str,
+        project_ids: tuple[str, ...],
+    ) -> int:
+        normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        updated = 0
+        rewritten: list[Chunk] = []
+
+        for chunk in self.chunks:
+            if chunk.artifact_id != artifact_id:
+                rewritten.append(chunk)
+                continue
+            rewritten.append(replace(chunk, project_ids=normalized))
+            updated += 1
+
+        self.chunks = rewritten
+        return updated
+
+    def remove_project(self, project_id: str) -> int:
+        updated = 0
+        rewritten: list[Chunk] = []
+
+        for chunk in self.chunks:
+            if project_id not in chunk.project_ids:
+                rewritten.append(chunk)
+                continue
+            rewritten.append(
+                replace(
+                    chunk,
+                    project_ids=tuple(
+                        pid for pid in chunk.project_ids if pid != project_id
+                    ),
+                )
+            )
+            updated += 1
+
+        self.chunks = rewritten
+        return updated
 
     def count(self) -> int:
         return len(self.chunks)

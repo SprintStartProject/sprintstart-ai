@@ -58,4 +58,30 @@ class VectorStore(Protocol):
 
     def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]: ...
 
+    def set_project_ids_for_artifact(
+        self,
+        artifact_id: str,
+        project_ids: tuple[str, ...],
+    ) -> int:
+        """Replace the project membership of every chunk of one artifact.
+
+        The backend owns ``artifact_projects`` and sends the resulting set, so
+        this is a set-operation rather than an add/remove delta: re-sending the
+        same membership is a no-op, and no sequence of calls can leave the store
+        holding a project the backend has already dropped.
+
+        Returns the number of chunks rewritten (0 when the artifact is unknown).
+        """
+        ...
+
+    def remove_project(self, project_id: str) -> int:
+        """Drop one project from every chunk that carries it.
+
+        Used when a project is deleted: its artifacts survive for the other
+        projects they belong to, they just stop being reachable from this one.
+
+        Returns the number of chunks rewritten.
+        """
+        ...
+
     def count(self) -> int: ...
