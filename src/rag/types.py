@@ -22,6 +22,15 @@ class RetrievalFilters:
     # is deliberately fail-closed here: a missing project association makes
     # content invisible rather than visible to everyone (see ``rag.filters``).
     project_id: str | None = None
+    #: The same rule as :attr:`project_id`, for a caller scoped to *several*
+    #: projects at once -- a hire on two teams is the ordinary case. A chunk is
+    #: eligible if it belongs to any of them, and, exactly as with
+    #: ``project_id``, a chunk belonging to no project at all is eligible for
+    #: none of them.
+    #:
+    #: Set both and a chunk must satisfy both, which is rarely what a caller
+    #: wants; pass whichever matches the caller's cardinality, not both.
+    project_ids: frozenset[str] | None = None
     source_systems: list[SourceSystem] | None = None
     time_from: str | None = None
     time_to: str | None = None
@@ -76,6 +85,8 @@ class ScoredChunk:
     created_at: str | None = None
     start_line: int | None = None
     start_page: int | None = None
+    #: See :attr:`Chunk.project_ids`. Carried through retrieval so a citation can
+    #: say where the material belongs.
     project_ids: tuple[str, ...] = ()
 
 

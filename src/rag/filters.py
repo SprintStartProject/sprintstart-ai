@@ -75,6 +75,13 @@ def matches_retrieval_filters(
     chunk: Chunk | ScoredChunk,
     filters: RetrievalFilters | None,
 ) -> bool:
+    """Whether ``chunk`` survives ``filters``.
+
+    The project rule is the one worth stating, and it is deliberately
+    fail-closed: material that belongs to **no** project is visible to **no**
+    project. A chunk ingested before the backend sent ``projectIds`` carries no
+    association, and stays unreachable until it is re-synced.
+    """
     if filters is None:
         return True
 
@@ -83,6 +90,14 @@ def matches_retrieval_filters(
         # ingested before the backend sent projectIds) is not visible to any
         # project. Re-sync via /ingest/sync to make it retrievable again.
         if filters.project_id not in chunk.project_ids:
+            return False
+
+    if filters.project_ids is not None:
+        # Fail closed for the same reason, and note that the empty set admits
+        # nothing rather than everything: a caller that resolved a hire's
+        # projects and got none has established they may see nothing, which is
+        # not the same as not having asked.
+        if not any(pid in filters.project_ids for pid in chunk.project_ids):
             return False
 
     if filters.source_systems:
@@ -133,6 +148,22 @@ def where_filter_for_chroma(
     if filters is not None:
         if filters.project_id is not None:
             conditions.append({project_metadata_key(filters.project_id): {"$eq": True}})
+
+        if filters.project_ids is not None:
+            # The per-project marker keys make membership in any of several
+            # projects an $or of $eq, so this pushes down like every other
+            # constraint rather than being left to the post-filter. Sorted so
+            # the clause is stable for the same set.
+            markers: list[dict[str, object]] = [
+                {project_metadata_key(pid): {"$eq": True}}
+                for pid in sorted(filters.project_ids)
+            ]
+            # An empty set admits nothing. Chroma has no "match nothing" literal,
+            # so it is left to the in-Python predicate, which rejects it.
+            if len(markers) == 1:
+                conditions.append(markers[0])
+            elif markers:
+                conditions.append({"$or": markers})
 
         if filters.source_systems:
             conditions.append({"source_system": {"$in": filters.source_systems}})

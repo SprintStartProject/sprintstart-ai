@@ -17,8 +17,10 @@ class SplitLLMClient(LLMClient):
     ) -> ChatResult:
         return self._chat.chat(messages, tools)
 
-    def generate(self, messages: list[Message]) -> str:
-        return self._chat.generate(messages)
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
+        return self._chat.generate(messages, temperature=temperature)
 
     def stream(self, messages: list[Message]) -> Iterator[str]:
         return self._chat.stream(messages)
