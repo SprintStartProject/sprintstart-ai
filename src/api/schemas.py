@@ -509,6 +509,16 @@ class TokenEvent(BaseModel):
     )
 
 
+class ReasoningEvent(BaseModel):
+    type: Literal["reasoning"]
+    reasoning: str = Field(
+        description=(
+            "A live reasoning fragment. It is displayed while generating and "
+            "must not be persisted as assistant message content."
+        )
+    )
+
+
 class CitationEvent(BaseModel):
     type: Literal["citation"]
     artifact_id: str

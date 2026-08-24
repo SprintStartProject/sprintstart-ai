@@ -5,7 +5,15 @@ from uuid import uuid4
 
 import ollama
 
-from llm.base import ChatResult, Message, ToolCall, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -267,14 +275,20 @@ class OllamaClient:
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         if self._model is None:
             raise ValueError("No model specified")
         try:
             for chunk in self._client.chat_stream(
                 model=self._model, messages=_to_ollama_messages(messages)
             ):
-                yield chunk.message.content or ""
+                thinking = chunk.message.thinking
+                if isinstance(thinking, str) and thinking.strip():
+                    yield ReasoningDelta(thinking)
+
+                content = chunk.message.content
+                if content:
+                    yield TextDelta(content)
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 

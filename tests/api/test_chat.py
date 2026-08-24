@@ -8,7 +8,14 @@ from fastapi.testclient import TestClient
 from api.app import app
 from api.dependencies import get_llm, get_source_state_store, get_store
 from ingestion.source_state_store import SourceStateStore
-from llm.base import ChatResult, Message, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 from rag.types import Chunk
 from tests.conftest import llm_required, parse_sse_events
@@ -96,6 +103,52 @@ def test_chat_token_event_contains_llm_response(
     token_events = [e for e in parse_sse_events(response.text) if e["type"] == "token"]
     assert len(token_events) == 1
     assert token_events[0]["content"] == "Missing designs and flaky CI."
+
+
+def test_filtered_chat_forwards_reasoning_without_mixing_it_into_tokens(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    http_client, _, store = client
+    embedding = [1.0] + [0.0] * 767
+
+    class ReasoningLLM(StubLLMClient):
+        def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
+            yield ReasoningDelta("")
+            yield ReasoningDelta("Comparing the selected sources.")
+            yield TextDelta("The answer.")
+
+    app.dependency_overrides[get_llm] = lambda: ReasoningLLM(embedding=embedding)
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="doc-1",
+                filename="retro.md",
+                text="The answer.",
+                embedding=embedding,
+                project_ids=(_PROJECT,),
+                source_system="GITHUB",
+            )
+        ]
+    )
+
+    response = http_client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "What happened?",
+            "projectId": _PROJECT,
+            "filters": {"source_systems": ["GITHUB"]},
+        },
+    )
+
+    events = parse_sse_events(response.text)
+    assert {
+        "type": "reasoning",
+        "reasoning": "Comparing the selected sources.",
+    } in events
+    assert [event["content"] for event in events if event["type"] == "token"] == [
+        "The answer."
+    ]
 
 
 def test_chat_emits_citation_when_chunks_exist(
@@ -319,7 +372,7 @@ def test_chat_llm_unavailable_emits_error_event(
         ) -> ChatResult:
             raise LLMUnavailableError("http://localhost:11434")
 
-        def stream(self, messages: list[Message]) -> Iterator[str]:
+        def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
             raise LLMUnavailableError("http://localhost:11434")
 
     store.add(

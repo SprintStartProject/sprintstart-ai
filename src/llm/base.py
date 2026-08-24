@@ -30,6 +30,23 @@ class ChatResult:
     tool_calls: list[ToolCall] = field(default_factory=list[ToolCall])
 
 
+@dataclass(frozen=True)
+class TextDelta:
+    """A streamed fragment of the user-visible answer."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ReasoningDelta:
+    """A streamed reasoning fragment, kept separate from answer text."""
+
+    text: str
+
+
+type LLMStreamEvent = TextDelta | ReasoningDelta
+
+
 class LLMClient(Protocol):
     @property
     def model_name(self) -> str | None:
@@ -40,7 +57,7 @@ class LLMClient(Protocol):
         self, messages: list[Message], tools: list[ToolSpec] | None = None
     ) -> ChatResult: ...
     def generate(self, messages: list[Message]) -> str: ...
-    def stream(self, messages: list[Message]) -> Iterator[str]: ...
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]: ...
     def embed(self, text: str) -> list[float]: ...
     def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
     def caption_image(self, image_bytes: bytes) -> str: ...

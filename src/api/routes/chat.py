@@ -14,7 +14,7 @@ from api.dependencies import (
 from api.schemas import ChatRequest, ValidationErrorResponse
 from api.sse import sse_event
 from ingestion.source_state_store import SourceStateStore
-from llm.base import LLMClient, Message
+from llm.base import LLMClient, Message, ReasoningDelta, TextDelta
 from llm.errors import LLMUnavailableError
 from rag.citation import build_citations
 from rag.prompt import build_messages
@@ -123,9 +123,14 @@ def chat(
             ]
             messages = build_messages(body.question, chunks, history)
 
-            for token in llm.stream(messages):
-                if token:
-                    yield sse_event({"type": "token", "content": token})
+            for event in llm.stream(messages):
+                match event:
+                    case ReasoningDelta(text=text):
+                        if text.strip():
+                            yield sse_event({"type": "reasoning", "reasoning": text})
+                    case TextDelta(text=text):
+                        if text:
+                            yield sse_event({"type": "token", "content": text})
 
             for citation in build_citations(chunks):
                 yield sse_event(

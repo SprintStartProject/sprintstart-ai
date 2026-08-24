@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from agents.tools.base import Invocation, ToolRegistry, ToolResult
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
-from llm.base import LLMClient, Message, ToolCall
+from llm.base import LLMClient, Message, ReasoningDelta, TextDelta, ToolCall
 from rag.prompt import chunk_header
 from rag.source_filter import SourceExclusions
 from rag.types import RetrievalFilters, ScoredChunk
@@ -109,13 +109,20 @@ class Token:
 
 
 @dataclass(frozen=True)
+class Reasoning:
+    """A piece of live reasoning, never part of the persisted answer."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class Evidence:
     """Chunks a tool call just returned, for the caller to cite."""
 
     chunks: list[ScoredChunk]
 
 
-ChatEvent = Invocation | Evidence | Token
+ChatEvent = Invocation | Evidence | Reasoning | Token
 
 
 def _limit_evidence(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
@@ -272,6 +279,11 @@ class ChatAgent:
             if all_found:
                 break
 
-        for token in self._llm.stream(messages):
-            if token:
-                yield Token(token)
+        for event in self._llm.stream(messages):
+            match event:
+                case ReasoningDelta(text=text):
+                    if text.strip():
+                        yield Reasoning(text)
+                case TextDelta(text=text):
+                    if text:
+                        yield Token(text)

@@ -2,9 +2,16 @@ import threading
 
 from pydantic import BaseModel
 
-from agents.chat_agent import ChatAgent, ChatEvent, Evidence, Token, wrap_user_query
+from agents.chat_agent import (
+    ChatAgent,
+    ChatEvent,
+    Evidence,
+    Reasoning,
+    Token,
+    wrap_user_query,
+)
 from agents.tools.base import Invocation, Tool, ToolRegistry, ToolResult
-from llm.base import Message, ToolCall
+from llm.base import Message, ReasoningDelta, TextDelta, ToolCall
 from rag.types import Chunk
 from tests.stubs.llm import ScriptedLLMClient, Turn
 from tests.stubs.store import StubVectorStore
@@ -101,6 +108,23 @@ def test_search_then_answer_costs_one_decision_and_one_stream() -> None:
     assert events[-1] == Token("Missing designs.")
     assert len(llm.chat_calls) == 1
     assert len(llm.stream_calls) == 1
+
+
+def test_reasoning_stays_separate_from_answer_tokens() -> None:
+    llm = ScriptedLLMClient(
+        [[_RETRIEVE]],
+        embedding=_EMBEDDING,
+        stream_events=[
+            ReasoningDelta(""),
+            ReasoningDelta("Checking the retrieved evidence."),
+            TextDelta("Missing designs."),
+        ],
+    )
+
+    events = _run(_agent(llm))
+
+    assert Reasoning("Checking the retrieved evidence.") in events
+    assert events[-1] == Token("Missing designs.")
 
 
 def test_tool_result_carries_the_source_text_to_the_model() -> None:
