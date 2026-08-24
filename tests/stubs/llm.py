@@ -34,7 +34,9 @@ class StubLLMClient:
     ) -> ChatResult:
         return ChatResult(text=self.generate_response, tool_calls=[])
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         return self.generate_response
 
     def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
@@ -91,7 +93,9 @@ class ScriptedLLMClient:
         ]
         return ChatResult(text="" if calls else self.answer, tool_calls=calls)
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         return self.answer
 
     def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:

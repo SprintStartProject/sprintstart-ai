@@ -791,6 +791,26 @@ class ArtifactRunIngestRequest(BaseModel):
         description="Original source update timestamp, if known.",
     )
 
+    state: str | None = Field(
+        default=None,
+        description="Issue state at the tracker ('OPEN'/'CLOSED'); null for non-issue.",
+    )
+    has_assignee: bool | None = Field(
+        default=None,
+        alias="hasAssignee",
+        description=(
+            "Whether somebody at the source is already assigned to this issue, or "
+            "null when the connector cannot tell. Starter-work mining withholds "
+            "an issue on a definite true -- taken work is not work a hire can "
+            "pick up. Null is 'unknown', never 'nobody': GitHub issues have "
+            "assignees this system does not ingest."
+        ),
+    )
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Issue labels (e.g. 'good first issue'); empty otherwise.",
+    )
+
 
 class RunArtifactsSyncRequest(BaseModel):
     """Batch payload sent by the backend after a GitHub ingestion run completes."""
@@ -906,8 +926,10 @@ class KnowledgeGapSchema(BaseModel):
         description="ISO-8601 timestamp of the component's most recently updated "
         "artifact."
     )
-    severity: Literal["high", "medium", "low"] = Field(
-        description="Gap severity, from missing-critical-category count and staleness."
+    severity: Literal["high", "medium", "low", "covered"] = Field(
+        description="Gap severity, from missing-critical-category count and "
+        "staleness. 'covered' means the component is missing nothing; those are "
+        "reported too, so the response is the project's full component roster."
     )
 
 
@@ -961,7 +983,24 @@ class FaqDocumentSchema(BaseModel):
     )
 
 
+class FaqSampleQuestionSchema(BaseModel):
+    ids: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Every id that came in with exactly this wording. Ties each ask "
+                "back to the message it was made in, and with it to when — a "
+                "phrasing used four times is four asks at four moments, and the "
+                "caller needs all of them for its trend and recency."
+            )
+        ),
+    ]
+    text: Annotated[str, Field(description="The question's text, PII-redacted.")]
+
+
 class FaqGroupSchema(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     question: Annotated[
         str,
         Field(description="Representative question for the group, PII-redacted."),
@@ -976,13 +1015,35 @@ class FaqGroupSchema(BaseModel):
         ),
     ]
     questions: Annotated[
-        list[str],
+        list[FaqSampleQuestionSchema],
         Field(description="PII-redacted sample of questions in the group."),
     ]
     documents: Annotated[
         list[FaqDocumentSchema],
         Field(description="Documents that answered the group's questions."),
     ]
+    question_ids: Annotated[
+        list[str],
+        Field(
+            default_factory=list[str],
+            description=(
+                "Ids of every question in the group, not just the sample. The "
+                "caller knows when each was asked, so this is what lets it "
+                "rebuild the group's recency and trend without the service "
+                "retaining any history."
+            ),
+        ),
+    ]
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "Short generated title naming what the group is about. This is "
+                "what a PM scans the list by, rather than reading a verbatim "
+                "question per entry."
+            ),
+        ),
+    ] = ""
 
 
 class FaqGroupResponse(BaseModel):
@@ -996,8 +1057,8 @@ class FaqGroupResponse(BaseModel):
                         "question": "How do I get VPN access?",
                         "count": 14,
                         "questions": [
-                            "How do I get VPN access?",
-                            "Can someone enable VPN for me?",
+                            {"ids": ["q_1"], "text": "How do I get VPN access?"},
+                            {"ids": ["q_2"], "text": "Can someone enable VPN for me?"},
                         ],
                         "documents": [
                             {
@@ -1006,8 +1067,393 @@ class FaqGroupResponse(BaseModel):
                                 "source": "confluence",
                             }
                         ],
+                        "title": "Getting VPN access",
+                        "questionIds": ["q_1", "q_2"],
                     }
                 ]
             }
         }
     }
+
+
+class MineStarterWorkRequest(BaseModel):
+    active_source_ids: list[str] = Field(
+        default=[],
+        description=(
+            "Issues already in the backend's starter-work pool (proposed or "
+            "approved). Drives dedup -- never re-proposed."
+        ),
+    )
+    active_competency_keys: list[str] = Field(
+        default=[],
+        description=(
+            "The backend's live competency graph keys, used to ground each "
+            "task's competency tags. A tag outside this set is dropped, not "
+            "invented; when empty, tags are kept as proposed."
+        ),
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded from the caller's previous "
+            "mining run, if any."
+        ),
+    )
+
+
+class AssembleOrientationRequest(BaseModel):
+    task_title: str = Field(description="The task the packet orients somebody for.")
+    task_body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    touched_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Repository paths the task is expected to touch, when known. Used to "
+            "aim retrieval at the right part of the codebase, never asserted."
+        ),
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this task's packet was last "
+            "assembled, if any. Idempotency is per task: an unchanged corpus "
+            "yields `unchanged` so a cached packet can be served, and a moved "
+            "corpus regenerates rather than describing code that changed."
+        ),
+    )
+
+
+class AssembleDiagramRequest(BaseModel):
+    subject: str = Field(
+        description=(
+            "The question the diagram answers -- 'how a request reaches the "
+            "database'. This is the one part of a diagram a model chooses, and "
+            "it only aims retrieval: every part that comes back is derived from "
+            "the corpus and cited, so a subject nothing supports yields "
+            "`skipped` rather than an invention."
+        )
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this subject was last drawn, "
+            "if any. Idempotency is per subject: an unchanged corpus yields "
+            "`unchanged` so a cached diagram can be served without a generation "
+            "-- which is what keeps a card that hydrates on every board load "
+            "from costing an LLM call every time."
+        ),
+    )
+
+
+class FileDiffSchema(BaseModel):
+    """One changed file's diff, budgeted backend-side.
+
+    Reserved for the backend's wire contract.
+    """
+
+    path: str
+    additions: int = 0
+    deletions: int = 0
+    patch: str | None = Field(
+        default=None,
+        description="None when GitHub reported no patch -- binary or too large.",
+    )
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "Whether the patch was cut, so a trimmed diff is not read as small."
+        ),
+    )
+
+
+class BuddyToolCallSchema(BaseModel):
+    id: str = Field(
+        description="Provider-assigned id of this tool call; its result must echo it."
+    )
+    name: str = Field(description="Name of the tool the model wants to run.")
+    arguments: dict[str, object] = Field(
+        default_factory=dict, description="Arguments the model passed to the tool."
+    )
+
+
+class BuddyAgentMessageSchema(BaseModel):
+    role: str = Field(description="One of system | user | assistant | tool.")
+    content: str = Field(
+        default="", description="Text content; empty for a pure tool-call turn."
+    )
+    tool_calls: list[BuddyToolCallSchema] = Field(
+        default_factory=list[BuddyToolCallSchema],
+        description="Tool calls made on an assistant turn.",
+    )
+    tool_call_id: str | None = Field(
+        default=None,
+        description="On a tool-result turn, the id of the call it answers.",
+    )
+
+
+class BuddyToolSpecSchema(BaseModel):
+    name: str = Field(description="Tool name the model refers to when calling it.")
+    description: str = Field(
+        description="What the tool does, so the model knows when to use it."
+    )
+    parameters: dict[str, object] = Field(
+        default_factory=dict, description="JSON-schema of the tool's arguments."
+    )
+
+
+class BuddyCitationSchema(BaseModel):
+    artifact_id: str
+    start_line: int | None = None
+    start_page: int | None = None
+
+
+class BuddyVocabularySchema(BaseModel):
+    """What one unit of this hire's accepted work is called.
+
+    Every field defaults to the engineering wording, so a backend that sends no
+    vocabulary still gets a coherent mentor. The noun is
+    bare because it is always rendered next to the verb -- "merged change",
+    "facilitated ceremony" -- and baking the verb in yields "merged merged change".
+    """
+
+    contribution_noun: str = Field(
+        default="change",
+        description='One unit of accepted work, bare: "change", "ceremony".',
+    )
+    contribution_noun_plural: str = Field(
+        default="changes",
+        description='The plural: "changes", "ceremonies".',
+    )
+    contribution_verb_past: str = Field(
+        default="merged",
+        description='Past tense of the hire\'s own act: "merged", "facilitated".',
+    )
+
+
+class BuddyAgentRequest(BaseModel):
+    messages: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "The running conversation, oldest first. First turn: the hire's history "
+            "plus their new question. Resume turn: everything the previous response "
+            "returned, with the backend's tool-result messages appended."
+        ),
+    )
+    backend_tools: list[BuddyToolSpecSchema] = Field(
+        default_factory=list[BuddyToolSpecSchema],
+        description=(
+            "Tools only the backend can execute (e.g. get_my_metrics). The AI reasons "
+            "about them and hands their calls back rather than running them. Mounted "
+            "per hire: the mentor's persona describes exactly these and no others, so "
+            "a role that cannot produce a kind of evidence is never told about the "
+            "tool for it."
+        ),
+    )
+    vocabulary: BuddyVocabularySchema = Field(
+        default_factory=BuddyVocabularySchema,
+        description=(
+            "What one unit of this hire's accepted work is called, rendered into "
+            "fixed slots in the persona. "
+            "Omit it for the engineering wording."
+        ),
+    )
+    prior_summary: str | None = Field(
+        default=None,
+        description=(
+            "The session's running summary of everything older than `messages` — "
+            "the conversation the window no longer carries. First hop of a turn only."
+        ),
+    )
+    project_ids: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "Scopes `search_docs` to the projects this hire is on. Several is "
+            "ordinary -- a hire onboarding on two projects should find material "
+            "from both and from neither of anybody else's. An empty list scopes "
+            "to no projects (admitting no material)."
+        ),
+    )
+
+
+class BuddyAgentResponse(BaseModel):
+    final: bool = Field(
+        description=(
+            "True when `text` is the answer; false when `pending_tool_calls` run first."
+        )
+    )
+    text: str = Field(
+        default="", description="The answer to show the hire, when `final`."
+    )
+    messages: list[BuddyAgentMessageSchema] = Field(
+        description="The full running conversation to carry back verbatim on a resume."
+    )
+    pending_tool_calls: list[BuddyToolCallSchema] = Field(
+        default_factory=list[BuddyToolCallSchema],
+        description=(
+            "Backend tools to run; append each result as a `tool`, then re-call."
+        ),
+    )
+    citations: list[BuddyCitationSchema] = Field(
+        default_factory=list[BuddyCitationSchema],
+        description="Sources the grounded searches drew on.",
+    )
+
+
+class BuddyOpenRequest(BaseModel):
+    memory: str | None = Field(
+        default=None,
+        description=(
+            "The mentor's durable memory note about this hire; empty on the first "
+            "visit. Read from, never rewritten here — folding is "
+            "`/onboarding/buddy/compact`."
+        ),
+    )
+    recent: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "Messages since the memory was last updated (the previous visit), so the "
+            "greeting can be specific about it. May be empty."
+        ),
+    )
+    state: str = Field(
+        default="",
+        description=(
+            "A plain-text snapshot of the hire's current state (pull requests, tasks, "
+            "competencies) for the greeting to ground itself in."
+        ),
+    )
+
+
+class BuddyCompactRequest(BaseModel):
+    prior_summary: str | None = Field(
+        default=None,
+        description=(
+            "The mentor's durable memory note as it stands; empty before the first "
+            "fold."
+        ),
+    )
+    folded: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "The messages sliding out of the active window, oldest first. The caller "
+            "chooses how many — this side only rewrites the note."
+        ),
+    )
+
+
+class BuddyCompactResponse(BaseModel):
+    memory: str = Field(
+        description=(
+            "The rewritten memory note, covering the prior note plus `folded`. The "
+            "caller persists it and advances its cursor by exactly what it sent."
+        )
+    )
+
+
+# ── FAQ incremental classification (PM insights) ────────────────────────────
+
+
+class FaqGroupRefSchema(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    id: str = Field(description="Backend-assigned group identifier.")
+    question: str = Field(description="The group's representative question.")
+    title: str = Field(
+        default="",
+        description=(
+            "The group's title. Sent alongside the question because a "
+            "summarised title can lose the component name that tells two "
+            "otherwise identical requests apart."
+        ),
+    )
+    count: int = Field(
+        default=1, description="How often the group's question was asked."
+    )
+
+
+class FaqClassifyRequest(ProjectScopedRequest):
+    question: str = Field(description="The question a user just asked in the chat.")
+    groups: list[FaqGroupRefSchema] = Field(
+        default_factory=list[FaqGroupRefSchema],
+        description=(
+            "Candidate groups the question could join. The backend sends a "
+            "bounded selection (most asked / most recent), not the full set: a "
+            "duplicate group opened against a truncated candidate list is "
+            "folded back in by the merge endpoint."
+        ),
+    )
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
+            "example": {
+                "projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11",
+                "question": "How do I get VPN access?",
+                "groups": [
+                    {
+                        "id": "b2c3d4e5-0000-4000-8000-000000000001",
+                        "question": "How do I get VPN access?",
+                        "title": "Getting VPN access",
+                        "count": 14,
+                    }
+                ],
+            }
+        },
+    )
+
+
+class FaqClassifyResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    relevant: bool = Field(
+        description=(
+            "False for greetings, smalltalk and other non-questions. The "
+            "backend drops those instead of surfacing them as an FAQ."
+        )
+    )
+    question: str = Field(default="", description="The question's text, PII-redacted.")
+    title: str = Field(
+        default="",
+        description=(
+            "Title for the group the question belongs to. For a matched group "
+            "this is its existing title, unchanged."
+        ),
+    )
+    group_id: str | None = Field(
+        default=None,
+        description="Existing group the question joins, or null to open a new one.",
+    )
+    documents: list[FaqDocumentSchema] = Field(
+        default_factory=list[FaqDocumentSchema],
+        description=(
+            "Documents answering a newly opened group. Empty when the question "
+            "joined an existing group, which already has its own."
+        ),
+    )
+
+
+class FaqMergeSchema(BaseModel):
+    into: str = Field(
+        description="Surviving group id. Always one of the submitted groups."
+    )
+    sources: list[str] = Field(description="Groups to fold into 'into' and delete.")
+
+
+class FaqMergeGroupsRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    groups: list[FaqGroupRefSchema] = Field(
+        description="Every group the project currently has."
+    )
+    target_max: int = Field(
+        ge=1, description="Ceiling the group count should be brought back under."
+    )
+
+
+class FaqMergeResponse(BaseModel):
+    merges: list[FaqMergeSchema] = Field(
+        description=(
+            "Merges to apply. Empty means nothing was safely mergeable — "
+            "staying over the limit beats merging distinct topics."
+        )
+    )
