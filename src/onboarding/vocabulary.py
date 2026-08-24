@@ -31,6 +31,20 @@ class Vocabulary:
     contribution_noun_plural: str = "changes"
     contribution_verb_past: str = "merged"
 
+    def __post_init__(self) -> None:
+        noun = self.contribution_noun.strip() if self.contribution_noun else ""
+        plural = (
+            self.contribution_noun_plural.strip()
+            if self.contribution_noun_plural
+            else ""
+        )
+        verb = (
+            self.contribution_verb_past.strip() if self.contribution_verb_past else ""
+        )
+        object.__setattr__(self, "contribution_noun", noun or "change")
+        object.__setattr__(self, "contribution_noun_plural", plural or "changes")
+        object.__setattr__(self, "contribution_verb_past", verb or "merged")
+
 
 DEFAULT_VOCABULARY = Vocabulary()
 """Engineering, and the fallback whenever a caller supplies nothing."""
