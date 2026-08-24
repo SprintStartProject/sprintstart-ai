@@ -64,6 +64,8 @@ _TOP_K = 5
 # Same retrieval floor / confidence line as the legacy buddy: `retrieve` drops
 # anything below it, so an empty result means nothing indexed answers with confidence.
 _MIN_SCORE = 0.3
+# Per-chunk cap on evidence returned to the model, consistent with the chat agent.
+_SOURCE_CHARS = 800
 # How many internal search hops before we force a final answer, so a confused model
 # can't loop forever gathering evidence it never uses.
 _MAX_STEPS = 4
@@ -98,23 +100,29 @@ def _persona_prompt(
     return persona + _SUMMARY_HEADER + summary
 
 
+def _extract_summary(system_content: str) -> str | None:
+    if _SUMMARY_HEADER in system_content:
+        return system_content.split(_SUMMARY_HEADER, 1)[1]
+    return None
+
+
 def _ensure_persona(
     messages: list[Message],
     summary: str | None,
     tool_names: Collection[str],
     vocabulary: Vocabulary,
 ) -> list[Message]:
-    # A system message already leads the running conversation on a resume hop: the
-    # summary is folded inside it, so nothing is re-sent or double-folded.
+    effective_summary = summary
+    rest = messages
     if messages and messages[0]["role"] == "system":
-        return list(messages)
-    return [
-        Message(
-            role="system",
-            content=_persona_prompt(summary, tool_names, vocabulary),
-        ),
-        *messages,
-    ]
+        if effective_summary is None:
+            effective_summary = _extract_summary(messages[0].get("content") or "")
+        rest = messages[1:]
+    persona_msg = Message(
+        role="system",
+        content=_persona_prompt(effective_summary, tool_names, vocabulary),
+    )
+    return [persona_msg, *rest]
 
 
 def _assistant_message(result: ChatResult) -> Message:
@@ -168,7 +176,9 @@ def _chunk_header(chunk: ScoredChunk) -> str:
 def _format_chunks(chunks: list[ScoredChunk]) -> str:
     if not chunks:
         return "No indexed material matched this search."
-    parts = [f"{_chunk_header(chunk)}\n{chunk.text}" for chunk in chunks]
+    parts = [
+        f"{_chunk_header(chunk)}\n{chunk.text[:_SOURCE_CHARS]}" for chunk in chunks
+    ]
     return "\n\n---\n\n".join(parts)
 
 
@@ -202,14 +212,17 @@ def run_agent_turn(
     window = list(messages)
     summary = prior_summary
 
-    tools = [_SEARCH_TOOL, *backend_tools]
-    backend_names = {tool["name"] for tool in backend_tools}
+    tools = [_SEARCH_TOOL, *[t for t in backend_tools if t["name"] != SEARCH_DOCS]]
+    backend_names = {
+        tool["name"] for tool in backend_tools if tool["name"] != SEARCH_DOCS
+    }
     # The persona describes exactly the tools this hire was mounted, never a fixed
     # catalogue: the backend decides what a given role can even have, and a mentor
     # told about a tool it does not have will offer the hire something impossible.
     work = _ensure_persona(window, summary, {SEARCH_DOCS, *backend_names}, vocabulary)
     resolved_exclusions = exclusions if exclusions is not None else SourceExclusions()
     citations: list[Citation] = []
+    seen_chunk_ids: set[str] = set()
 
     for _ in range(_MAX_STEPS):
         result = llm.chat(work, tools)
@@ -244,8 +257,11 @@ def run_agent_turn(
                     )
                 )
                 # Cited after the drop, so nothing the mentor may not quote is
-                # offered to the hire as a source either.
-                citations.extend(build_citations(chunks))
+                # offered to the hire as a source either. Deduped by chunk id.
+                fresh = [c for c in chunks if c.id not in seen_chunk_ids]
+                for chunk in fresh:
+                    seen_chunk_ids.add(chunk.id)
+                citations.extend(build_citations(fresh))
                 work = [*work, _tool_result_message(call.id, _format_chunks(chunks))]
             elif call.name in backend_names:
                 pending.append(call)

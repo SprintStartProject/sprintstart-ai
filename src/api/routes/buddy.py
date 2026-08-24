@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -25,6 +26,8 @@ from onboarding.buddy_compact import compact_memory
 from onboarding.buddy_open import stream_session
 from onboarding.vocabulary import Vocabulary
 from store.base import VectorStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -97,7 +100,7 @@ def buddy_agent(
                 contribution_noun_plural=body.vocabulary.contribution_noun_plural,
                 contribution_verb_past=body.vocabulary.contribution_verb_past,
             ),
-            project_ids=frozenset(body.project_ids) or None,
+            project_ids=frozenset(body.project_ids),
         )
     except LLMUnavailableError as exc:
         raise HTTPException(
@@ -194,12 +197,20 @@ def buddy_open_stream(
     """
 
     def event_stream() -> Iterator[str]:
-        for event in stream_session(
-            memory=body.memory,
-            recent=[_to_message(m) for m in body.recent],
-            state=body.state,
-            llm=llm,
-        ):
-            yield sse_event(event)
+        try:
+            for event in stream_session(
+                memory=body.memory,
+                recent=[_to_message(m) for m in body.recent],
+                state=body.state,
+                llm=llm,
+            ):
+                yield sse_event(event)
+        except LLMUnavailableError as exc:
+            yield sse_event({"type": "error", "message": str(exc)})
+        except Exception:
+            logger.exception("Unexpected error in buddy open stream")
+            yield sse_event(
+                {"type": "error", "message": "An unexpected error occurred"}
+            )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
