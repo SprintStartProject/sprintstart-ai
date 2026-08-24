@@ -4,7 +4,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from llm.base import Message, ToolSpec
+from llm.base import Message, ReasoningDelta, TextDelta, ToolSpec
 from llm.errors import LLMUnavailableError
 from llm.openai_client import OpenAIClient
 
@@ -101,7 +101,49 @@ def test_stream_yields_tokens() -> None:
 
     client = make_client(handler)
 
-    assert list(client.stream([Message(role="user", content="Hello")])) == ["Hel", "lo"]
+    assert list(client.stream([Message(role="user", content="Hello")])) == [
+        TextDelta("Hel"),
+        TextDelta("lo"),
+    ]
+
+
+def test_stream_keeps_reasoning_separate_and_skips_malformed_deltas() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {"reasoning_content": "Checking evidence."},
+            {"reasoning_content": ""},
+            {"reasoning_content": 42},
+            {"content": "Answer."},
+        ]
+        stream_body = (
+            "".join(
+                "data: "
+                + json.dumps(
+                    {
+                        "id": "1",
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {"index": 0, "delta": delta, "finish_reason": None}
+                        ],
+                    }
+                )
+                + "\n\n"
+                for delta in chunks
+            )
+            + "data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=stream_body,
+        )
+
+    client = make_client(handler)
+
+    assert list(client.stream([Message(role="user", content="Hello")])) == [
+        ReasoningDelta("Checking evidence."),
+        TextDelta("Answer."),
+    ]
 
 
 def test_embed_uses_embeddings_endpoint() -> None:

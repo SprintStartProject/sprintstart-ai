@@ -54,7 +54,8 @@ The service runs on port `8000`.
 
 | Variable | Example value | Description |
 |---|---|---|
-| `LLM_BACKEND` | `ollama` | LLM backend to use. Currently only `ollama` is supported. |
+| `LLM_BACKEND` | `ollama` | LLM backend used for chat/generation: `ollama`, `openai`/`litellm`, or `anthropic`. |
+| `ANTHROPIC_THINKING_BUDGET_TOKENS` | `1024` | Reasoning-token budget for streamed Anthropic chat answers. Must be at least 1024 and lower than `ANTHROPIC_MAX_TOKENS`; set `0` to disable. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL of the Ollama instance. Use `http://host.docker.internal:11434` when running via Docker with Ollama on the host. |
 | `OLLAMA_MODEL` | `gemma4:e4b` | Chat model to use for generation. |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text:latest` | Embedding model to use for ingestion and retrieval. |
@@ -94,6 +95,7 @@ The `/api/v1/chat` endpoint streams newline-delimited JSON events:
 | Event type | Description |
 |---|---|
 | `tool_use` | A capability the agent invoked, in order. Has `name` and `kind` (currently always `tool`; `agent` is reserved for a delegating capability) |
+| `reasoning` | A live reasoning fragment in the `reasoning` field. It is never part of the final answer or persisted message content. Models without a reasoning channel simply omit these events. |
 | `token` | A single token fragment of the answer |
 | `citation` | A source chunk used to generate the answer |
 | `done` | Signals the end of the stream |

@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 
-from llm.base import ChatResult, LLMClient, Message, ToolSpec
+from llm.base import ChatResult, LLMClient, LLMStreamEvent, Message, ToolSpec
 
 
 class SplitLLMClient(LLMClient):
@@ -20,7 +20,7 @@ class SplitLLMClient(LLMClient):
     def generate(self, messages: list[Message]) -> str:
         return self._chat.generate(messages)
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         return self._chat.stream(messages)
 
     def caption_image(self, image_bytes: bytes) -> str:

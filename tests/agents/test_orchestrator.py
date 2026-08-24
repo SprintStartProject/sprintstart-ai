@@ -2,7 +2,14 @@ from collections.abc import Iterator
 
 from agents.orchestrator import ChatOrchestrator
 from api.schemas import HistoryEntry
-from llm.base import ChatResult, Message, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 from rag.types import Chunk
 from tests.conftest import parse_sse_events
@@ -76,6 +83,25 @@ def test_orchestrator_streams_citation_before_answer_tokens() -> None:
     assert len(citations) == 1  # not re-emitted again at the end of the stream
 
 
+def test_orchestrator_emits_reasoning_separately_before_answer() -> None:
+    llm = ScriptedLLMClient(
+        [[_RETRIEVE_CALL]],
+        embedding=_EMBEDDING,
+        stream_events=[ReasoningDelta("Checking sources."), TextDelta("Answer.")],
+    )
+
+    events = _events(ChatOrchestrator(llm, _store_with_chunk()), "What broke?")
+
+    reasoning = [event for event in events if event["type"] == "reasoning"]
+    assert reasoning == [{"type": "reasoning", "reasoning": "Checking sources."}]
+    assert [event["content"] for event in events if event["type"] == "token"] == [
+        "Answer."
+    ]
+    assert [event["type"] for event in events].index("reasoning") < [
+        event["type"] for event in events
+    ].index("token")
+
+
 def test_orchestrator_does_not_duplicate_citations_across_tool_calls() -> None:
     """The same chunk id surfacing from more than one tool call in the same
     turn must only produce a single citation event."""
@@ -142,7 +168,7 @@ def test_orchestrator_emits_error_event_when_llm_unavailable() -> None:
 
 def test_orchestrator_emits_error_event_when_the_answer_stream_fails() -> None:
     class _FailingStream(ScriptedLLMClient):
-        def stream(self, messages: list[Message]) -> Iterator[str]:
+        def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
             raise LLMUnavailableError("http://localhost:11434")
 
     llm = _FailingStream([[_RETRIEVE_CALL]], embedding=_EMBEDDING)

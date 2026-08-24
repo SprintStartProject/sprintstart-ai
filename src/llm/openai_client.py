@@ -15,7 +15,16 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
-from llm.base import ChatResult, LLMClient, Message, ToolCall, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMClient,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 
 
@@ -201,7 +210,7 @@ class OpenAIClient(LLMClient):
                 f"using model {self.chat_model!r} at {self.base_url}: {exc}"
             ) from exc
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         try:
             stream: Iterator[ChatCompletionChunk] = self.client.chat.completions.create(
                 model=self.chat_model,
@@ -214,10 +223,17 @@ class OpenAIClient(LLMClient):
                     continue
 
                 delta: ChoiceDelta = event.choices[0].delta
-                content = delta.content
+                # ``reasoning_content`` is an OpenAI-compatible extension used
+                # by reasoning models such as DeepSeek-R1 and Qwen. The OpenAI
+                # SDK keeps unknown response fields on its Pydantic model, but
+                # does not declare this one in ``ChoiceDelta``.
+                reasoning = getattr(delta, "reasoning_content", None)
+                if isinstance(reasoning, str) and reasoning.strip():
+                    yield ReasoningDelta(reasoning)
 
+                content = delta.content
                 if content:
-                    yield content
+                    yield TextDelta(content)
 
         except OpenAIError as exc:
             raise LLMUnavailableError(
