@@ -28,7 +28,6 @@ from llm.base import (
 from llm.errors import LLMUnavailableError
 
 _DEFAULT_MAX_TOKENS = 4096
-_DEFAULT_THINKING_BUDGET_TOKENS = 1024
 _MIN_THINKING_BUDGET_TOKENS = 1024
 
 _CACHE_CONTROL: CacheControlEphemeralParam = {"type": "ephemeral"}
@@ -189,7 +188,7 @@ class AnthropicClient(LLMClient):
         vision_model: str | None = None,
         base_url: str | None = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
-        thinking_budget_tokens: int | None = _DEFAULT_THINKING_BUDGET_TOKENS,
+        thinking_budget_tokens: int | None = None,
         timeout: float | None = None,
     ) -> None:
         if thinking_budget_tokens is not None:
