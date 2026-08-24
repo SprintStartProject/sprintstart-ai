@@ -62,6 +62,7 @@ class _FakeOllamaClient:
         # Wire-shape dicts, not our internal `Message`: what reaches the
         # daemon is whatever `_to_ollama_messages` produced.
         self.last_chat_messages: list[Mapping[str, Any]] | None = None
+        self.last_chat_options: Mapping[str, Any] | None = None
         self.last_embed_model: str | None = None
         self.last_embed_input: list[str] | None = None
         self.last_vision_model: str | None = None
@@ -71,9 +72,12 @@ class _FakeOllamaClient:
         self,
         model: str = "",
         messages: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        options: Mapping[str, Any] | None = None,
     ) -> ollama.ChatResponse:
         self.last_chat_model = model
         self.last_chat_messages = list(messages) if messages is not None else None
+        self.last_chat_options = options
         if self._chat_error is not None:
             raise self._chat_error
         return ollama.ChatResponse(

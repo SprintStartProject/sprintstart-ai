@@ -30,9 +30,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Each artifact already batches its own chunks into one embed_batch() call
-# (issue #129); this bounds how many artifacts are embedded concurrently
-# across the batch, since /ingest/sync otherwise processes them one at a
+# Each artifact already batches its own chunks into one embed_batch() call;
+# this bounds how many artifacts are embedded concurrently across the batch,
+# since /ingest/sync otherwise processes them one at a
 # time and a few hundred artifacts can take minutes purely from sequential
 # network round-trips to the embedding API. Kept modest to stay well under
 # typical provider rate limits -- override via INGEST_CONCURRENCY.
@@ -122,6 +122,9 @@ def _ingest_one(
         artifact_type=artifact.artifact_type,
         language=artifact.language,
         project_ids=project_ids,
+        state=artifact.state,
+        has_assignee=artifact.has_assignee,
+        labels=artifact.labels,
     )
 
     if len(content) > max_length:
@@ -198,7 +201,7 @@ def _ingest_one(
             )
         ]
     except LLMUnavailableError as exc:
-        # Mid-batch LLM outages must not sink the whole request (issue #129 #6):
+        # Mid-batch LLM outages must not sink the whole request:
         # record this artifact as failed and let the caller retry it later while
         # the rest of the batch still gets a chance to ingest.
         metadata_store.mark_failed(artifact.artifact_id, str(exc), _utc_now())
