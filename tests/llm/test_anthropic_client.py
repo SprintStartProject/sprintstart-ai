@@ -44,7 +44,11 @@ def _delta(delta_type: str, **values: object) -> SimpleNamespace:
 
 
 def test_stream_enables_thinking_and_separates_reasoning_from_text() -> None:
-    client = AnthropicClient(api_key="test", chat_model="claude-haiku-4-5")
+    client = AnthropicClient(
+        api_key="test",
+        chat_model="claude-haiku-4-5",
+        thinking_budget_tokens=1024,
+    )
     messages = _FakeMessages(
         [
             _delta("thinking_delta", thinking="Checking evidence."),
@@ -63,13 +67,12 @@ def test_stream_enables_thinking_and_separates_reasoning_from_text() -> None:
     }
 
 
-def test_stream_can_disable_anthropic_thinking() -> None:
+def test_stream_defaults_to_thinking_disabled() -> None:
     from anthropic import Omit
 
     client = AnthropicClient(
         api_key="test",
         chat_model="claude-haiku-4-5",
-        thinking_budget_tokens=None,
     )
     messages = _FakeMessages([_delta("text_delta", text="Answer.")])
     client.client.messages = cast("Any", messages)
