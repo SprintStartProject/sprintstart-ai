@@ -100,14 +100,14 @@ def test_compact_endpoint_503s_rather_than_returning_an_unchanged_note() -> None
 
     app.dependency_overrides[get_llm] = lambda: _Unavailable()
     try:
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/v1/onboarding/buddy/compact",
-                json={
-                    "prior_summary": "old notes",
-                    "folded": [{"role": "user", "content": "hello"}],
-                },
-            )
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/onboarding/buddy/compact",
+            json={
+                "prior_summary": "old notes",
+                "folded": [{"role": "user", "content": "hello"}],
+            },
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -122,11 +122,11 @@ def test_open_stream_greets_and_carries_no_memory_note() -> None:
     llm = StubLLMClient(generate_response="Welcome back, Sam!")
     app.dependency_overrides[get_llm] = lambda: llm
     try:
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/v1/onboarding/buddy/open/stream",
-                json={"memory": "old note", "recent": [], "state": "1 open PR"},
-            )
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/onboarding/buddy/open/stream",
+            json={"memory": "old note", "recent": [], "state": "1 open PR"},
+        )
     finally:
         app.dependency_overrides.clear()
 
