@@ -33,7 +33,7 @@ from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from onboarding.citations import resolve_citations
-from onboarding.corpus import corpus_fingerprint
+from onboarding.corpus import fingerprint_gate
 from onboarding.diagram_models import (
     EDGE_KINDS,
     NODE_KINDS,
@@ -419,22 +419,21 @@ def stream_diagram(
     — not even briefly.
     """
     progress = ProgressStream("diagram")
-    fingerprint = corpus_fingerprint(store)
-
-    if last_fingerprint is not None and last_fingerprint == fingerprint:
-        outcome = DiagramOutcome(
+    fingerprint, early_events, early_outcome = fingerprint_gate(
+        progress,
+        store,
+        last_fingerprint,
+        make_unchanged=lambda: DiagramOutcome(
             status="unchanged", notes=["corpus unchanged since the cached diagram"]
-        )
-        yield progress.done(
-            "Nothing changed — the cached diagram is current", _dump(outcome)
-        )
-        return outcome
-
-    if store.count() == 0:
-        outcome = DiagramOutcome(status="skipped", notes=["corpus is empty"])
-        yield progress.warning("The project has no indexed material yet")
-        yield progress.done("No diagram could be assembled", _dump(outcome))
-        return outcome
+        ),
+        make_empty=lambda: DiagramOutcome(status="skipped", notes=["corpus is empty"]),
+        unchanged_label="Nothing changed — the cached diagram is current",
+        empty_warning_label="The project has no indexed material yet",
+        empty_done_label="No diagram could be assembled",
+    )
+    if early_outcome is not None:
+        yield from early_events
+        return early_outcome
 
     bm25_cache = BM25IndexCache()
     by_id: dict[str, ScoredChunk] = {}

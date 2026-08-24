@@ -3,7 +3,6 @@ from collections.abc import Generator
 
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
 from onboarding import starter_work
-from onboarding.corpus import corpus_fingerprint
 from onboarding.progress import ProgressEvent
 from onboarding.starter_work import (
     generate_starter_work_pool,
@@ -102,7 +101,7 @@ def test_mines_safely_scoped_task_from_open_issue() -> None:
     assert task.competency_keys == ["docs"]
     assert task.citations[0].source_url == "https://github.com/org/repo/issues/1"
     assert outcome.provenance is not None
-    assert outcome.provenance.corpus_fingerprint == corpus_fingerprint(store)
+    assert outcome.provenance.corpus_fingerprint is not None
 
 
 def test_mines_a_tracker_issue_that_is_not_from_github() -> None:
@@ -307,14 +306,83 @@ def test_unchanged_corpus_with_matching_fingerprint_is_a_noop() -> None:
     metadata_store.save_artifact(_issue_artifact())
     store = StubVectorStore()
     _add_issue_chunk(store, "a1", "Fix typo", "body")
-    llm = _llm([])
-
-    outcome = generate_starter_work_pool(
-        llm, store, metadata_store, last_fingerprint=corpus_fingerprint(store)
+    llm = _llm(
+        [
+            {
+                "source_id": "github:org/repo:ISSUE:1",
+                "safely_scoped": True,
+                "summary": "s",
+            }
+        ]
     )
 
-    assert outcome.status == "unchanged"
-    assert outcome.tasks == []
+    first = generate_starter_work_pool(llm, store, metadata_store)
+    assert first.status == "proposed"
+    assert first.provenance is not None
+
+    again = generate_starter_work_pool(
+        llm, store, metadata_store, last_fingerprint=first.provenance.corpus_fingerprint
+    )
+
+    assert again.status == "unchanged"
+    assert again.tasks == []
+
+
+def test_state_flip_to_closed_invalidates_fingerprint() -> None:
+    """Closing an issue changes the mining fingerprint even if chunk text is
+    identical.
+    """
+    metadata_store = _metadata_store()
+    metadata_store.save_artifact(_issue_artifact(id="a1", state="OPEN"))
+    store = StubVectorStore()
+    _add_issue_chunk(store, "a1", "Fix typo", "body")
+    llm = _llm(
+        [
+            {
+                "source_id": "github:org/repo:ISSUE:1",
+                "safely_scoped": True,
+                "summary": "s",
+            }
+        ]
+    )
+    first = generate_starter_work_pool(llm, store, metadata_store)
+    assert first.status == "proposed"
+    assert first.provenance is not None
+
+    metadata_store.save_artifact(_issue_artifact(id="a1", state="CLOSED"))
+    again = generate_starter_work_pool(
+        llm, store, metadata_store, last_fingerprint=first.provenance.corpus_fingerprint
+    )
+    assert again.status == "skipped"
+
+
+def test_active_pool_change_invalidates_fingerprint() -> None:
+    """Adding an issue to active pool changes the fingerprint and re-evaluates."""
+    metadata_store = _metadata_store()
+    metadata_store.save_artifact(_issue_artifact(id="a1"))
+    store = StubVectorStore()
+    _add_issue_chunk(store, "a1", "Fix typo", "body")
+    llm = _llm(
+        [
+            {
+                "source_id": "github:org/repo:ISSUE:1",
+                "safely_scoped": True,
+                "summary": "s",
+            }
+        ]
+    )
+    first = generate_starter_work_pool(llm, store, metadata_store)
+    assert first.status == "proposed"
+    assert first.provenance is not None
+
+    again = generate_starter_work_pool(
+        llm,
+        store,
+        metadata_store,
+        active_source_ids=["github:org/repo:ISSUE:1"],
+        last_fingerprint=first.provenance.corpus_fingerprint,
+    )
+    assert again.status == "skipped"
 
 
 def test_empty_corpus_is_skipped() -> None:

@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field, ValidationError
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
-from onboarding.corpus import corpus_fingerprint
+from onboarding.corpus import fingerprint_gate
 from onboarding.models import CitationRef
 from onboarding.progress import ProgressEvent, ProgressStream, drain
 from rag.types import Chunk
@@ -285,6 +285,29 @@ def _load_candidates(
     return candidates, len(eligible), skipped_no_chunks
 
 
+def _mining_fingerprint_material(
+    metadata_store: IngestionMetadataStore,
+    active_source_ids: list[str] | None = None,
+) -> list[str]:
+    """Derive fingerprint material from issue metadata and the active pool.
+
+    Includes the issue tracker metadata (state, has_assignee, labels) that
+    drives starter-work eligibility, plus the active pool source ids, so an
+    issue being closed, assigned, or added to the pool invalidates the cache
+    even if the chunk texts did not change.
+    """
+    parts: list[str] = []
+    for artifact in metadata_store.list_artifacts(status="completed"):
+        if artifact.artifact_type == "ISSUE":
+            labels_str = ",".join(sorted(artifact.labels))
+            parts.append(
+                f"issue:{artifact.id}:{artifact.state}:{artifact.has_assignee}:{labels_str}"
+            )
+    for source_id in sorted(active_source_ids or []):
+        parts.append(f"pool:{source_id}")
+    return parts
+
+
 # --- job -----------------------------------------------------------------------
 
 
@@ -306,20 +329,26 @@ def stream_starter_work_pool(
     the scope-safety judgement, so nothing unsafe is ever shown, and an ``item``
     is a promise the task is in the persisted pool.
     """
+    extra_material = _mining_fingerprint_material(metadata_store, active_source_ids)
     progress = ProgressStream("starter_work")
-    fingerprint = corpus_fingerprint(store)
-    if last_fingerprint is not None and last_fingerprint == fingerprint:
-        outcome = StarterWorkOutcome(
+    fingerprint, early_events, early_outcome = fingerprint_gate(
+        progress,
+        store,
+        last_fingerprint,
+        make_unchanged=lambda: StarterWorkOutcome(
             status="unchanged", notes=["corpus unchanged since last mining run"]
-        )
-        yield progress.done("Nothing changed since the last mining run", _dump(outcome))
-        return outcome
-
-    if store.count() == 0:
-        outcome = StarterWorkOutcome(status="skipped", notes=["corpus is empty"])
-        yield progress.warning("The project has no indexed material yet")
-        yield progress.done("No starter tasks could be mined", _dump(outcome))
-        return outcome
+        ),
+        make_empty=lambda: StarterWorkOutcome(
+            status="skipped", notes=["corpus is empty"]
+        ),
+        unchanged_label="Nothing changed since the last mining run",
+        empty_warning_label="The project has no indexed material yet",
+        empty_done_label="No starter tasks could be mined",
+        extra_fingerprint_material=extra_material,
+    )
+    if early_outcome is not None:
+        yield from early_events
+        return early_outcome
 
     yield progress.stage("retrieving", "Collecting open issues from the corpus")
     candidates, eligible_total, skipped_no_chunks = _load_candidates(

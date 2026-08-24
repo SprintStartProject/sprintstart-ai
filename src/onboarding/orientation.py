@@ -27,7 +27,7 @@ from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from onboarding.citations import resolve_citations
-from onboarding.corpus import corpus_fingerprint
+from onboarding.corpus import fingerprint_gate
 from onboarding.orientation_models import (
     STEP_ORDER,
     OrientationOutcome,
@@ -317,22 +317,23 @@ def stream_orientation(
     they clear the per-section grounding gate, so nothing ungrounded is ever shown.
     """
     progress = ProgressStream("orientation")
-    fingerprint = corpus_fingerprint(store)
-
-    if last_fingerprint is not None and last_fingerprint == fingerprint:
-        outcome = OrientationOutcome(
+    fingerprint, early_events, early_outcome = fingerprint_gate(
+        progress,
+        store,
+        last_fingerprint,
+        make_unchanged=lambda: OrientationOutcome(
             status="unchanged", notes=["corpus unchanged since the cached packet"]
-        )
-        yield progress.done(
-            "Nothing changed — the cached packet is current", _dump(outcome)
-        )
-        return outcome
-
-    if store.count() == 0:
-        outcome = OrientationOutcome(status="skipped", notes=["corpus is empty"])
-        yield progress.warning("The project has no indexed material yet")
-        yield progress.done("No orientation could be assembled", _dump(outcome))
-        return outcome
+        ),
+        make_empty=lambda: OrientationOutcome(
+            status="skipped", notes=["corpus is empty"]
+        ),
+        unchanged_label="Nothing changed — the cached packet is current",
+        empty_warning_label="The project has no indexed material yet",
+        empty_done_label="No orientation could be assembled",
+    )
+    if early_outcome is not None:
+        yield from early_events
+        return early_outcome
 
     task_query = _task_query(task_title, task_body, labels or [], touched_paths or [])
     bm25_cache = BM25IndexCache()
