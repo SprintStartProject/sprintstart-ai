@@ -77,8 +77,14 @@ def drain[T](generator: Generator[ProgressEvent, None, T]) -> T:
     entry point drives the same generator and keeps only the final value, so the two
     cannot diverge — there is one code path, watched or not.
     """
+    had_event = False
     try:
         while True:
             next(generator)
+            had_event = True
     except StopIteration as stop:
+        if stop.value is None and not had_event:
+            raise RuntimeError(
+                "Cannot drain an already-exhausted or empty generator."
+            ) from None
         return cast(T, stop.value)

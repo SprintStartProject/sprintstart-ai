@@ -84,6 +84,7 @@ def is_test_source(path: str | None) -> bool:
 # a repository. An arbitrary URL that happens to contain "/tests/" is left
 # alone: a false positive means a real document goes unquoted, which is the same
 # failure this module exists to prevent, pointing the other way.
+_STRONG_PATH_MARKERS = frozenset({"blob", "raw", "tree", "blame"})
 _PATH_MARKERS = frozenset({"blob", "raw", "tree", "blame", "src"})
 
 
@@ -94,6 +95,10 @@ def repo_path_from_url(source_url: str | None) -> str | None:
     ``tests/rag/demo-corpus/process.md``. Anything without a recognisable
     ``blob``/``raw``/``tree`` marker — a Confluence page, a bare link — yields
     None, so nothing infers a directory structure from a URL that has none.
+
+    Note on branch names containing slashes (e.g. ``feature/my-branch``): the
+    ``index + 2`` offset assumes a single-segment ref, so slash-nested branch
+    names shift the extracted path by one segment.
     """
     if not source_url:
         return None
@@ -102,6 +107,12 @@ def repo_path_from_url(source_url: str | None) -> str | None:
     except ValueError:
         return None
     for index, segment in enumerate(parts):
+        # A candidate 'src' segment is only a forge marker if it is not followed
+        # by a stronger marker (e.g. repo named 'src' in 'org/src/blob/main/file.md').
+        if segment == "src" and any(
+            p in _STRONG_PATH_MARKERS for p in parts[index + 1 :]
+        ):
+            continue
         # The marker is followed by a ref (branch or sha), then the path itself.
         if segment in _PATH_MARKERS and len(parts) > index + 2:
             return "/".join(parts[index + 2 :])

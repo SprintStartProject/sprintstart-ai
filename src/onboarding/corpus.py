@@ -25,7 +25,7 @@ def corpus_fingerprint(store: VectorStore) -> str:
     same value, and a caller's cache survives a crawl that found nothing new.
     """
     digest = hashlib.sha256()
-    for chunk in sorted(store.all_chunks(), key=lambda c: c.id):
+    for chunk in sorted(store.all_chunks_without_embeddings(), key=lambda c: c.id):
         digest.update(chunk.id.encode("utf-8"))
         digest.update(b"\0")
         digest.update(chunk.text.encode("utf-8"))
