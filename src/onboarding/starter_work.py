@@ -243,15 +243,15 @@ def _load_candidates(
     *,
     exclude_source_ids: set[str],
     limit: int = _MAX_CANDIDATES_PER_RUN,
-) -> tuple[list[StarterTaskCandidate], int]:
+) -> tuple[list[StarterTaskCandidate], int, int]:
     """The issues this run will judge, and how many eligible ones there were.
 
     Chunks are read only for the capped slice, so an organisation-sized corpus
     costs one metadata scan rather than a chunk lookup per issue.
 
-    Returns ``(candidates, eligible_total)``. ``eligible_total`` is what the
-    caller reports as left over: a pool silently missing most of the corpus
-    reads as "there is no good first work here", which is a different claim
+    Returns ``(candidates, eligible_total, skipped_no_chunks)``. ``eligible_total``
+    is what the caller reports as left over: a pool silently missing most of the
+    corpus reads as "there is no good first work here", which is a different claim
     entirely.
     """
     eligible = _eligible_artifacts(
@@ -259,13 +259,18 @@ def _load_candidates(
     )
 
     candidates: list[StarterTaskCandidate] = []
-    for artifact in eligible[:limit]:
+    skipped_no_chunks = 0
+    for artifact in eligible:
+        if len(candidates) >= limit:
+            break
         chunks = store.list_chunks_by_artifact(artifact.id, limit=_MAX_CHUNKS_PER_ISSUE)
         if not chunks:
+            skipped_no_chunks += 1
             continue
 
         text = _issue_text(chunks)
         if not text.strip():
+            skipped_no_chunks += 1
             continue
 
         candidates.append(
@@ -277,7 +282,7 @@ def _load_candidates(
                 labels=artifact.labels,
             )
         )
-    return candidates, len(eligible)
+    return candidates, len(eligible), skipped_no_chunks
 
 
 # --- job -----------------------------------------------------------------------
@@ -317,7 +322,7 @@ def stream_starter_work_pool(
         return outcome
 
     yield progress.stage("retrieving", "Collecting open issues from the corpus")
-    candidates, eligible_total = _load_candidates(
+    candidates, eligible_total, skipped_no_chunks = _load_candidates(
         store, metadata_store, exclude_source_ids=set(active_source_ids or [])
     )
     if not candidates:
@@ -330,7 +335,7 @@ def stream_starter_work_pool(
 
     # What did not fit is counted, never silently dropped: the next run reaches it,
     # and until then a PM can tell "capped" from "the corpus holds nothing else".
-    deferred = max(eligible_total - _MAX_CANDIDATES_PER_RUN, 0)
+    deferred = max(eligible_total - len(candidates) - skipped_no_chunks, 0)
     cap_notes = (
         [
             f"{deferred} more eligible issue(s) were not judged this run "
@@ -339,6 +344,8 @@ def stream_starter_work_pool(
         if deferred
         else []
     )
+    if skipped_no_chunks:
+        cap_notes.append(f"{skipped_no_chunks} issue(s) had no chunks and were skipped")
     if deferred:
         yield progress.warning(
             f"Judging {len(candidates)} of {eligible_total} open issues this run; "

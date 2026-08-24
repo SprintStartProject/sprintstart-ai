@@ -1093,7 +1093,10 @@ class AssembleDiagramRequest(BaseModel):
 
 
 class FileDiffSchema(BaseModel):
-    """One changed file's diff, budgeted backend-side."""
+    """One changed file's diff, budgeted backend-side.
+
+    Reserved for the backend's wire contract.
+    """
 
     path: str
     additions: int = 0

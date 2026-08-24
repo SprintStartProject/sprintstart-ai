@@ -535,10 +535,10 @@ def test_the_capped_slice_is_stable_across_runs() -> None:
     store = StubVectorStore()
     _many_issues(metadata_store, store, starter_work._MAX_CANDIDATES_PER_RUN + 7)
 
-    first, _ = starter_work._load_candidates(
+    first, _, _ = starter_work._load_candidates(
         store, metadata_store, exclude_source_ids=set()
     )
-    second, _ = starter_work._load_candidates(
+    second, _, _ = starter_work._load_candidates(
         store, metadata_store, exclude_source_ids=set()
     )
 
@@ -552,10 +552,33 @@ def test_issues_already_pooled_do_not_consume_the_cap() -> None:
     _many_issues(metadata_store, store, starter_work._MAX_CANDIDATES_PER_RUN + 7)
     already = {f"github:org/repo:ISSUE:{i:03d}" for i in range(7)}
 
-    candidates, eligible_total = starter_work._load_candidates(
+    candidates, eligible_total, _ = starter_work._load_candidates(
         store, metadata_store, exclude_source_ids=already
     )
 
     assert eligible_total == starter_work._MAX_CANDIDATES_PER_RUN
     assert len(candidates) == starter_work._MAX_CANDIDATES_PER_RUN
     assert not any(c.source_id in already for c in candidates)
+
+
+def test_chunkless_issues_do_not_block_cap_slots() -> None:
+    """An issue with no chunks is skipped and does not block subsequent candidates."""
+    metadata_store = _metadata_store()
+    store = StubVectorStore()
+    # Artifact 1 has no chunks in store; artifact 2 has chunks
+    metadata_store.save_artifact(
+        _issue_artifact(id="a1", source_id="github:org/repo:ISSUE:1")
+    )
+    metadata_store.save_artifact(
+        _issue_artifact(id="a2", source_id="github:org/repo:ISSUE:2")
+    )
+    _add_issue_chunk(store, "a2", "Fix typo", "body")
+
+    candidates, eligible_total, skipped = starter_work._load_candidates(
+        store, metadata_store, exclude_source_ids=set()
+    )
+
+    assert eligible_total == 2
+    assert skipped == 1
+    assert len(candidates) == 1
+    assert candidates[0].source_id == "github:org/repo:ISSUE:2"
