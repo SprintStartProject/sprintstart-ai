@@ -4,6 +4,18 @@ Called by the backend's ``POST /insights/faq/refresh`` (pull-based, per
 issue #66). ``/chat`` is stateless and this service does not retain question
 history itself, so the backend sends the full set of questions to group on
 every request.
+
+A *group* is one recurring question — the same thing asked in different words.
+Each carries a short generated **title** naming what is being asked (issue
+#285). The title is what keeps the view readable as the set grows: a list of
+verbatim questions makes a PM read a whole sentence to work out what each entry
+is about, while "Getting VPN access" is scannable, and one title stays stable
+while the phrasings under it vary.
+
+This full rebuild is the expensive path: its cost grows with the total number
+of questions, so it is the manual-refresh fallback rather than something to run
+per chat message. The incremental counterpart lives in
+:mod:`insights.faq_classification`.
 """
 
 import json
@@ -45,26 +57,57 @@ class FaqDocument:
 
 
 @dataclass(frozen=True)
+class FaqSampleQuestion:
+    """One redacted phrasing, with every ask that used it.
+
+    All of them, not just the first: a phrasing used four times is four asks at
+    four different moments, and the caller needs each one to keep its trend
+    exact and to say when the phrasing was *last* used. Collapsing them to a
+    single id here would push both of those onto a guess.
+    """
+
+    ids: list[str]
+    text: str
+
+
+@dataclass(frozen=True)
 class FaqGroup:
     question: str
     count: int
-    questions: list[str]
+    questions: list[FaqSampleQuestion]
     documents: list[FaqDocument]
+    title: str = ""
+    question_ids: list[str] = field(default_factory=list[str])
 
 
 @dataclass
 class _Cluster:
     members: list[FaqQuestionInput] = field(default_factory=list[FaqQuestionInput])
+    title: str = ""
+
+
+class _GroupEntry(BaseModel):
+    ids: list[str] = []
+    title: str = ""
 
 
 class _GroupPayload(BaseModel):
-    groups: list[list[str]] = []
+    groups: list[_GroupEntry] = []
     discard_ids: list[str] = []
 
 
+TITLE_RULE = (
+    "a short title naming what is being asked: 3-8 words, sentence case, no "
+    "trailing punctuation, e.g. 'Getting VPN access', 'Starting the backend "
+    "locally', 'Submitting a travel expense report'. It must summarise the "
+    "request rather than copy a question verbatim, keep whatever component or "
+    "product the questions name, and be specific enough to tell this entry "
+    "apart from a neighbouring one — 'Setup' or 'Access' alone is too generic"
+)
+
 _GROUPING_SYSTEM = (
     "You group recurring end-user questions asked to a docs chatbot into FAQ "
-    "clusters for a PM-facing dashboard. Each input question is prefixed with "
+    "entries for a PM-facing dashboard. Each input question is prefixed with "
     "its id in square brackets.\n\n"
     "Rules:\n"
     "1. First set aside anything that is not a genuine, documentation-relevant "
@@ -81,9 +124,11 @@ _GROUPING_SYSTEM = (
     "3. Minor rewordings, abbreviations, or added politeness for the *same* "
     "request belong in the same group.\n"
     "4. Every input id must appear exactly once, in exactly one group or in "
-    "discard_ids.\n\n"
+    "discard_ids.\n"
+    f"5. Give every group {TITLE_RULE}.\n\n"
     "Return STRICT JSON only (no prose, no markdown fences): "
-    '{"groups": [[id, ...], ...], "discard_ids": [id, ...]}'
+    '{"groups": [{"ids": [id, ...], "title": str}, ...], '
+    '"discard_ids": [id, ...]}'
 )
 
 
@@ -125,10 +170,10 @@ def _cluster_questions(
 
     clusters: list[_Cluster] = []
     claimed: set[str] = set(payload.discard_ids)
-    for group_ids in payload.groups:
+    for entry in payload.groups:
         unique_ids = list(
             dict.fromkeys(
-                gid for gid in group_ids if gid in by_id and gid not in claimed
+                gid for gid in entry.ids if gid in by_id and gid not in claimed
             )
         )
         claimed.update(unique_ids)
@@ -136,7 +181,9 @@ def _cluster_questions(
             members = sorted(
                 (by_id[gid] for gid in unique_ids), key=lambda q: order[q.id]
             )
-            clusters.append(_Cluster(members=members))
+            clusters.append(
+                _Cluster(members=members, title=" ".join(entry.title.split()))
+            )
 
     # Defensive: never silently drop a question the model didn't classify.
     for qid, question in by_id.items():
@@ -146,13 +193,18 @@ def _cluster_questions(
     return clusters
 
 
-def _documents_for(
+def documents_for(
     representative_text: str,
     llm: LLMClient,
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
     project_id: str,
 ) -> list[FaqDocument]:
+    """Retrieve the project's documents that answer ``representative_text``.
+
+    Shared with the incremental classification path, which needs the same
+    document lookup when it opens a new group.
+    """
     chunks = retrieve(
         question=representative_text,
         llm=llm,
@@ -185,7 +237,7 @@ def group_faqs(
     metadata_store: IngestionMetadataStore,
     project_id: str,
 ) -> list[FaqGroup]:
-    """Group questions and attach the project's documents that answer them.
+    """Group questions, title the groups, and attach answering documents.
 
     The documents come from retrieval, so they are scoped to ``project_id`` —
     a group must never point a PM at a document from another project.
@@ -195,35 +247,57 @@ def group_faqs(
     # Redact every representative + sample question in a single batched LLM
     # call rather than one call per group.
     sample_texts: list[str] = []
+    sample_ids: list[list[str]] = []
     sample_bounds: list[tuple[int, int]] = []
     for cluster in clusters:
-        seen: list[str] = []
+        # Grouped by text, so a question asked twice verbatim is one sample —
+        # but keeping every asker, because the repeats are what make it a
+        # recurring question and dropping them would understate it. The cap
+        # limits distinct wordings, not asks.
+        ids_by_text: dict[str, list[str]] = {}
         for member in cluster.members:
-            if len(seen) >= _MAX_SAMPLE_QUESTIONS:
-                break
-            if member.text not in seen:
-                seen.append(member.text)
-        start = len(sample_texts)
-        sample_texts.extend(seen)
-        sample_bounds.append((start, start + len(seen)))
+            ids_by_text.setdefault(member.text, []).append(member.id)
 
-    redacted = redact_pii(sample_texts, llm)
+        kept = list(ids_by_text.items())[:_MAX_SAMPLE_QUESTIONS]
+        start = len(sample_texts)
+        sample_texts.extend(text for text, _ in kept)
+        sample_ids.extend(ids for _, ids in kept)
+        sample_bounds.append((start, start + len(kept)))
+
+    # Titles ride along in the same batched call rather than getting one of
+    # their own: they are generated from the *raw* questions, so a title can
+    # carry the very name the samples just had removed -- "VPN access for
+    # Alice" beside a sample reading "VPN access for [NAME]".
+    cluster_titles = [cluster.title for cluster in clusters]
+    redacted_all = redact_pii(sample_texts + cluster_titles, llm)
+    redacted = redacted_all[: len(sample_texts)]
+    redacted_titles = redacted_all[len(sample_texts) :]
 
     groups: list[FaqGroup] = []
-    for cluster, (start, end) in zip(clusters, sample_bounds, strict=True):
-        redacted_samples = redacted[start:end]
+    for cluster, (start, end), redacted_title in zip(
+        clusters, sample_bounds, redacted_titles, strict=True
+    ):
+        samples = [
+            FaqSampleQuestion(ids=ids, text=text)
+            for ids, text in zip(
+                sample_ids[start:end], redacted[start:end], strict=True
+            )
+        ]
         representative_text = cluster.members[0].text
-        representative_redacted = (
-            redacted_samples[0] if redacted_samples else representative_text
-        )
+        representative_redacted = samples[0].text if samples else representative_text
         groups.append(
             FaqGroup(
                 question=representative_redacted,
                 count=len(cluster.members),
-                questions=redacted_samples,
-                documents=_documents_for(
+                questions=samples,
+                documents=documents_for(
                     representative_text, llm, store, metadata_store, project_id
                 ),
+                # Falls back to the representative question rather than to a
+                # placeholder: a wordy entry still says what it is about, an
+                # "Untitled" one says nothing at all.
+                title=redacted_title or representative_redacted,
+                question_ids=[member.id for member in cluster.members],
             )
         )
 

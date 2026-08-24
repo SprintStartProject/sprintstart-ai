@@ -2,8 +2,9 @@ import base64
 from collections.abc import Iterator
 from typing import Literal, cast
 
-from anthropic import Anthropic, APIError, Omit, omit
+from anthropic import NOT_GIVEN, Anthropic, APIError, Omit, omit
 from anthropic.types import (
+    CacheControlEphemeralParam,
     ImageBlockParam,
     MessageParam,
     TextBlockParam,
@@ -17,6 +18,8 @@ from llm.base import ChatResult, LLMClient, Message, ToolCall, ToolSpec
 from llm.errors import LLMUnavailableError
 
 _DEFAULT_MAX_TOKENS = 4096
+
+_CACHE_CONTROL: CacheControlEphemeralParam = {"type": "ephemeral"}
 
 ImageMediaType = Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
 
@@ -49,9 +52,54 @@ def _to_anthropic_tools(tools: list[ToolSpec]) -> list[ToolParam]:
     ]
 
 
+def _user_message(content: str) -> MessageParam:
+    """A user turn, always in block form.
+
+    The bare-string shorthand would be equivalent to the API, but only until
+    this turn stops being the last one: ``_mark_last_block`` has to attach the
+    breakpoint to a *block*, so a string turn would be reshaped into a list the
+    moment it was marked and reshaped back on the next request. Caching matches
+    on exact bytes, so a prefix that changes representation by position never
+    hits. Emitting one shape always is what makes the breakpoint pay off.
+    """
+    return {"role": "user", "content": [TextBlockParam(type="text", text=content)]}
+
+
+def _mark_last_block(messages: list[MessageParam]) -> None:
+    """Put a cache breakpoint on the final content block, in place.
+
+    Anthropic renders a request as tools → system → messages and caches by
+    exact prefix match, so a breakpoint here covers everything before it. What
+    reads it is the *next* deciding call: successive turns of a conversation
+    share the whole prefix up to the previous turn's last block, so each turn
+    pays a 0.1x read where it would otherwise pay 1x.
+
+    The streaming call that answers a turn cannot read what that turn's
+    deciding call wrote: `chat` sends tool definitions and `stream` does not,
+    so the two prefixes differ at the first rendered byte. Passing the same
+    tools to `stream` would fix the prefix but needs a policy for tool_use
+    blocks arriving mid-answer — silently dropping them would lose a tool call
+    the model asked for. Don't add `tools` there without deciding that.
+    """
+    if not messages:
+        return
+    content = messages[-1]["content"]
+    # Never a bare string: user text is normalised to a block list on the way
+    # in, precisely so that marking it does not also reshape it. See
+    # ``_user_message``.
+    blocks = list(content) if not isinstance(content, str) else []
+    if not blocks:
+        return
+    # Every block type reaching here (text, tool_use, tool_result) carries
+    # cache_control; the cast keeps that fact from the type checker's blind
+    # spot over the heterogeneous content union.
+    cast("dict[str, object]", blocks[-1])["cache_control"] = _CACHE_CONTROL
+    messages[-1]["content"] = blocks
+
+
 def _to_anthropic_messages(
     messages: list[Message],
-) -> tuple[str | Omit, list[MessageParam]]:
+) -> tuple[list[TextBlockParam] | Omit, list[MessageParam]]:
     system_parts: list[str] = []
     out: list[MessageParam] = []
     pending_results: list[ToolResultBlockParam] = []
@@ -99,11 +147,25 @@ def _to_anthropic_messages(
                 blocks.append({"type": "text", "text": content or "(empty)"})
             out.append({"role": "assistant", "content": blocks})
         else:
-            out.append({"role": "user", "content": content})
+            out.append(_user_message(content))
 
     flush_results()
+    _mark_last_block(out)
 
-    system: str | Omit = "\n\n".join(system_parts) if system_parts else omit
+    if not system_parts:
+        return omit, out
+
+    # One block, breakpoint on it: the tools render before the system prompt,
+    # so this single entry covers the whole fixed preamble every chat request
+    # shares. Both are byte-identical per deployment — keep them that way
+    # (no timestamps, no per-request ids) or nothing here caches.
+    system: list[TextBlockParam] = [
+        TextBlockParam(
+            type="text",
+            text="\n\n".join(system_parts),
+            cache_control=_CACHE_CONTROL,
+        )
+    ]
     return system, out
 
 
@@ -115,11 +177,19 @@ class AnthropicClient(LLMClient):
         vision_model: str | None = None,
         base_url: str | None = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
+        timeout: float | None = None,
     ) -> None:
         self.chat_model = chat_model
         self.vision_model = vision_model or chat_model
         self.max_tokens = max_tokens
-        self.client = Anthropic(api_key=api_key, base_url=base_url)
+        self.client = Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+            # NOT_GIVEN, not None: to these SDKs ``timeout=None`` means "wait
+            # forever", so an unconfigured timeout has to leave the parameter
+            # unset for the SDK's own default to apply.
+            timeout=NOT_GIVEN if timeout is None else timeout,
+        )
 
     @property
     def model_name(self) -> str | None:

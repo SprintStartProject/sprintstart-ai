@@ -39,7 +39,13 @@ class _RedactPayload(BaseModel):
     texts: list[str] = []
 
 
-def _redact_structured(text: str) -> str:
+def redact_structured(text: str) -> str:
+    """Deterministic email/phone redaction, with no LLM involved.
+
+    Public because it is the floor other modules rely on: anything that hands a
+    question to a model, or takes text back from one, can apply this without a
+    round-trip and without trusting the model to have done it.
+    """
     text = _EMAIL_RE.sub("[EMAIL]", text)
     text = _PHONE_RE.sub("[PHONE]", text)
     return text
@@ -51,7 +57,7 @@ def redact_pii(texts: list[str], llm: LLMClient) -> list[str]:
     Applies deterministic regex redaction first, then a single batched LLM
     call to redact personal names across all of ``texts`` at once.
     """
-    structured = [_redact_structured(t) for t in texts]
+    structured = [redact_structured(t) for t in texts]
     if not structured:
         return structured
 

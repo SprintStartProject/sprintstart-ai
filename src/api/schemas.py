@@ -916,8 +916,10 @@ class KnowledgeGapSchema(BaseModel):
         description="ISO-8601 timestamp of the component's most recently updated "
         "artifact."
     )
-    severity: Literal["high", "medium", "low"] = Field(
-        description="Gap severity, from missing-critical-category count and staleness."
+    severity: Literal["high", "medium", "low", "covered"] = Field(
+        description="Gap severity, from missing-critical-category count and "
+        "staleness. 'covered' means the component is missing nothing; those are "
+        "reported too, so the response is the project's full component roster."
     )
 
 
@@ -971,7 +973,24 @@ class FaqDocumentSchema(BaseModel):
     )
 
 
+class FaqSampleQuestionSchema(BaseModel):
+    ids: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Every id that came in with exactly this wording. Ties each ask "
+                "back to the message it was made in, and with it to when — a "
+                "phrasing used four times is four asks at four moments, and the "
+                "caller needs all of them for its trend and recency."
+            )
+        ),
+    ]
+    text: Annotated[str, Field(description="The question's text, PII-redacted.")]
+
+
 class FaqGroupSchema(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     question: Annotated[
         str,
         Field(description="Representative question for the group, PII-redacted."),
@@ -986,13 +1005,35 @@ class FaqGroupSchema(BaseModel):
         ),
     ]
     questions: Annotated[
-        list[str],
+        list[FaqSampleQuestionSchema],
         Field(description="PII-redacted sample of questions in the group."),
     ]
     documents: Annotated[
         list[FaqDocumentSchema],
         Field(description="Documents that answered the group's questions."),
     ]
+    question_ids: Annotated[
+        list[str],
+        Field(
+            default_factory=list[str],
+            description=(
+                "Ids of every question in the group, not just the sample. The "
+                "caller knows when each was asked, so this is what lets it "
+                "rebuild the group's recency and trend without the service "
+                "retaining any history."
+            ),
+        ),
+    ]
+    title: Annotated[
+        str,
+        Field(
+            description=(
+                "Short generated title naming what the group is about. This is "
+                "what a PM scans the list by, rather than reading a verbatim "
+                "question per entry."
+            ),
+        ),
+    ] = ""
 
 
 class FaqGroupResponse(BaseModel):
@@ -1006,8 +1047,8 @@ class FaqGroupResponse(BaseModel):
                         "question": "How do I get VPN access?",
                         "count": 14,
                         "questions": [
-                            "How do I get VPN access?",
-                            "Can someone enable VPN for me?",
+                            {"ids": ["q_1"], "text": "How do I get VPN access?"},
+                            {"ids": ["q_2"], "text": "Can someone enable VPN for me?"},
                         ],
                         "documents": [
                             {
@@ -1016,6 +1057,8 @@ class FaqGroupResponse(BaseModel):
                                 "source": "confluence",
                             }
                         ],
+                        "title": "Getting VPN access",
+                        "questionIds": ["q_1", "q_2"],
                     }
                 ]
             }
@@ -1293,5 +1336,114 @@ class BuddyCompactResponse(BaseModel):
         description=(
             "The rewritten memory note, covering the prior note plus `folded`. The "
             "caller persists it and advances its cursor by exactly what it sent."
+        )
+    )
+
+
+# ── FAQ incremental classification (PM insights) ────────────────────────────
+
+
+class FaqGroupRefSchema(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    id: str = Field(description="Backend-assigned group identifier.")
+    question: str = Field(description="The group's representative question.")
+    title: str = Field(
+        default="",
+        description=(
+            "The group's title. Sent alongside the question because a "
+            "summarised title can lose the component name that tells two "
+            "otherwise identical requests apart."
+        ),
+    )
+    count: int = Field(
+        default=1, description="How often the group's question was asked."
+    )
+
+
+class FaqClassifyRequest(ProjectScopedRequest):
+    question: str = Field(description="The question a user just asked in the chat.")
+    groups: list[FaqGroupRefSchema] = Field(
+        default_factory=list[FaqGroupRefSchema],
+        description=(
+            "Candidate groups the question could join. The backend sends a "
+            "bounded selection (most asked / most recent), not the full set: a "
+            "duplicate group opened against a truncated candidate list is "
+            "folded back in by the merge endpoint."
+        ),
+    )
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
+            "example": {
+                "projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11",
+                "question": "How do I get VPN access?",
+                "groups": [
+                    {
+                        "id": "b2c3d4e5-0000-4000-8000-000000000001",
+                        "question": "How do I get VPN access?",
+                        "title": "Getting VPN access",
+                        "count": 14,
+                    }
+                ],
+            }
+        },
+    )
+
+
+class FaqClassifyResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    relevant: bool = Field(
+        description=(
+            "False for greetings, smalltalk and other non-questions. The "
+            "backend drops those instead of surfacing them as an FAQ."
+        )
+    )
+    question: str = Field(default="", description="The question's text, PII-redacted.")
+    title: str = Field(
+        default="",
+        description=(
+            "Title for the group the question belongs to. For a matched group "
+            "this is its existing title, unchanged."
+        ),
+    )
+    group_id: str | None = Field(
+        default=None,
+        description="Existing group the question joins, or null to open a new one.",
+    )
+    documents: list[FaqDocumentSchema] = Field(
+        default_factory=list[FaqDocumentSchema],
+        description=(
+            "Documents answering a newly opened group. Empty when the question "
+            "joined an existing group, which already has its own."
+        ),
+    )
+
+
+class FaqMergeSchema(BaseModel):
+    into: str = Field(
+        description="Surviving group id. Always one of the submitted groups."
+    )
+    sources: list[str] = Field(description="Groups to fold into 'into' and delete.")
+
+
+class FaqMergeGroupsRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    groups: list[FaqGroupRefSchema] = Field(
+        description="Every group the project currently has."
+    )
+    target_max: int = Field(
+        ge=1, description="Ceiling the group count should be brought back under."
+    )
+
+
+class FaqMergeResponse(BaseModel):
+    merges: list[FaqMergeSchema] = Field(
+        description=(
+            "Merges to apply. Empty means nothing was safely mergeable — "
+            "staying over the limit beats merging distinct topics."
         )
     )
