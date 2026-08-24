@@ -1,5 +1,6 @@
 """Tests for recovering tool calls a model leaked as text markup."""
 
+from llm.base import ReasoningDelta, TextDelta
 from llm.tool_call_recovery import recover_tool_calls
 
 # The exact shape a hire saw leak into a buddy answer: DeepSeek's tool-call markup
@@ -76,7 +77,7 @@ def test_coerces_non_string_parameter_values():
 # The visible answer is streamed, and that phase has no tool loop -- so leaked
 # markup there cannot be run, only kept off the hire's screen.
 
-from llm.tool_call_recovery import guard_stream  # noqa: E402
+from llm.tool_call_recovery import guard_event_stream, guard_stream  # noqa: E402
 
 # Verbatim from a tutor's session on 2026-08-03: a warm greeting, then two
 # search_docs calls the model wrote as text because it had no way to call them.
@@ -154,3 +155,26 @@ def test_output_is_not_delayed_to_the_end_of_the_stream() -> None:
         "the guard buffered the whole answer instead of streaming it"
     )
     assert "".join(emitted) == long_answer
+
+
+def test_event_guard_preserves_reasoning_and_filters_visible_markup() -> None:
+    events = [
+        ReasoningDelta("Checking the evidence."),
+        TextDelta("Here is the answer. "),
+        TextDelta("<｜｜DSML｜｜tool_calls> hidden"),
+    ]
+
+    assert list(guard_event_stream(events)) == [
+        ReasoningDelta("Checking the evidence."),
+        TextDelta("Here is the answer."),
+    ]
+
+
+def test_event_guard_keeps_reasoning_and_text_order() -> None:
+    events = [
+        TextDelta("First."),
+        ReasoningDelta("Then check another point."),
+        TextDelta("Second."),
+    ]
+
+    assert list(guard_event_stream(events)) == events

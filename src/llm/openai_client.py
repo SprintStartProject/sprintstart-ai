@@ -15,9 +15,18 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
-from llm.base import ChatResult, LLMClient, Message, ToolCall, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMClient,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
-from llm.tool_call_recovery import guard_stream, recover_tool_calls
+from llm.tool_call_recovery import guard_event_stream, recover_tool_calls
 
 
 def _to_openai_tools(tools: list[ToolSpec]) -> list[ChatCompletionToolParam]:
@@ -215,14 +224,14 @@ class OpenAIClient(LLMClient):
                 f"using model {self.chat_model!r} at {self.base_url}: {exc}"
             ) from exc
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         # Guarded for the same reason chat_with_tools recovers: this backend serves
         # models that write tool calls as markup in the content. There the markup can
         # be parsed back into a call and run; here the answer phase has no tool loop,
         # so the only thing to do with it is not show it to the hire.
-        return guard_stream(self._stream_raw(messages))
+        return guard_event_stream(self._stream_raw(messages))
 
-    def _stream_raw(self, messages: list[Message]) -> Iterator[str]:
+    def _stream_raw(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         try:
             stream: Iterator[ChatCompletionChunk] = self.client.chat.completions.create(
                 model=self.chat_model,
@@ -235,10 +244,17 @@ class OpenAIClient(LLMClient):
                     continue
 
                 delta: ChoiceDelta = event.choices[0].delta
-                content = delta.content
+                # ``reasoning_content`` is an OpenAI-compatible extension used
+                # by reasoning models such as DeepSeek-R1 and Qwen. The OpenAI
+                # SDK keeps unknown response fields on its Pydantic model, but
+                # does not declare this one in ``ChoiceDelta``.
+                reasoning = getattr(delta, "reasoning_content", None)
+                if isinstance(reasoning, str) and reasoning.strip():
+                    yield ReasoningDelta(reasoning)
 
+                content = delta.content
                 if content:
-                    yield content
+                    yield TextDelta(content)
 
         except OpenAIError as exc:
             raise LLMUnavailableError(

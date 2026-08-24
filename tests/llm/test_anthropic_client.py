@@ -1,11 +1,97 @@
+from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from llm.anthropic_client import (
+    AnthropicClient,
     _to_anthropic_messages,  # pyright: ignore[reportPrivateUsage]
 )
-from llm.base import Message, ToolCall
+from llm.base import Message, ReasoningDelta, TextDelta, ToolCall
 
 _EPHEMERAL = {"type": "ephemeral"}
+
+
+class _FakeStream:
+    def __init__(self, events: list[SimpleNamespace]) -> None:
+        self._events = events
+
+    def __enter__(self) -> "_FakeStream":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        return iter(self._events)
+
+
+class _FakeMessages:
+    def __init__(self, events: list[SimpleNamespace]) -> None:
+        self._events = events
+        self.stream_kwargs: dict[str, object] = {}
+
+    def stream(self, **kwargs: object) -> _FakeStream:
+        self.stream_kwargs = kwargs
+        return _FakeStream(self._events)
+
+
+def _delta(delta_type: str, **values: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="content_block_delta",
+        delta=SimpleNamespace(type=delta_type, **values),
+    )
+
+
+def test_stream_enables_thinking_and_separates_reasoning_from_text() -> None:
+    client = AnthropicClient(
+        api_key="test",
+        chat_model="claude-haiku-4-5",
+        thinking_budget_tokens=1024,
+    )
+    messages = _FakeMessages(
+        [
+            _delta("thinking_delta", thinking="Checking evidence."),
+            _delta("thinking_delta", thinking=""),
+            _delta("text_delta", text="Answer."),
+        ]
+    )
+    client.client.messages = cast("Any", messages)
+
+    events = list(client.stream([Message(role="user", content="Hello")]))
+
+    assert events == [ReasoningDelta("Checking evidence."), TextDelta("Answer.")]
+    assert messages.stream_kwargs["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 1024,
+    }
+
+
+def test_stream_defaults_to_thinking_disabled() -> None:
+    from anthropic import Omit
+
+    client = AnthropicClient(
+        api_key="test",
+        chat_model="claude-haiku-4-5",
+    )
+    messages = _FakeMessages([_delta("text_delta", text="Answer.")])
+    client.client.messages = cast("Any", messages)
+
+    assert list(client.stream([Message(role="user", content="Hello")])) == [
+        TextDelta("Answer.")
+    ]
+    assert isinstance(messages.stream_kwargs["thinking"], Omit)
+
+
+@pytest.mark.parametrize("budget", [1, 1023, 4096])
+def test_invalid_thinking_budget_is_rejected(budget: int) -> None:
+    with pytest.raises(ValueError):
+        AnthropicClient(
+            api_key="test",
+            chat_model="claude-haiku-4-5",
+            max_tokens=4096,
+            thinking_budget_tokens=budget,
+        )
 
 
 def _blocks(content: object) -> list[dict[str, Any]]:

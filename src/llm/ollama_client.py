@@ -5,9 +5,17 @@ from uuid import uuid4
 
 import ollama
 
-from llm.base import ChatResult, Message, ToolCall, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
-from llm.tool_call_recovery import guard_stream, recover_tool_calls
+from llm.tool_call_recovery import guard_event_stream, recover_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -286,7 +294,7 @@ class OllamaClient:
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         # See OpenAiCompatibleClient.stream: the same models reach this client, and the
         # streamed answer has no tool loop to hand a recovered call to.
         if self._model is None:
@@ -294,14 +302,22 @@ class OllamaClient:
         # The model is passed in rather than re-read off self: this method raises
         # eagerly, the generator body does not, so the check here is only load-bearing
         # if the value it checked is the one that reaches the call.
-        return guard_stream(self._stream_raw(self._model, messages))
+        return guard_event_stream(self._stream_raw(self._model, messages))
 
-    def _stream_raw(self, model: str, messages: list[Message]) -> Iterator[str]:
+    def _stream_raw(
+        self, model: str, messages: list[Message]
+    ) -> Iterator[LLMStreamEvent]:
         try:
             for chunk in self._client.chat_stream(
                 model=model, messages=_to_ollama_messages(messages)
             ):
-                yield chunk.message.content or ""
+                thinking = chunk.message.thinking
+                if isinstance(thinking, str) and thinking.strip():
+                    yield ReasoningDelta(thinking)
+
+                content = chunk.message.content
+                if content:
+                    yield TextDelta(content)
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 

@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from api.app import app
 from api.dependencies import get_llm, get_store
-from llm.base import Message
+from llm.base import LLMStreamEvent, Message, TextDelta
 from rag.types import Chunk, ScoredChunk
 
 
@@ -101,8 +101,8 @@ class StubLLMClient:
     def generate(self, messages: list[Message]) -> str:
         return "answer"
 
-    def stream(self, messages: list[Message]) -> Iterable[str]:
-        yield "answer"
+    def stream(self, messages: list[Message]) -> Iterable[LLMStreamEvent]:
+        yield TextDelta("answer")
 
     def embed(self, text: str) -> list[float]:
         return [1.0, 0.0, 0.0]

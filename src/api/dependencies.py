@@ -78,12 +78,15 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
         )
 
     if backend in {"anthropic", "claude"}:
+        raw_thinking_budget = os.getenv("ANTHROPIC_THINKING_BUDGET_TOKENS", "").strip()
+        thinking_budget = int(raw_thinking_budget) if raw_thinking_budget else 0
         return AnthropicClient(
             api_key=os.getenv("ANTHROPIC_API_KEY") or "",
             chat_model=os.getenv("ANTHROPIC_CHAT_MODEL", "claude-haiku-4-5"),
             vision_model=os.getenv("ANTHROPIC_VISION_MODEL"),
             base_url=os.getenv("ANTHROPIC_BASE_URL") or None,
             max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096")),
+            thinking_budget_tokens=thinking_budget if thinking_budget > 0 else None,
             timeout=timeout,
         )
 

@@ -6,7 +6,7 @@ chunk at a time, so a partial one is indistinguishable from prose until the next
 chunk lands.
 """
 
-from llm.base import LLMClient, Message
+from llm.base import LLMClient, Message, TextDelta
 from llm.errors import LLMUnavailableError
 from onboarding.buddy_open import stream_session
 
@@ -55,7 +55,7 @@ class _StreamingStubLLM(_StubLLM):
         self.last_prompt = messages
         if isinstance(self._chunks, Exception):
             raise self._chunks
-        yield from self._chunks
+        yield from (TextDelta(chunk) for chunk in self._chunks)
 
 
 def _tokens(events: list[dict[str, object]]) -> str:

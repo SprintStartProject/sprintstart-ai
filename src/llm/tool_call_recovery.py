@@ -26,7 +26,7 @@ import re
 from collections.abc import Iterable, Iterator
 from uuid import uuid4
 
-from llm.base import ToolCall
+from llm.base import LLMStreamEvent, ReasoningDelta, TextDelta, ToolCall
 
 # One ``invoke name="…"`` block and everything up to its matching close (or the
 # end of the string, if the model never closed it).
@@ -160,6 +160,47 @@ def guard_stream(chunks: Iterable[str]) -> Iterator[str]:
         yield pending
 
 
+def guard_event_stream(events: Iterable[LLMStreamEvent]) -> Iterator[LLMStreamEvent]:
+    """Apply :func:`guard_stream` semantics to answer deltas, preserving reasoning.
+
+    A reasoning delta is a boundary between runs of visible text. Flush any pending
+    visible text before forwarding it so event order is unchanged; leaked tool markup
+    is only meaningful inside the visible answer stream.
+    """
+    pending = ""
+
+    for event in events:
+        if isinstance(event, ReasoningDelta):
+            if pending:
+                yield TextDelta(pending)
+                pending = ""
+            yield event
+            continue
+
+        if not event.text:
+            continue
+        pending += event.text
+
+        cut = _markup_start(pending)
+        if cut is not None:
+            head = pending[:cut].rstrip()
+            if head:
+                yield TextDelta(head)
+            return
+
+        keep = _unsafe_tail_len(pending)
+        if keep < len(pending):
+            emit, pending = (
+                pending[: len(pending) - keep],
+                pending[len(pending) - keep :],
+            )
+            if emit:
+                yield TextDelta(emit)
+
+    if pending:
+        yield TextDelta(pending)
+
+
 def _unsafe_tail_len(pending: str) -> int:
     """How much of the tail must be withheld because it could still become markup.
 
@@ -225,4 +266,4 @@ def _markup_start(buffer: str) -> int | None:
     return opening if opening != -1 else marker
 
 
-__all__ = ["guard_stream", "recover_tool_calls"]
+__all__ = ["guard_event_stream", "guard_stream", "recover_tool_calls"]

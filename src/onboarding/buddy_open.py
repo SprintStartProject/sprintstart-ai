@@ -23,7 +23,7 @@ import json
 from collections.abc import Iterator
 from typing import cast
 
-from llm.base import LLMClient, Message
+from llm.base import LLMClient, Message, TextDelta
 from llm.errors import LLMUnavailableError
 
 _FALLBACK_GREETING = "Welcome back! How can I help with your onboarding today?"
@@ -120,7 +120,10 @@ def stream_session(
     in_greeting = True
 
     try:
-        for chunk in llm.stream(prompt):
+        for event in llm.stream(prompt):
+            if not isinstance(event, TextDelta):
+                continue
+            chunk = event.text
             if not chunk:
                 continue
             if not in_greeting:
