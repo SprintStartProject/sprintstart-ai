@@ -58,6 +58,14 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
         )
 
     if backend in {"openai", "openai-compatible", "litellm"}:
+        raw_max_tokens = (
+            os.getenv("OPENAI_MAX_TOKENS", "").strip() if not is_embed else ""
+        )
+        raw_reasoning_budget = (
+            os.getenv("OPENAI_REASONING_MAX_TOKENS", "").strip() if not is_embed else ""
+        )
+        max_tokens = int(raw_max_tokens) if raw_max_tokens else 0
+        reasoning_budget = int(raw_reasoning_budget) if raw_reasoning_budget else 0
         base_url = (
             (os.getenv("OPENAI_EMBED_BASE_URL") if is_embed else None)
             or os.getenv("OPENAI_BASE_URL")
@@ -75,6 +83,8 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
             embed_model=os.getenv("OPENAI_EMBED_MODEL"),
             vision_model=os.getenv("OPENAI_VISION_MODEL"),
             timeout=timeout,
+            max_tokens=max_tokens if max_tokens > 0 else None,
+            reasoning_max_tokens=(reasoning_budget if reasoning_budget > 0 else None),
         )
 
     if backend in {"anthropic", "claude"}:

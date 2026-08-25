@@ -7,6 +7,7 @@ from openai import NOT_GIVEN, OpenAI, OpenAIError, omit
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionChunk,
+    ChatCompletionMessage,
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionToolMessageParam,
@@ -98,6 +99,17 @@ def _to_openai_messages(messages: list[Message]) -> list[ChatCompletionMessagePa
                     }
                     for call in tool_calls
                 ]
+            # OpenRouter documents reasoning and reasoning_details as
+            # alternative preservation formats and requires the structured
+            # sequence for signed/encrypted blocks. Prefer it verbatim and fall
+            # back to plaintext only when no structured details are present.
+            reasoning_details = message.get("reasoning_details")
+            if reasoning_details:
+                cast("Any", assistant_message)["reasoning_details"] = reasoning_details
+            else:
+                reasoning = message.get("reasoning")
+                if reasoning:
+                    cast("Any", assistant_message)["reasoning"] = reasoning
             openai_messages.append(assistant_message)
         else:
             user_message: ChatCompletionUserMessageParam = {
@@ -137,6 +149,62 @@ def _sniff_image_type(image_bytes: bytes) -> str | None:
     return None
 
 
+def _reasoning_text(delta: ChoiceDelta) -> list[str]:
+    """Return provider-normalized reasoning fragments from one stream delta.
+
+    OpenRouter currently exposes the plain-text channel as reasoning and
+    structured blocks as reasoning_details. Older OpenAI-compatible backends
+    use reasoning_content. Prefer the plain channel when several
+    representations are present so the same fragment is not emitted twice.
+    """
+    for field in ("reasoning", "reasoning_content"):
+        value = getattr(delta, field, None)
+        if isinstance(value, str) and value.strip():
+            return [value]
+
+    details = getattr(delta, "reasoning_details", None)
+    if not isinstance(details, list):
+        return []
+
+    fragments: list[str] = []
+    for detail in cast("list[object]", details):
+        if isinstance(detail, dict):
+            detail_fields = cast("dict[str, object]", detail)
+            text = detail_fields.get("text") or detail_fields.get("summary")
+        else:
+            text = getattr(detail, "text", None) or getattr(detail, "summary", None)
+        if isinstance(text, str) and text.strip():
+            fragments.append(text)
+    return fragments
+
+
+def _response_reasoning(
+    message: ChatCompletionMessage,
+) -> tuple[str | None, list[dict[str, object]]]:
+    """Extract the exact reasoning context OpenRouter requires after tool use."""
+    message_fields = cast("dict[str, object]", message.model_dump())
+    raw_reasoning = message_fields.get("reasoning")
+    if not isinstance(raw_reasoning, str) or not raw_reasoning.strip():
+        # Legacy OpenAI-compatible backends (DeepSeek-R1, Qwen) expose the
+        # channel as reasoning_content, mirroring the streaming normalization.
+        raw_reasoning = message_fields.get("reasoning_content")
+    reasoning = (
+        raw_reasoning
+        if isinstance(raw_reasoning, str) and raw_reasoning.strip()
+        else None
+    )
+
+    raw_details = message_fields.get("reasoning_details")
+    if not isinstance(raw_details, list):
+        return reasoning, []
+
+    details: list[dict[str, object]] = []
+    for detail in cast("list[object]", raw_details):
+        if isinstance(detail, dict):
+            details.append(cast("dict[str, object]", detail))
+    return reasoning, details
+
+
 class OpenAIClient(LLMClient):
     def __init__(
         self,
@@ -147,11 +215,28 @@ class OpenAIClient(LLMClient):
         vision_model: str | None = None,
         http_client: Any | None = None,
         timeout: float | None = None,
+        max_tokens: int | None = None,
+        reasoning_max_tokens: int | None = None,
     ) -> None:
+        if max_tokens is not None and max_tokens <= 0:
+            raise ValueError("OpenAI-compatible max_tokens must be positive")
+        if reasoning_max_tokens is not None and reasoning_max_tokens <= 0:
+            raise ValueError("OpenAI-compatible reasoning_max_tokens must be positive")
+        if (
+            max_tokens is not None
+            and reasoning_max_tokens is not None
+            and reasoning_max_tokens >= max_tokens
+        ):
+            raise ValueError(
+                "OpenAI-compatible reasoning_max_tokens must be lower than max_tokens"
+            )
+
         self.base_url = _normalize_base_url(base_url)
         self.chat_model = chat_model
         self.embed_model = embed_model
         self.vision_model = vision_model
+        self.max_tokens = max_tokens
+        self.reasoning_max_tokens = reasoning_max_tokens
 
         self.client = OpenAI(
             base_url=self.base_url,
@@ -166,14 +251,31 @@ class OpenAIClient(LLMClient):
     def model_name(self) -> str | None:
         return self.chat_model
 
+    def _reasoning_extra_body(self) -> dict[str, Any] | None:
+        if self.reasoning_max_tokens is None:
+            return None
+        return {
+            "reasoning": {
+                "max_tokens": self.reasoning_max_tokens,
+                "exclude": False,
+            }
+        }
+
     def chat(
         self, messages: list[Message], tools: list[ToolSpec] | None = None
     ) -> ChatResult:
         try:
+            reasoning_enabled = bool(tools) and self.reasoning_max_tokens is not None
             response = self.client.chat.completions.create(
                 model=self.chat_model,
                 messages=_to_openai_messages(messages),
+                max_tokens=(
+                    self.max_tokens
+                    if reasoning_enabled and self.max_tokens is not None
+                    else omit
+                ),
                 tools=_to_openai_tools(tools) if tools else omit,
+                extra_body=self._reasoning_extra_body() if reasoning_enabled else None,
             )
         except OpenAIError as exc:
             raise LLMUnavailableError(
@@ -182,6 +284,7 @@ class OpenAIClient(LLMClient):
             ) from exc
 
         message = response.choices[0].message
+        reasoning, reasoning_details = _response_reasoning(message)
         calls: list[ToolCall] = []
         for call in message.tool_calls or []:
             if call.type != "function":
@@ -202,8 +305,18 @@ class OpenAIClient(LLMClient):
         if not calls:
             recovered, cleaned = recover_tool_calls(text)
             if recovered:
-                return ChatResult(text=cleaned, tool_calls=recovered)
-        return ChatResult(text=text, tool_calls=calls)
+                return ChatResult(
+                    text=cleaned,
+                    tool_calls=recovered,
+                    reasoning=reasoning,
+                    reasoning_details=reasoning_details,
+                )
+        return ChatResult(
+            text=text,
+            tool_calls=calls,
+            reasoning=reasoning,
+            reasoning_details=reasoning_details,
+        )
 
     def generate(
         self, messages: list[Message], *, temperature: float | None = None
@@ -236,7 +349,9 @@ class OpenAIClient(LLMClient):
             stream: Iterator[ChatCompletionChunk] = self.client.chat.completions.create(
                 model=self.chat_model,
                 messages=_to_openai_messages(messages),
+                max_tokens=self.max_tokens if self.max_tokens is not None else omit,
                 stream=True,
+                extra_body=self._reasoning_extra_body(),
             )
 
             for event in stream:
@@ -244,12 +359,7 @@ class OpenAIClient(LLMClient):
                     continue
 
                 delta: ChoiceDelta = event.choices[0].delta
-                # ``reasoning_content`` is an OpenAI-compatible extension used
-                # by reasoning models such as DeepSeek-R1 and Qwen. The OpenAI
-                # SDK keeps unknown response fields on its Pydantic model, but
-                # does not declare this one in ``ChoiceDelta``.
-                reasoning = getattr(delta, "reasoning_content", None)
-                if isinstance(reasoning, str) and reasoning.strip():
+                for reasoning in _reasoning_text(delta):
                     yield ReasoningDelta(reasoning)
 
                 content = delta.content

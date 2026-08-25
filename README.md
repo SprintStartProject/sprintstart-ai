@@ -56,6 +56,8 @@ The service runs on port `8000`.
 |---|---|---|
 | `LLM_BACKEND` | `ollama` | LLM backend used for chat/generation: `ollama`, `openai`/`litellm`, or `anthropic`. |
 | `ANTHROPIC_THINKING_BUDGET_TOKENS` | `1024` | Reasoning-token budget for streamed Anthropic chat answers. Must be at least 1024 and lower than `ANTHROPIC_MAX_TOKENS`; set `0` to disable. |
+| `OPENAI_MAX_TOKENS` | `4096` | Optional output-token limit for streamed OpenAI-compatible chat answers. Must be greater than the reasoning budget when both are configured. |
+| `OPENAI_REASONING_MAX_TOKENS` | `1024` | Opt-in reasoning-token budget for streamed OpenAI-compatible chat answers (including OpenRouter). Set `0` or leave empty to disable. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL of the Ollama instance. Use `http://host.docker.internal:11434` when running via Docker with Ollama on the host. |
 | `OLLAMA_MODEL` | `gemma4:e4b` | Chat model to use for generation. |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text:latest` | Embedding model to use for ingestion and retrieval. |
