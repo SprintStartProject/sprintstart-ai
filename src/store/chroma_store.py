@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Iterator, Mapping
 from typing import Any, cast
 
@@ -26,17 +27,33 @@ _NO_POSITION: int = -1
 _MAX_GET_PAGE: int = 10_000
 
 _CLIENT_CACHE: dict[str, chromadb.api.ClientAPI] = {}
+_CLIENT_CACHE_LOCK = threading.Lock()
 
 
 def _get_persistent_client(path: str) -> chromadb.api.ClientAPI:
-    if path not in _CLIENT_CACHE:
+    client = _CLIENT_CACHE.get(path)
+    if client is not None:
+        return client
+
+    # FastAPI resolves synchronous dependencies in a thread pool, so the first
+    # chat and its asynchronous analytics fan-out can arrive here together.
+    # Chroma's PersistentClient instances share process-wide, refcounted state;
+    # constructing two for one path concurrently can make one failed init tear
+    # down the other's system. Re-check inside the lock so exactly one thread
+    # constructs and publishes the client.
+    with _CLIENT_CACHE_LOCK:
+        client = _CLIENT_CACHE.get(path)
+        if client is not None:
+            return client
+
         settings = Settings(
             anonymized_telemetry=False,
             is_persistent=True,
             allow_reset=True,
         )
-        _CLIENT_CACHE[path] = chromadb.PersistentClient(path=path, settings=settings)
-    return _CLIENT_CACHE[path]
+        client = chromadb.PersistentClient(path=path, settings=settings)
+        _CLIENT_CACHE[path] = client
+        return client
 
 
 class ChromaVectorStore:
