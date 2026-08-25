@@ -55,7 +55,7 @@ class GrepTool(Tool[GrepArgs]):
             # This tool scans the whole corpus in memory rather than going
             # through the vector store's query path, so the retrieval filters
             # (notably the project scope) have to be applied here explicitly.
-            for chunk in self._store.all_chunks_without_embeddings()
+            for chunk in self._store.iter_chunks_without_embeddings()
             if matches_retrieval_filters(chunk, self._filters)
             and not is_excluded(chunk, self._exclusions)
             and any(needle in chunk.text.lower() for needle in needles)

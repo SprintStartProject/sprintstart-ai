@@ -90,9 +90,6 @@ class StubVectorStore:
     def count_by_artifact(self, artifact_id: str) -> int:
         return len([chunk for chunk in self.chunks if chunk.artifact_id == artifact_id])
 
-    def all_chunks(self) -> list[Chunk]:
-        return self.chunks
-
     def count(self) -> int:
         return len(self.chunks)
 
