@@ -67,6 +67,9 @@ The service runs on port `8000`.
 | `CHUNK_SIZE` | `512` | Maximum number of characters per chunk |
 | `CHUNK_OVERLAP` | `64` | Number of characters reused between consecutive chunks to preserve context when splitting large chunks |
 | `CONTEXT_AWARE_CHUNKING_MAX_CHARS` | `24000` | Character-count ceiling (a proxy for a token limit — there is no tokenizer in this project) for text/PDF content sent to the LLM-based context-aware chunker. Above this, ingestion falls back to the plain `chunk_text` strategy. See [Context-aware chunking](#context-aware-chunking). |
+| `INGEST_CONCURRENCY` | `8` | Maximum number of artifacts embedded concurrently across a batch in `POST /api/v1/ingest/sync`. |
+| `INGEST_MAX_CONTENT_LENGTH` | `500000` | Maximum character length for text/code artifacts. Payloads exceeding this are skipped (`chunk_count=0`). |
+| `INGEST_MAX_BINARY_BYTES` | `10485760` | Maximum decoded byte size for binary artifacts (images and PDFs, 10 MB default). Payloads exceeding this are skipped (`chunk_count=0`). |
 
 ## Project separation
 
