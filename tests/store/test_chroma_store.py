@@ -1,13 +1,89 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import chromadb
+import pytest
 
 from ingestion.source_role import SourceRole
 from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters
 from store import chroma_store as chroma_store_module
 from store.chroma_store import ChromaVectorStore
+
+
+def test_persistent_client_cold_cache_is_constructed_once_concurrently(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "shared-chroma")
+    fake_client = object()
+    worker_count = 8
+    callers_ready = threading.Barrier(worker_count + 1)
+    release_constructor = threading.Event()
+    construction_count = 0
+    count_lock = threading.Lock()
+
+    def construct(*, path: str, settings: object) -> object:
+        del path, settings
+        nonlocal construction_count
+        with count_lock:
+            construction_count += 1
+        release_constructor.wait(timeout=2)
+        return fake_client
+
+    def resolve() -> object:
+        callers_ready.wait(timeout=2)
+        return chroma_store_module._get_persistent_client(path)
+
+    monkeypatch.setattr(chroma_store_module.chromadb, "PersistentClient", construct)
+    chroma_store_module._CLIENT_CACHE.pop(path, None)
+
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(resolve) for _ in range(worker_count)]
+            callers_ready.wait(timeout=2)
+            time.sleep(0.05)
+            release_constructor.set()
+            clients = [future.result(timeout=2) for future in futures]
+    finally:
+        release_constructor.set()
+        chroma_store_module._CLIENT_CACHE.pop(path, None)
+
+    assert construction_count == 1
+    assert all(client is fake_client for client in clients)
+
+
+def test_failed_persistent_client_construction_is_not_cached(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "retry-chroma")
+    fake_client = object()
+    attempts = 0
+
+    def construct(*, path: str, settings: object) -> object:
+        del path, settings
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary Chroma failure")
+        return fake_client
+
+    monkeypatch.setattr(chroma_store_module.chromadb, "PersistentClient", construct)
+    chroma_store_module._CLIENT_CACHE.pop(path, None)
+
+    try:
+        with pytest.raises(RuntimeError, match="temporary Chroma failure"):
+            chroma_store_module._get_persistent_client(path)
+
+        assert path not in chroma_store_module._CLIENT_CACHE
+        assert chroma_store_module._get_persistent_client(path) is fake_client
+        assert attempts == 2
+    finally:
+        chroma_store_module._CLIENT_CACHE.pop(path, None)
 
 
 def test_chroma_query_returns_chunks_above_min_score() -> None:

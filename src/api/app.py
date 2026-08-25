@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 load_dotenv()
 
-from api.dependencies import get_llm  # noqa: E402
+from api.dependencies import get_llm, get_store  # noqa: E402
 from api.routes import (  # noqa: E402
     blueprints,
     buddy,
@@ -42,6 +42,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise
     except LLMUnavailableError as exc:
         logger.warning("LLM backend unreachable at startup: %s", exc)
+
+    # Construct Chroma before requests can fan out into chat and asynchronous
+    # analytics on separate worker threads. The adapter also serialises cold
+    # cache misses, but warming here removes that latency and race window from
+    # the first user request altogether.
+    try:
+        get_store()
+    except Exception as exc:
+        # Match the LLM connectivity warm-up: a transient dependency failure
+        # must not prevent the service from starting, and the uncached next
+        # request will retry construction.
+        logger.warning("Chroma store unavailable at startup: %s", exc)
     yield
 
 
