@@ -40,6 +40,7 @@ router = APIRouter()
 # network round-trips to the embedding API. Kept modest to stay well under
 # typical provider rate limits -- override via INGEST_CONCURRENCY.
 _DEFAULT_INGEST_CONCURRENCY = 8
+_DEFAULT_MAX_BINARY_BYTES = 10 * 1024 * 1024  # 10 MB upload limit
 
 
 def _utc_now() -> str:
@@ -53,12 +54,20 @@ def _source_system_for(artifact: ArtifactRunIngestRequest) -> str:
 def _filename_for(artifact: ArtifactRunIngestRequest) -> str:
     """Derive a filename from the artifact metadata.
 
-    For FILE artifacts the relative path is embedded in sourceId as the last
-    colon-separated segment, so we preserve it in full (including directory) so
-    that citations remain unambiguous when multiple files share the same basename.
-    All other types use .md.
+    For FILE artifacts from uploads (sourceSystem="UPLOAD"), the original filename
+    is preserved in artifact.title, while sourceId is a raw upload UUID without an
+    extension. Suffix-based dispatch in parse() needs the extension, so we prefer
+    title.
+
+    For FILE artifacts from GitHub, the relative path is embedded in sourceId as
+    the last colon-separated segment, so we preserve it in full (including
+    directory) so that citations remain unambiguous when multiple files share the
+    same basename. All other types use .md.
     """
     if artifact.artifact_type == "FILE":
+        if _source_system_for(artifact).upper() == "UPLOAD" and artifact.title:
+            return artifact.title
+
         # sourceId format: "github:owner/repo:FILE:src/main/App.kt"
         path_segment = artifact.source_id.rsplit(":", 1)[-1]
         return path_segment or f"{artifact.artifact_id}.txt"
@@ -105,6 +114,21 @@ def _ingest_one(
     content_bytes = content.encode("utf-8")
 
     max_length = int(os.getenv("INGEST_MAX_CONTENT_LENGTH", "500000"))
+    max_binary_bytes = int(
+        os.getenv("INGEST_MAX_BINARY_BYTES", str(_DEFAULT_MAX_BINARY_BYTES))
+    )
+    is_binary = bool(artifact.mime) and (
+        artifact.mime.startswith("image/") or artifact.mime == "application/pdf"
+    )
+
+    decoded_binary_bytes: bytes | None = None
+    if is_binary and content:
+        try:
+            decoded_binary_bytes = base64.b64decode(
+                "".join(content.split()), validate=True
+            )
+        except (binascii.Error, ValueError):
+            decoded_binary_bytes = None
 
     existing = metadata_store.get_artifact(artifact.artifact_id)
     created_at = existing.created_at if existing is not None else request_time
@@ -114,12 +138,18 @@ def _ingest_one(
     project_ids = tuple(dict.fromkeys(pid for pid in artifact.project_ids if pid))
     revoke_removed_memberships(store, artifact.artifact_id, project_ids)
 
+    size_bytes = (
+        len(decoded_binary_bytes)
+        if decoded_binary_bytes is not None
+        else len(content_bytes)
+    )
+
     record = ArtifactRecord(
         id=artifact.artifact_id,
         filename=filename,
         content_type=artifact.mime or "text/plain",
         source_type=source_system.lower(),
-        size_bytes=len(content_bytes),
+        size_bytes=size_bytes,
         chunk_count=0,
         status="processing",
         created_at=created_at,
@@ -134,19 +164,37 @@ def _ingest_one(
         labels=artifact.labels,
     )
 
-    if len(content) > max_length:
-        logger.warning(
-            "Artifact %s exceeds max content length (%d > %d), skipping",
-            artifact.artifact_id,
-            len(content),
-            max_length,
-        )
-        store.delete(artifact.artifact_id, exclude_ids=[])
-        completed = replace(record, status="completed", updated_at=_utc_now())
-        metadata_store.save_completed_artifact(completed)
-        return ArtifactRunIngestResponse(
-            artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
-        )
+    if is_binary:
+        if (
+            decoded_binary_bytes is not None
+            and len(decoded_binary_bytes) > max_binary_bytes
+        ):
+            logger.warning(
+                "Artifact %s exceeds max binary size (%d > %d bytes), skipping",
+                artifact.artifact_id,
+                len(decoded_binary_bytes),
+                max_binary_bytes,
+            )
+            store.delete(artifact.artifact_id, exclude_ids=[])
+            completed = replace(record, status="completed", updated_at=_utc_now())
+            metadata_store.save_completed_artifact(completed)
+            return ArtifactRunIngestResponse(
+                artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
+            )
+    else:
+        if len(content) > max_length:
+            logger.warning(
+                "Artifact %s exceeds max content length (%d > %d), skipping",
+                artifact.artifact_id,
+                len(content),
+                max_length,
+            )
+            store.delete(artifact.artifact_id, exclude_ids=[])
+            completed = replace(record, status="completed", updated_at=_utc_now())
+            metadata_store.save_completed_artifact(completed)
+            return ArtifactRunIngestResponse(
+                artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
+            )
 
     metadata_store.save_artifact(record)
 

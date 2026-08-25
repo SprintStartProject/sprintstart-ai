@@ -650,17 +650,49 @@ def test_assemble_content_skips_title_for_image_and_pdf() -> None:
     assert _assemble_content(text_req) == "# Readme\n\nHello world"
 
 
+def test_filename_for_uses_title_for_upload_file_artifacts() -> None:
+    from api.routes.ingest_run import _filename_for
+    from api.schemas import ArtifactRunIngestRequest
+
+    upload_file = ArtifactRunIngestRequest(
+        artifact_id="uuid-upload",
+        source_system="UPLOAD",
+        source_id="123e4567-e89b-12d3-a456-426614174000",
+        artifact_type="FILE",
+        title="uploaded_chart.png",
+    )
+    assert _filename_for(upload_file) == "uploaded_chart.png"
+
+    github_file = ArtifactRunIngestRequest(
+        artifact_id="uuid-gh",
+        source_system="GITHUB",
+        source_id="github:owner/repo:FILE:src/main/App.kt",
+        artifact_type="FILE",
+        title="App.kt",
+    )
+    assert _filename_for(github_file) == "src/main/App.kt"
+
+    issue = ArtifactRunIngestRequest(
+        artifact_id="uuid-issue",
+        source_system="GITHUB",
+        source_id="github:owner/repo:ISSUE:42",
+        artifact_type="ISSUE",
+        title="Some bug",
+    )
+    assert _filename_for(issue) == "issue-42.md"
+
+
 def test_ingest_run_indexes_image_artifact_with_caption(
     client: TestClient,
     vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
 ) -> None:
     artifact: Artifact = {
         "artifactId": "image-1",
-        "sourceSystem": "GITHUB",
-        "sourceId": "github:owner/repo:FILE:docs/architecture.png",
-        "sourceUrl": "https://github.com/owner/repo/blob/main/docs/architecture.png",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-1",
         "artifactType": "FILE",
-        "title": "Architecture Diagram",
+        "title": "architecture.png",
         "bodyText": _TINY_PNG_B64,
         "mime": "image/png",
         "language": None,
@@ -680,25 +712,31 @@ def test_ingest_run_indexes_image_artifact_with_caption(
 
     assert len(vector_store.chunks) == 1
     chunk = vector_store.chunks[0]
+    assert chunk.filename == "architecture.png"
     assert chunk.kind == "image"
     assert chunk.text == "stub caption"
     assert _TINY_PNG_B64 not in chunk.text
+
+    record = metadata_store.get_artifact("image-1")
+    assert record is not None
+    assert record.filename == "architecture.png"
+    assert record.size_bytes == len(base64.b64decode(_TINY_PNG_B64))
 
 
 def test_ingest_run_indexes_pdf_artifact(
     client: TestClient,
     vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
 ) -> None:
     pdf_bytes = _PDF_FIXTURE_PATH.read_bytes()
     pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
 
     artifact: Artifact = {
         "artifactId": "pdf-1",
-        "sourceSystem": "GITHUB",
-        "sourceId": "github:owner/repo:FILE:docs/report.pdf",
-        "sourceUrl": "https://github.com/owner/repo/blob/main/docs/report.pdf",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-2",
         "artifactType": "FILE",
-        "title": "Quarterly Report",
+        "title": "report.pdf",
         "bodyText": pdf_b64,
         "mime": "application/pdf",
         "language": None,
@@ -719,6 +757,12 @@ def test_ingest_run_indexes_pdf_artifact(
     pdf_chunks = [c for c in vector_store.chunks if c.artifact_id == "pdf-1"]
     assert len(pdf_chunks) > 0
     assert all(c.kind == "pdf" for c in pdf_chunks)
+    assert all(c.filename == "report.pdf" for c in pdf_chunks)
+
+    record = metadata_store.get_artifact("pdf-1")
+    assert record is not None
+    assert record.filename == "report.pdf"
+    assert record.size_bytes == len(pdf_bytes)
 
 
 class _FailingVisionLLMClient(StubLLMClient):
@@ -737,10 +781,10 @@ def test_ingest_run_handles_image_vision_outage(
         client = TestClient(app)
         artifact: Artifact = {
             "artifactId": "image-fail",
-            "sourceSystem": "GITHUB",
-            "sourceId": "github:owner/repo:FILE:docs/architecture.png",
+            "sourceSystem": "UPLOAD",
+            "sourceId": "upload-uuid-fail",
             "artifactType": "FILE",
-            "title": "Architecture Diagram",
+            "title": "architecture.png",
             "bodyText": _TINY_PNG_B64,
             "mime": "image/png",
         }
@@ -770,10 +814,10 @@ def test_ingest_run_handles_invalid_base64_image(
 ) -> None:
     artifact: Artifact = {
         "artifactId": "image-bad-b64",
-        "sourceSystem": "GITHUB",
-        "sourceId": "github:owner/repo:FILE:docs/bad.png",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-bad-img",
         "artifactType": "FILE",
-        "title": "Bad Image",
+        "title": "bad.png",
         "bodyText": "!!!not-valid-base64!!!",
         "mime": "image/png",
     }
@@ -801,10 +845,10 @@ def test_ingest_run_handles_invalid_base64_pdf(
 ) -> None:
     artifact: Artifact = {
         "artifactId": "pdf-bad-b64",
-        "sourceSystem": "GITHUB",
-        "sourceId": "github:owner/repo:FILE:docs/bad.pdf",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-bad-pdf",
         "artifactType": "FILE",
-        "title": "Bad PDF",
+        "title": "bad.pdf",
         "bodyText": "!!!not-valid-base64!!!",
         "mime": "application/pdf",
     }
@@ -824,3 +868,61 @@ def test_ingest_run_handles_invalid_base64_pdf(
     assert record is not None
     assert record.status == "failed"
     assert "not valid base64" in (record.error_message or "")
+
+
+def test_ingest_run_uses_binary_limit_not_content_length_limit(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INGEST_MAX_CONTENT_LENGTH", "10")
+
+    artifact: Artifact = {
+        "artifactId": "image-under-binary-limit",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-size",
+        "artifactType": "FILE",
+        "title": "diagram.png",
+        "bodyText": _TINY_PNG_B64,
+        "mime": "image/png",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "image-under-binary-limit"
+    assert data["artifacts"][0]["chunk_count"] == 1
+    assert data["artifacts"][0]["status"] == "completed"
+
+
+def test_ingest_run_skips_binary_artifact_exceeding_binary_limit(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INGEST_MAX_BINARY_BYTES", "10")
+
+    artifact: Artifact = {
+        "artifactId": "image-over-binary-limit",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-oversize",
+        "artifactType": "FILE",
+        "title": "diagram.png",
+        "bodyText": _TINY_PNG_B64,
+        "mime": "image/png",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "image-over-binary-limit"
+    assert data["artifacts"][0]["chunk_count"] == 0
+    assert data["artifacts"][0]["status"] == "completed"
