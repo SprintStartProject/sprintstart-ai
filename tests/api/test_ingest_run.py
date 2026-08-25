@@ -1,3 +1,4 @@
+import base64
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -599,3 +600,227 @@ def test_ingest_run_deduplicates_project_ids(
     chunks = vector_store.list_chunks_by_artifact("uuid-1", limit=10)
     assert chunks
     assert chunks[0].project_ids == ("project-a",)
+
+
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+    "/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg=="
+)
+
+_PDF_FIXTURE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "ingestion"
+    / "fixtures"
+    / "single_page.pdf"
+)
+
+
+def test_assemble_content_skips_title_for_image_and_pdf() -> None:
+    from api.routes.ingest_run import _assemble_content
+    from api.schemas import ArtifactRunIngestRequest
+
+    image_req = ArtifactRunIngestRequest(
+        artifact_id="img-1",
+        source_id="github:owner/repo:FILE:docs/diagram.png",
+        artifact_type="FILE",
+        title="Architecture Diagram",
+        body_text=_TINY_PNG_B64,
+        mime="image/png",
+    )
+    assert _assemble_content(image_req) == _TINY_PNG_B64
+
+    pdf_req = ArtifactRunIngestRequest(
+        artifact_id="pdf-1",
+        source_id="github:owner/repo:FILE:docs/report.pdf",
+        artifact_type="FILE",
+        title="Quarterly Report",
+        body_text="JVBERi0xLjQK...",
+        mime="application/pdf",
+    )
+    assert _assemble_content(pdf_req) == "JVBERi0xLjQK..."
+
+    text_req = ArtifactRunIngestRequest(
+        artifact_id="txt-1",
+        source_id="github:owner/repo:FILE:docs/readme.md",
+        artifact_type="FILE",
+        title="Readme",
+        body_text="Hello world",
+        mime="text/markdown",
+    )
+    assert _assemble_content(text_req) == "# Readme\n\nHello world"
+
+
+def test_ingest_run_indexes_image_artifact_with_caption(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    artifact: Artifact = {
+        "artifactId": "image-1",
+        "sourceSystem": "GITHUB",
+        "sourceId": "github:owner/repo:FILE:docs/architecture.png",
+        "sourceUrl": "https://github.com/owner/repo/blob/main/docs/architecture.png",
+        "artifactType": "FILE",
+        "title": "Architecture Diagram",
+        "bodyText": _TINY_PNG_B64,
+        "mime": "image/png",
+        "language": None,
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["artifacts"]) == 1
+    assert data["artifacts"][0]["artifact_id"] == "image-1"
+    assert data["artifacts"][0]["chunk_count"] == 1
+    assert data["artifacts"][0]["status"] == "completed"
+
+    assert len(vector_store.chunks) == 1
+    chunk = vector_store.chunks[0]
+    assert chunk.kind == "image"
+    assert chunk.text == "stub caption"
+    assert _TINY_PNG_B64 not in chunk.text
+
+
+def test_ingest_run_indexes_pdf_artifact(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    pdf_bytes = _PDF_FIXTURE_PATH.read_bytes()
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+
+    artifact: Artifact = {
+        "artifactId": "pdf-1",
+        "sourceSystem": "GITHUB",
+        "sourceId": "github:owner/repo:FILE:docs/report.pdf",
+        "sourceUrl": "https://github.com/owner/repo/blob/main/docs/report.pdf",
+        "artifactType": "FILE",
+        "title": "Quarterly Report",
+        "bodyText": pdf_b64,
+        "mime": "application/pdf",
+        "language": None,
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["artifacts"]) == 1
+    assert data["artifacts"][0]["artifact_id"] == "pdf-1"
+    assert data["artifacts"][0]["chunk_count"] > 0
+    assert data["artifacts"][0]["status"] == "completed"
+
+    pdf_chunks = [c for c in vector_store.chunks if c.artifact_id == "pdf-1"]
+    assert len(pdf_chunks) > 0
+    assert all(c.kind == "pdf" for c in pdf_chunks)
+
+
+class _FailingVisionLLMClient(StubLLMClient):
+    def caption_image(self, image_bytes: bytes) -> str:
+        raise LLMUnavailableError("Vision model offline")
+
+
+def test_ingest_run_handles_image_vision_outage(
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    app.dependency_overrides[get_store] = lambda: vector_store
+    app.dependency_overrides[get_llm] = lambda: _FailingVisionLLMClient()
+    app.dependency_overrides[get_ingestion_metadata_store] = lambda: metadata_store
+    try:
+        client = TestClient(app)
+        artifact: Artifact = {
+            "artifactId": "image-fail",
+            "sourceSystem": "GITHUB",
+            "sourceId": "github:owner/repo:FILE:docs/architecture.png",
+            "artifactType": "FILE",
+            "title": "Architecture Diagram",
+            "bodyText": _TINY_PNG_B64,
+            "mime": "image/png",
+        }
+
+        response = client.post(
+            "/api/v1/ingest/sync",
+            json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["artifacts"][0]["artifact_id"] == "image-fail"
+        assert data["artifacts"][0]["status"] == "failed"
+        assert data["artifacts"][0]["chunk_count"] == 0
+
+        record = metadata_store.get_artifact("image-fail")
+        assert record is not None
+        assert record.status == "failed"
+        assert "Vision model offline" in (record.error_message or "")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ingest_run_handles_invalid_base64_image(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact: Artifact = {
+        "artifactId": "image-bad-b64",
+        "sourceSystem": "GITHUB",
+        "sourceId": "github:owner/repo:FILE:docs/bad.png",
+        "artifactType": "FILE",
+        "title": "Bad Image",
+        "bodyText": "!!!not-valid-base64!!!",
+        "mime": "image/png",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "image-bad-b64"
+    assert data["artifacts"][0]["status"] == "failed"
+    assert data["artifacts"][0]["chunk_count"] == 0
+
+    record = metadata_store.get_artifact("image-bad-b64")
+    assert record is not None
+    assert record.status == "failed"
+    assert "not valid base64" in (record.error_message or "")
+
+
+def test_ingest_run_handles_invalid_base64_pdf(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact: Artifact = {
+        "artifactId": "pdf-bad-b64",
+        "sourceSystem": "GITHUB",
+        "sourceId": "github:owner/repo:FILE:docs/bad.pdf",
+        "artifactType": "FILE",
+        "title": "Bad PDF",
+        "bodyText": "!!!not-valid-base64!!!",
+        "mime": "application/pdf",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "pdf-bad-b64"
+    assert data["artifacts"][0]["status"] == "failed"
+    assert data["artifacts"][0]["chunk_count"] == 0
+
+    record = metadata_store.get_artifact("pdf-bad-b64")
+    assert record is not None
+    assert record.status == "failed"
+    assert "not valid base64" in (record.error_message or "")

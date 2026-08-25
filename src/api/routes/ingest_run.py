@@ -1,5 +1,7 @@
 """POST /api/v1/ingest/sync — batch ingest for completed GitHub ingestion runs."""
 
+import base64
+import binascii
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +22,7 @@ from api.schemas import (
 from ingestion.mapper import to_chunk
 from ingestion.membership import revoke_removed_memberships
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
+from ingestion.models import ParsedChunk
 from ingestion.parser import parse
 from ingestion.source_role import classify_source_role
 from llm.base import LLMClient
@@ -78,6 +81,10 @@ def _connector_source_id_for(artifact: ArtifactRunIngestRequest) -> str | None:
 
 
 def _assemble_content(artifact: ArtifactRunIngestRequest) -> str:
+    if artifact.mime and (
+        artifact.mime.startswith("image/") or artifact.mime == "application/pdf"
+    ):
+        return artifact.body_text or ""
     parts: list[str] = []
     if artifact.title:
         parts.append(f"# {artifact.title}")
@@ -151,6 +158,22 @@ def _ingest_one(
             artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
         )
 
+    if artifact.mime == "application/pdf":
+        try:
+            content_bytes = base64.b64decode("".join(content.split()), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            detail = f"PDF content for {filename!r} is not valid base64."
+            logger.warning(
+                "PDF content for artifact %s (%s) is not valid base64: %s",
+                artifact.artifact_id,
+                filename,
+                exc,
+            )
+            metadata_store.mark_failed(artifact.artifact_id, detail, _utc_now())
+            return ArtifactRunIngestResponse(
+                artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
+            )
+
     try:
         parsed_chunks = parse(filename, content_bytes)
     except Exception as exc:
@@ -173,10 +196,57 @@ def _ingest_one(
             artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
         )
 
+    enriched: list[ParsedChunk] = []
+    for chunk in parsed_chunks:
+        if chunk.kind == "image":
+            try:
+                image_bytes = base64.b64decode(
+                    "".join(chunk.content.split()), validate=True
+                )
+            except (binascii.Error, ValueError) as exc:
+                detail = f"Image content for {filename!r} is not valid base64."
+                logger.warning(
+                    "Image content for artifact %s (%s) is not valid base64: %s",
+                    artifact.artifact_id,
+                    filename,
+                    exc,
+                )
+                metadata_store.mark_failed(artifact.artifact_id, detail, _utc_now())
+                return ArtifactRunIngestResponse(
+                    artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
+                )
+
+            try:
+                caption = llm.caption_image(image_bytes)
+                enriched.append(
+                    ParsedChunk(content=caption, kind="image", metadata=chunk.metadata)
+                )
+            except LLMUnavailableError as exc:
+                logger.warning(
+                    "Vision model unavailable for artifact %s (%s): %s",
+                    artifact.artifact_id,
+                    filename,
+                    exc,
+                )
+                metadata_store.mark_failed(artifact.artifact_id, str(exc), _utc_now())
+                return ArtifactRunIngestResponse(
+                    artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
+                )
+        else:
+            enriched.append(chunk)
+
+    if not enriched:
+        store.delete(artifact.artifact_id, exclude_ids=[])
+        completed = replace(record, status="completed", updated_at=_utc_now())
+        metadata_store.save_completed_artifact(completed)
+        return ArtifactRunIngestResponse(
+            artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
+        )
+
     source_role = classify_source_role(filename)
 
     try:
-        embeddings = llm.embed_batch([chunk.content for chunk in parsed_chunks])
+        embeddings = llm.embed_batch([chunk.content for chunk in enriched])
         chunks = [
             replace(
                 to_chunk(
@@ -197,7 +267,7 @@ def _ingest_one(
                 connector_source_id=_connector_source_id_for(artifact),
             )
             for index, (chunk, embedding) in enumerate(
-                zip(parsed_chunks, embeddings, strict=True)
+                zip(enriched, embeddings, strict=True)
             )
         ]
     except LLMUnavailableError as exc:
