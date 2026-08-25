@@ -99,12 +99,17 @@ def _to_openai_messages(messages: list[Message]) -> list[ChatCompletionMessagePa
                     }
                     for call in tool_calls
                 ]
-            reasoning = message.get("reasoning")
-            if reasoning:
-                cast("Any", assistant_message)["reasoning"] = reasoning
+            # OpenRouter documents reasoning and reasoning_details as
+            # alternative preservation formats and requires the structured
+            # sequence for signed/encrypted blocks. Prefer it verbatim and fall
+            # back to plaintext only when no structured details are present.
             reasoning_details = message.get("reasoning_details")
             if reasoning_details:
                 cast("Any", assistant_message)["reasoning_details"] = reasoning_details
+            else:
+                reasoning = message.get("reasoning")
+                if reasoning:
+                    cast("Any", assistant_message)["reasoning"] = reasoning
             openai_messages.append(assistant_message)
         else:
             user_message: ChatCompletionUserMessageParam = {
@@ -179,7 +184,15 @@ def _response_reasoning(
     """Extract the exact reasoning context OpenRouter requires after tool use."""
     message_fields = cast("dict[str, object]", message.model_dump())
     raw_reasoning = message_fields.get("reasoning")
-    reasoning = raw_reasoning if isinstance(raw_reasoning, str) else None
+    if not isinstance(raw_reasoning, str) or not raw_reasoning.strip():
+        # Legacy OpenAI-compatible backends (DeepSeek-R1, Qwen) expose the
+        # channel as reasoning_content, mirroring the streaming normalization.
+        raw_reasoning = message_fields.get("reasoning_content")
+    reasoning = (
+        raw_reasoning
+        if isinstance(raw_reasoning, str) and raw_reasoning.strip()
+        else None
+    )
 
     raw_details = message_fields.get("reasoning_details")
     if not isinstance(raw_details, list):

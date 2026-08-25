@@ -295,7 +295,16 @@ class ChatAgent:
         # only the answer (or, for some routed providers, an empty completion).
         # This is only another message in the existing request; it adds no LLM
         # round-trip and the tools are deliberately unavailable during stream.
-        messages.append(Message(role="user", content=_FINAL_ANSWER_INSTRUCTION))
+        # Gate it on reasoning context actually being present so non-reasoning
+        # providers (Ollama, native Anthropic, plain OpenAI) keep their prior
+        # behaviour.
+        has_reasoning_context = any(
+            message.get("reasoning") or message.get("reasoning_details")
+            for message in messages
+            if message["role"] == "assistant"
+        )
+        if has_reasoning_context:
+            messages.append(Message(role="user", content=_FINAL_ANSWER_INSTRUCTION))
 
         for event in self._llm.stream(messages):
             match event:

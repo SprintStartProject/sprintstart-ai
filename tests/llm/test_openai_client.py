@@ -409,8 +409,10 @@ def test_tool_chat_preserves_reasoning_context_for_final_stream() -> None:
         body = json.loads(request.content)
         if body.get("stream") is True:
             assistant = body["messages"][1]
-            assert assistant["reasoning"] == "Choosing a search."
+            # Structured details are the signed form, so plaintext reasoning is
+            # dropped to avoid sending both preservation formats at once.
             assert assistant["reasoning_details"] == reasoning_details
+            assert "reasoning" not in assistant
             return httpx.Response(
                 200,
                 headers={"content-type": "text/event-stream"},
@@ -497,6 +499,81 @@ def test_tool_chat_preserves_reasoning_context_for_final_stream() -> None:
     )
 
     assert list(client.stream(messages)) == [TextDelta("Final answer.")]
+
+
+def test_tool_chat_normalizes_legacy_reasoning_content_field() -> None:
+    """Legacy OpenAI-compatible backends expose the channel as
+    reasoning_content on the non-streaming tool response. It must be captured
+    like the streaming path and forwarded as plaintext reasoning when no
+    structured details exist."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("stream") is True:
+            assistant = body["messages"][1]
+            assert assistant["reasoning"] == "Legacy thinking."
+            assert "reasoning_details" not in assistant
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content="data: [DONE]\n\n",
+            )
+
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-legacy",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": "Legacy thinking.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "retrieve",
+                                        "arguments": '{"query": "architecture"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+    client = make_client(handler)
+    messages = [Message(role="user", content="Explain the architecture.")]
+
+    result = client.chat(messages, tools=[_TOOL_SPEC])
+
+    assert result.reasoning == "Legacy thinking."
+    assert result.reasoning_details == []
+    messages.append(
+        Message(
+            role="assistant",
+            content=result.text,
+            tool_calls=result.tool_calls,
+            reasoning=result.reasoning or "",
+            reasoning_details=result.reasoning_details,
+        )
+    )
+    messages.append(
+        Message(
+            role="tool",
+            content="The service is layered.",
+            tool_call_id=result.tool_calls[0].id,
+            name="retrieve",
+        )
+    )
+
+    assert list(client.stream(messages)) == []
 
 
 def test_chat_sends_tools_and_parses_tool_calls() -> None:

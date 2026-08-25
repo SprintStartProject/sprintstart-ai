@@ -142,7 +142,8 @@ def test_tool_result_carries_the_source_text_to_the_model() -> None:
 
 def test_answer_is_streamed_from_the_same_conversation_as_the_search() -> None:
     """No second, re-serialised prompt: the answer call is the search call's
-    message list plus the tool results."""
+    message list plus the tool results. Without reasoning context no extra turn
+    is appended, so non-reasoning providers keep their prior behaviour."""
     llm = _llm([_RETRIEVE])
 
     _run(_agent(llm))
@@ -153,11 +154,9 @@ def test_answer_is_streamed_from_the_same_conversation_as_the_search() -> None:
         "user",
         "assistant",
         "tool",
-        "user",
     ]
     # The sources are sent once, as the tool result — not pasted in again.
     assert sum(_CHUNK_TEXT in str(m["content"]) for m in answer_messages) == 1
-    assert "Do not request or emit another tool call" in answer_messages[-1]["content"]
 
 
 def test_tool_reasoning_context_is_forwarded_only_to_the_answer_call() -> None:
@@ -177,12 +176,22 @@ def test_tool_reasoning_context_is_forwarded_only_to_the_answer_call() -> None:
 
     _run(_agent(llm))
 
+    answer_messages = llm.stream_calls[0]
     assistant_messages = [
-        message for message in llm.stream_calls[0] if message["role"] == "assistant"
+        message for message in answer_messages if message["role"] == "assistant"
     ]
     assert len(assistant_messages) == 1
-    assert assistant_messages[0]["reasoning"] == "Selecting a search."
-    assert assistant_messages[0]["reasoning_details"] == details
+    assert assistant_messages[0].get("reasoning") == "Selecting a search."
+    assert assistant_messages[0].get("reasoning_details") == details
+    # Reasoning context present, so the fresh answer turn is appended.
+    assert [m["role"] for m in answer_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert "Do not request or emit another tool call" in answer_messages[-1]["content"]
 
 
 def test_evidence_ends_the_search_without_another_decision_call() -> None:
