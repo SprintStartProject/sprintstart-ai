@@ -6,6 +6,7 @@ import chromadb
 from ingestion.source_role import SourceRole
 from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters
+from store import chroma_store as chroma_store_module
 from store.chroma_store import ChromaVectorStore
 
 
@@ -309,7 +310,7 @@ def test_chroma_round_trips_source_role() -> None:
     scored = store.query(embedding=[1.0, 0.0], top_k=1, min_score=0.1)
     assert scored[0].source_role == "test"
 
-    listed = store.all_chunks()
+    listed = store.list_chunks(limit=store.count())
     assert listed[0].source_role == "test"
 
 
@@ -353,6 +354,34 @@ def test_chroma_all_chunks_without_embeddings_omits_embeddings() -> None:
     assert len(chunks) == 1
     assert chunks[0].text == "Some text"
     assert chunks[0].embedding == []
+
+
+def test_chroma_paged_reads_return_every_chunk_exactly_once(monkeypatch) -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(collection_name="test_paged_reads", client=client)
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{index}",
+                artifact_id=f"artifact-{index}",
+                filename=f"{index}.md",
+                text=f"Text {index}",
+                embedding=[1.0, 0.0],
+                project_ids=("project-1",),
+            )
+            for index in range(5)
+        ]
+    )
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 2)
+
+    chunks = list(store.iter_chunks_without_embeddings())
+    chunk_ids = [chunk.id for chunk in chunks]
+    fingerprints = store.retrieval_fingerprints()
+
+    assert len(chunk_ids) == len(set(chunk_ids)) == 5
+    assert set(chunk_ids) == {f"chunk-{index}" for index in range(5)}
+    assert all(chunk.embedding == [] for chunk in chunks)
+    assert {value.split("\x00", 1)[0] for value in fingerprints} == set(chunk_ids)
 
 
 def test_chroma_all_ids_returns_every_chunk_id() -> None:
@@ -473,7 +502,7 @@ def test_chroma_round_trips_start_line_and_start_page() -> None:
     assert scored_pdf[0].start_page == 3
     assert scored_pdf[0].start_line is None
 
-    listed = store.all_chunks()
+    listed = store.list_chunks(limit=store.count())
     by_id = {chunk.id: chunk for chunk in listed}
     assert by_id["chunk-code"].start_line == 12
     assert by_id["chunk-pdf"].start_page == 3
@@ -746,7 +775,7 @@ def test_chroma_round_trips_project_ids() -> None:
         ]
     )
 
-    by_id = {chunk.id: chunk for chunk in store.all_chunks()}
+    by_id = {chunk.id: chunk for chunk in store.list_chunks(limit=store.count())}
     assert by_id["chunk-1"].project_ids == ("project-1", "project-2")
     assert by_id["chunk-2"].project_ids == ()
 

@@ -37,10 +37,13 @@ def corpus_fingerprint(
     influence eligibility. When omitted or empty, the base corpus hash is identical.
     """
     digest = hashlib.sha256()
-    for chunk in sorted(store.all_chunks_without_embeddings(), key=lambda c: c.id):
-        digest.update(chunk.id.encode("utf-8"))
+    chunk_fields = (
+        (chunk.id, chunk.text) for chunk in store.iter_chunks_without_embeddings()
+    )
+    for chunk_id, text in sorted(chunk_fields):
+        digest.update(chunk_id.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(chunk.text.encode("utf-8"))
+        digest.update(text.encode("utf-8"))
         digest.update(b"\0")
     if extra_fingerprint_material:
         for item in sorted(extra_fingerprint_material):
