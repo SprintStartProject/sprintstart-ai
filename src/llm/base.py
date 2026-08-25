@@ -16,6 +16,8 @@ class Message(TypedDict):
     tool_calls: NotRequired[list[ToolCall]]
     tool_call_id: NotRequired[str]
     name: NotRequired[str]
+    reasoning: NotRequired[str]
+    reasoning_details: NotRequired[list[dict[str, object]]]
 
 
 class ToolSpec(TypedDict):
@@ -28,6 +30,10 @@ class ToolSpec(TypedDict):
 class ChatResult:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list[ToolCall])
+    reasoning: str | None = None
+    reasoning_details: list[dict[str, object]] = field(
+        default_factory=list[dict[str, object]]
+    )
 
 
 @dataclass(frozen=True)

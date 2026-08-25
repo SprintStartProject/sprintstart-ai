@@ -153,9 +153,36 @@ def test_answer_is_streamed_from_the_same_conversation_as_the_search() -> None:
         "user",
         "assistant",
         "tool",
+        "user",
     ]
     # The sources are sent once, as the tool result — not pasted in again.
     assert sum(_CHUNK_TEXT in str(m["content"]) for m in answer_messages) == 1
+    assert "Do not request or emit another tool call" in answer_messages[-1]["content"]
+
+
+def test_tool_reasoning_context_is_forwarded_only_to_the_answer_call() -> None:
+    details: list[dict[str, object]] = [
+        {
+            "type": "reasoning.text",
+            "text": "Selecting evidence.",
+            "signature": "signed-context",
+        }
+    ]
+    llm = ScriptedLLMClient(
+        [[_RETRIEVE]],
+        embedding=_EMBEDDING,
+        reasoning="Selecting a search.",
+        reasoning_details=details,
+    )
+
+    _run(_agent(llm))
+
+    assistant_messages = [
+        message for message in llm.stream_calls[0] if message["role"] == "assistant"
+    ]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["reasoning"] == "Selecting a search."
+    assert assistant_messages[0]["reasoning_details"] == details
 
 
 def test_evidence_ends_the_search_without_another_decision_call() -> None:

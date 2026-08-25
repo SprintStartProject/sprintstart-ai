@@ -70,11 +70,15 @@ class ScriptedLLMClient:
         answer: str = "final answer",
         embedding: list[float] | None = None,
         stream_events: Sequence[LLMStreamEvent] | None = None,
+        reasoning: str | None = None,
+        reasoning_details: list[dict[str, object]] | None = None,
     ) -> None:
         self._turns: list[Turn] = list(turns)
         self.answer = answer
         self.embedding = embedding or [0.0] * 768
         self._stream_events = list(stream_events) if stream_events is not None else None
+        self.reasoning = reasoning
+        self.reasoning_details = reasoning_details or []
         self.chat_calls: list[list[Message]] = []
         self.stream_calls: list[list[Message]] = []
 
@@ -91,7 +95,12 @@ class ScriptedLLMClient:
             ToolCall(id=f"call_{i}", name=name, arguments=dict(args))
             for i, (name, args) in enumerate(turn)
         ]
-        return ChatResult(text="" if calls else self.answer, tool_calls=calls)
+        return ChatResult(
+            text="" if calls else self.answer,
+            tool_calls=calls,
+            reasoning=self.reasoning if calls else None,
+            reasoning_details=self.reasoning_details if calls else [],
+        )
 
     def generate(
         self, messages: list[Message], *, temperature: float | None = None
