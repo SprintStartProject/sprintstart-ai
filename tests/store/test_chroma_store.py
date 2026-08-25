@@ -376,12 +376,24 @@ def test_chroma_paged_reads_return_every_chunk_exactly_once(monkeypatch) -> None
 
     chunks = list(store.iter_chunks_without_embeddings())
     chunk_ids = [chunk.id for chunk in chunks]
+
+    metadata_reads: list[dict[str, object]] = []
+    original_get = store._collection.get
+
+    def recording_get(**kwargs):
+        metadata_reads.append(kwargs)
+        return original_get(**kwargs)
+
+    monkeypatch.setattr(store._collection, "get", recording_get)
     fingerprints = store.retrieval_fingerprints()
 
     assert len(chunk_ids) == len(set(chunk_ids)) == 5
     assert set(chunk_ids) == {f"chunk-{index}" for index in range(5)}
     assert all(chunk.embedding == [] for chunk in chunks)
     assert {value.split("\x00", 1)[0] for value in fingerprints} == set(chunk_ids)
+    assert [read["offset"] for read in metadata_reads] == [0, 2, 4, 5]
+    assert all(read["limit"] == 2 for read in metadata_reads)
+    assert all(read["include"] == ["metadatas"] for read in metadata_reads)
 
 
 def test_chroma_all_ids_returns_every_chunk_id() -> None:
@@ -910,7 +922,7 @@ def test_chroma_retrieval_fingerprints_stable_for_unchanged_corpus() -> None:
     assert store.retrieval_fingerprints() == store.retrieval_fingerprints()
 
 
-def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
+def test_chroma_project_ids_for_artifact_reads_indexed_membership(monkeypatch) -> None:
     client = chromadb.EphemeralClient()
     store = ChromaVectorStore(
         collection_name="test_project_ids_for_artifact",
@@ -920,15 +932,18 @@ def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
     store.add(
         [
             Chunk(
-                id="chunk-1",
+                id=f"chunk-{index}",
                 artifact_id="artifact-1",
                 filename="doc.md",
-                text="Text",
+                text=f"Text {index}",
                 embedding=[1.0, 0.0],
-                project_ids=("project-1", "project-2"),
-            ),
+                project_ids=(f"project-{index % 2 + 1}",),
+            )
+            for index in range(5)
+        ]
+        + [
             Chunk(
-                id="chunk-2",
+                id="chunk-other",
                 artifact_id="artifact-2",
                 filename="other.md",
                 text="Other",
@@ -938,9 +953,26 @@ def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
         ]
     )
 
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 2)
+    metadata_reads: list[dict[str, object]] = []
+    original_get = store._collection.get
+
+    def recording_get(**kwargs):
+        metadata_reads.append(kwargs)
+        return original_get(**kwargs)
+
+    monkeypatch.setattr(store._collection, "get", recording_get)
+
     assert store.project_ids_for_artifact("artifact-1") == frozenset(
         {"project-1", "project-2"}
     )
+    assert [read["offset"] for read in metadata_reads] == [0, 2, 4, 5]
+    assert all(read["limit"] == 2 for read in metadata_reads)
+    assert all(read["include"] == ["metadatas"] for read in metadata_reads)
+    assert all(
+        read["where"] == {"artifact_id": "artifact-1"} for read in metadata_reads
+    )
+
     assert store.project_ids_for_artifact("artifact-2") == frozenset({"project-3"})
     assert store.project_ids_for_artifact("missing") == frozenset()
 

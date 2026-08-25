@@ -3,7 +3,7 @@ from typing import Any, cast
 
 import chromadb
 import chromadb.api
-from chromadb.api.types import Metadata, PyEmbeddings
+from chromadb.api.types import Metadata, PyEmbeddings, Where
 from chromadb.config import Settings
 
 from ingestion.source_role import SourceRole
@@ -267,9 +267,6 @@ class ChromaVectorStore:
             yield from page
             offset += len(page)
 
-            if len(page) < _MAX_GET_PAGE:
-                return
-
     def list_chunks_without_embeddings(
         self, limit: int, offset: int = 0
     ) -> list[Chunk]:
@@ -342,24 +339,43 @@ class ChromaVectorStore:
 
     def retrieval_fingerprints(self) -> frozenset[str]:
         return frozenset(
-            _retrieval_fingerprint_from_chunk(chunk)
-            for chunk in self.iter_chunks_without_embeddings()
+            _retrieval_fingerprint(chunk_id, metadata)
+            for chunk_id, metadata in self._iter_metadata_records()
         )
 
     def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
-        raw_result = self._collection.get(
-            where={"artifact_id": artifact_id},
-            include=["metadatas"],
-        )
-        metadatas = cast(
-            list[Mapping[str, object]],
-            raw_result.get("metadatas") or [],
-        )
         return frozenset(
             project_id
-            for metadata in metadatas
+            for _, metadata in self._iter_metadata_records(
+                where={"artifact_id": artifact_id}
+            )
             for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
         )
+
+    def _iter_metadata_records(
+        self,
+        where: Where | None = None,
+    ) -> Iterator[tuple[str, Mapping[str, object]]]:
+        """Yield ids and metadata through bounded reads without hydrating text."""
+        offset = 0
+
+        while True:
+            raw_result = self._collection.get(
+                where=where,
+                include=["metadatas"],
+                limit=_MAX_GET_PAGE,
+                offset=offset,
+            )
+            ids = raw_result["ids"]
+            if not ids:
+                return
+
+            metadatas = cast(
+                list[Mapping[str, object]],
+                raw_result.get("metadatas") or [],
+            )
+            yield from zip(ids, metadatas, strict=True)
+            offset += len(ids)
 
     def count(self) -> int:
         return self._collection.count()
@@ -384,18 +400,6 @@ def _retrieval_fingerprint(chunk_id: str, metadata: Mapping[str, object]) -> str
     parts = [chunk_id]
     parts.extend(str(metadata.get(key, "")) for key in _FILTER_METADATA_KEYS)
     return "\x00".join(parts)
-
-
-def _retrieval_fingerprint_from_chunk(chunk: Chunk) -> str:
-    metadata: dict[str, object] = {
-        PROJECT_IDS_METADATA_KEY: encode_project_ids(chunk.project_ids),
-        "source_role": chunk.source_role,
-        "connector_id": chunk.connector_id or "",
-        "connector_source_id": chunk.connector_source_id or "",
-        "source_system": chunk.source_system or "",
-        "created_at": chunk.created_at or "",
-    }
-    return _retrieval_fingerprint(chunk.id, metadata)
 
 
 def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:
