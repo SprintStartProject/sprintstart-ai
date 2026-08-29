@@ -112,6 +112,83 @@ def test_fingerprint_gate_empty_store_path() -> None:
     assert events[1]["type"] == "done"
 
 
+def test_corpus_fingerprint_scoped_to_projects() -> None:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="doc1.md",
+                text="content for proj1",
+                embedding=[0.0] * 768,
+                project_ids=("p1",),
+            ),
+            Chunk(
+                id="c2",
+                artifact_id="a2",
+                filename="doc2.md",
+                text="content for proj2",
+                embedding=[0.0] * 768,
+                project_ids=("p2",),
+            ),
+        ]
+    )
+    fp_p1 = corpus_fingerprint(store, project_ids=frozenset({"p1"}))
+    fp_p2 = corpus_fingerprint(store, project_ids=frozenset({"p2"}))
+    assert fp_p1 != fp_p2
+
+    # Mutating p2 content does not change p1's fingerprint
+    store.add(
+        [
+            Chunk(
+                id="c2",
+                artifact_id="a2",
+                filename="doc2.md",
+                text="mutated content for proj2",
+                embedding=[0.0] * 768,
+                project_ids=("p2",),
+            )
+        ]
+    )
+    assert corpus_fingerprint(store, project_ids=frozenset({"p1"})) == fp_p1
+    assert corpus_fingerprint(store, project_ids=frozenset({"p2"})) != fp_p2
+
+
+def test_fingerprint_gate_scoped_empty_store_path() -> None:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="doc1.md",
+                text="only in p2",
+                embedding=[0.0] * 768,
+                project_ids=("p2",),
+            )
+        ]
+    )
+    progress = ProgressStream("test")
+    computed_fp, events, outcome = fingerprint_gate(
+        progress,
+        store,
+        last_fingerprint=None,
+        make_unchanged=lambda: _DummyOutcome(status="unchanged"),
+        make_empty=lambda: _DummyOutcome(status="skipped"),
+        unchanged_label="unchanged",
+        empty_warning_label="empty_warn",
+        empty_done_label="empty_done",
+        project_ids=frozenset({"p1"}),
+    )
+    assert computed_fp is None
+    assert outcome is not None
+    assert outcome.status == "skipped"
+    assert len(events) == 2
+    assert events[0]["type"] == "warning"
+    assert events[1]["type"] == "done"
+
+
 def test_fingerprint_gate_proceeds_on_new_fingerprint() -> None:
     store = _store("a")
     progress = ProgressStream("test")

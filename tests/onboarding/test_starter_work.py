@@ -13,6 +13,7 @@ from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
 _EMBED = [1.0] + [0.0] * 767
+_PIDS = frozenset({"p1"})
 
 
 def _collect[T](
@@ -47,13 +48,18 @@ def _issue_artifact(**overrides: object) -> ArtifactRecord:
         source_id="github:org/repo:ISSUE:1",
         source_url="https://github.com/org/repo/issues/1",
         labels=["good first issue"],
+        project_ids=("p1",),
     )
     defaults.update(overrides)
     return ArtifactRecord(**defaults)  # type: ignore[arg-type]
 
 
 def _add_issue_chunk(
-    store: StubVectorStore, artifact_id: str, title: str, body: str
+    store: StubVectorStore,
+    artifact_id: str,
+    title: str,
+    body: str,
+    project_ids: tuple[str, ...] = ("p1",),
 ) -> None:
     store.add(
         [
@@ -63,6 +69,7 @@ def _add_issue_chunk(
                 filename=f"{artifact_id}.md",
                 text=f"# {title}\n\n{body}",
                 embedding=_EMBED,
+                project_ids=project_ids,
             )
         ]
     )
@@ -91,7 +98,7 @@ def test_mines_safely_scoped_task_from_open_issue() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "proposed"
     assert len(outcome.tasks) == 1
@@ -141,7 +148,7 @@ def test_mines_a_tracker_issue_that_is_not_from_github() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "proposed"
     task = outcome.tasks[0]
@@ -174,7 +181,7 @@ def test_issue_somebody_else_is_already_on_is_not_proposed() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "skipped"
     assert outcome.tasks == []
@@ -196,7 +203,7 @@ def test_an_unassigned_issue_is_still_proposed() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "proposed"
     assert len(outcome.tasks) == 1
@@ -228,7 +235,7 @@ def test_an_issue_whose_assignment_is_unknown_is_still_proposed() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "proposed"
     assert len(outcome.tasks) == 1
@@ -249,7 +256,7 @@ def test_closed_issue_is_never_proposed() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "skipped"
     assert outcome.tasks == []
@@ -271,7 +278,11 @@ def test_already_pooled_issue_is_not_reproposed() -> None:
     )
 
     outcome = generate_starter_work_pool(
-        llm, store, metadata_store, active_source_ids=["github:org/repo:ISSUE:1"]
+        llm,
+        store,
+        metadata_store,
+        project_ids=_PIDS,
+        active_source_ids=["github:org/repo:ISSUE:1"],
     )
 
     assert outcome.status == "skipped"
@@ -295,7 +306,11 @@ def test_competency_key_outside_known_set_is_dropped() -> None:
     )
 
     outcome = generate_starter_work_pool(
-        llm, store, metadata_store, active_competency_keys=["docs"]
+        llm,
+        store,
+        metadata_store,
+        project_ids=_PIDS,
+        active_competency_keys=["docs"],
     )
 
     assert outcome.tasks[0].competency_keys == ["docs"]
@@ -316,12 +331,16 @@ def test_unchanged_corpus_with_matching_fingerprint_is_a_noop() -> None:
         ]
     )
 
-    first = generate_starter_work_pool(llm, store, metadata_store)
+    first = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
     assert first.status == "proposed"
     assert first.provenance is not None
 
     again = generate_starter_work_pool(
-        llm, store, metadata_store, last_fingerprint=first.provenance.corpus_fingerprint
+        llm,
+        store,
+        metadata_store,
+        project_ids=_PIDS,
+        last_fingerprint=first.provenance.corpus_fingerprint,
     )
 
     assert again.status == "unchanged"
@@ -345,13 +364,17 @@ def test_state_flip_to_closed_invalidates_fingerprint() -> None:
             }
         ]
     )
-    first = generate_starter_work_pool(llm, store, metadata_store)
+    first = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
     assert first.status == "proposed"
     assert first.provenance is not None
 
     metadata_store.save_artifact(_issue_artifact(id="a1", state="CLOSED"))
     again = generate_starter_work_pool(
-        llm, store, metadata_store, last_fingerprint=first.provenance.corpus_fingerprint
+        llm,
+        store,
+        metadata_store,
+        project_ids=_PIDS,
+        last_fingerprint=first.provenance.corpus_fingerprint,
     )
     assert again.status == "skipped"
 
@@ -371,7 +394,7 @@ def test_active_pool_change_invalidates_fingerprint() -> None:
             }
         ]
     )
-    first = generate_starter_work_pool(llm, store, metadata_store)
+    first = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
     assert first.status == "proposed"
     assert first.provenance is not None
 
@@ -379,6 +402,7 @@ def test_active_pool_change_invalidates_fingerprint() -> None:
         llm,
         store,
         metadata_store,
+        project_ids=_PIDS,
         active_source_ids=["github:org/repo:ISSUE:1"],
         last_fingerprint=first.provenance.corpus_fingerprint,
     )
@@ -390,7 +414,7 @@ def test_empty_corpus_is_skipped() -> None:
     store = StubVectorStore()
     llm = _llm([])
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "skipped"
 
@@ -412,7 +436,7 @@ def test_not_safely_scoped_is_dropped() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "skipped"
     assert outcome.tasks == []
@@ -425,7 +449,7 @@ def test_invalid_llm_json_is_skipped_not_raised() -> None:
     _add_issue_chunk(store, "a1", "Fix typo", "body")
     llm = StubLLMClient(generate_response="not json at all")
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert outcome.status == "skipped"
 
@@ -451,7 +475,7 @@ def test_issue_without_indexed_chunks_is_excluded() -> None:
         ]
     )
 
-    outcome = generate_starter_work_pool(llm, store, metadata_store)
+    outcome = generate_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
 
     assert [t.source_id for t in outcome.tasks] == ["github:org/repo:ISSUE:2"]
 
@@ -494,7 +518,9 @@ def test_stream_emits_a_scoped_task_as_an_item_and_a_done() -> None:
         ]
     )
 
-    events, outcome = _collect(stream_starter_work_pool(llm, store, metadata_store))
+    events, outcome = _collect(
+        stream_starter_work_pool(llm, store, metadata_store, project_ids=_PIDS)
+    )
 
     # Only the safely-scoped issue is emitted as an item -- the rejected one never
     # appears, which is the whole promise of an `item` event.
@@ -521,8 +547,12 @@ def test_streaming_result_equals_the_non_streaming_pool() -> None:
         }
     ]
 
-    _, streamed = _collect(stream_starter_work_pool(_llm(tasks), store, metadata_store))
-    synchronous = generate_starter_work_pool(_llm(tasks), store, metadata_store)
+    _, streamed = _collect(
+        stream_starter_work_pool(_llm(tasks), store, metadata_store, project_ids=_PIDS)
+    )
+    synchronous = generate_starter_work_pool(
+        _llm(tasks), store, metadata_store, project_ids=_PIDS
+    )
 
     assert streamed.status == synchronous.status
     assert [t.source_id for t in streamed.tasks] == [
@@ -532,7 +562,9 @@ def test_streaming_result_equals_the_non_streaming_pool() -> None:
 
 def test_an_empty_corpus_streams_a_skipped_done_not_an_error() -> None:
     events, outcome = _collect(
-        stream_starter_work_pool(_llm([]), StubVectorStore(), _metadata_store())
+        stream_starter_work_pool(
+            _llm([]), StubVectorStore(), _metadata_store(), project_ids=_PIDS
+        )
     )
 
     assert outcome.status == "skipped"
@@ -565,7 +597,9 @@ def test_a_corpus_larger_than_the_cap_judges_only_the_cap() -> None:
     store = StubVectorStore()
     _many_issues(metadata_store, store, starter_work._MAX_CANDIDATES_PER_RUN + 7)
 
-    outcome = generate_starter_work_pool(_llm([]), store, metadata_store)
+    outcome = generate_starter_work_pool(
+        _llm([]), store, metadata_store, project_ids=_PIDS
+    )
 
     assert outcome.candidates_considered == starter_work._MAX_CANDIDATES_PER_RUN
 
@@ -576,7 +610,9 @@ def test_what_the_cap_left_out_is_counted_not_dropped_silently() -> None:
     store = StubVectorStore()
     _many_issues(metadata_store, store, starter_work._MAX_CANDIDATES_PER_RUN + 7)
 
-    outcome = generate_starter_work_pool(_llm([]), store, metadata_store)
+    outcome = generate_starter_work_pool(
+        _llm([]), store, metadata_store, project_ids=_PIDS
+    )
 
     assert any("7 more eligible issue(s)" in note for note in outcome.notes)
 
@@ -587,7 +623,9 @@ def test_a_corpus_within_the_cap_says_nothing_about_deferral() -> None:
     store = StubVectorStore()
     _many_issues(metadata_store, store, 3)
 
-    outcome = generate_starter_work_pool(_llm([]), store, metadata_store)
+    outcome = generate_starter_work_pool(
+        _llm([]), store, metadata_store, project_ids=_PIDS
+    )
 
     assert outcome.candidates_considered == 3
     assert not any("eligible issue(s)" in note for note in outcome.notes)
@@ -604,10 +642,10 @@ def test_the_capped_slice_is_stable_across_runs() -> None:
     _many_issues(metadata_store, store, starter_work._MAX_CANDIDATES_PER_RUN + 7)
 
     first, _, _ = starter_work._load_candidates(
-        store, metadata_store, exclude_source_ids=set()
+        store, metadata_store, exclude_source_ids=set(), project_ids=_PIDS
     )
     second, _, _ = starter_work._load_candidates(
-        store, metadata_store, exclude_source_ids=set()
+        store, metadata_store, exclude_source_ids=set(), project_ids=_PIDS
     )
 
     assert [c.source_id for c in first] == [c.source_id for c in second]
@@ -621,7 +659,7 @@ def test_issues_already_pooled_do_not_consume_the_cap() -> None:
     already = {f"github:org/repo:ISSUE:{i:03d}" for i in range(7)}
 
     candidates, eligible_total, _ = starter_work._load_candidates(
-        store, metadata_store, exclude_source_ids=already
+        store, metadata_store, exclude_source_ids=already, project_ids=_PIDS
     )
 
     assert eligible_total == starter_work._MAX_CANDIDATES_PER_RUN
@@ -643,10 +681,90 @@ def test_chunkless_issues_do_not_block_cap_slots() -> None:
     _add_issue_chunk(store, "a2", "Fix typo", "body")
 
     candidates, eligible_total, skipped = starter_work._load_candidates(
-        store, metadata_store, exclude_source_ids=set()
+        store, metadata_store, exclude_source_ids=set(), project_ids=_PIDS
     )
 
     assert eligible_total == 2
     assert skipped == 1
     assert len(candidates) == 1
     assert candidates[0].source_id == "github:org/repo:ISSUE:2"
+
+
+def test_starter_work_scopes_to_requested_projects() -> None:
+    metadata_store = _metadata_store()
+    metadata_store.save_artifact(
+        _issue_artifact(
+            id="a1", source_id="github:org/repo:ISSUE:1", project_ids=("p1",)
+        )
+    )
+    metadata_store.save_artifact(
+        _issue_artifact(
+            id="a2", source_id="github:org/repo:ISSUE:2", project_ids=("p2",)
+        )
+    )
+    store = StubVectorStore()
+    _add_issue_chunk(store, "a1", "Issue 1", "body", project_ids=("p1",))
+    _add_issue_chunk(store, "a2", "Issue 2", "body", project_ids=("p2",))
+    llm = _llm(
+        [
+            {
+                "source_id": "github:org/repo:ISSUE:1",
+                "safely_scoped": True,
+                "summary": "Fix issue 1",
+            }
+        ]
+    )
+
+    outcome = generate_starter_work_pool(
+        llm, store, metadata_store, project_ids=frozenset({"p1"})
+    )
+    assert outcome.status == "proposed"
+    assert len(outcome.tasks) == 1
+    assert outcome.tasks[0].source_id == "github:org/repo:ISSUE:1"
+
+
+def test_starter_work_multi_project_union() -> None:
+    metadata_store = _metadata_store()
+    metadata_store.save_artifact(
+        _issue_artifact(
+            id="a1", source_id="github:org/repo:ISSUE:1", project_ids=("p1",)
+        )
+    )
+    metadata_store.save_artifact(
+        _issue_artifact(
+            id="a2", source_id="github:org/repo:ISSUE:2", project_ids=("p2",)
+        )
+    )
+    metadata_store.save_artifact(
+        _issue_artifact(
+            id="a3", source_id="github:org/repo:ISSUE:3", project_ids=("p3",)
+        )
+    )
+    store = StubVectorStore()
+    _add_issue_chunk(store, "a1", "Issue 1", "body", project_ids=("p1",))
+    _add_issue_chunk(store, "a2", "Issue 2", "body", project_ids=("p2",))
+    _add_issue_chunk(store, "a3", "Issue 3", "body", project_ids=("p3",))
+    llm = _llm(
+        [
+            {
+                "source_id": "github:org/repo:ISSUE:1",
+                "safely_scoped": True,
+                "summary": "Fix issue 1",
+            },
+            {
+                "source_id": "github:org/repo:ISSUE:2",
+                "safely_scoped": True,
+                "summary": "Fix issue 2",
+            },
+        ]
+    )
+
+    outcome = generate_starter_work_pool(
+        llm, store, metadata_store, project_ids=frozenset({"p1", "p2"})
+    )
+    assert outcome.status == "proposed"
+    assert len(outcome.tasks) == 2
+    assert {t.source_id for t in outcome.tasks} == {
+        "github:org/repo:ISSUE:1",
+        "github:org/repo:ISSUE:2",
+    }

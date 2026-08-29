@@ -47,7 +47,7 @@ from onboarding.diagram_models import (
 from onboarding.progress import ProgressEvent, ProgressStream, drain
 from onboarding.similarity import OVERLAP_THRESHOLD, text_overlap
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.types import ScoredChunk
+from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -405,6 +405,7 @@ def stream_diagram(
     store: VectorStore,
     *,
     subject: str,
+    project_ids: frozenset[str],
     last_fingerprint: str | None = None,
 ) -> Generator[ProgressEvent, None, DiagramOutcome]:
     """Assemble a diagram, yielding live progress and returning the final outcome.
@@ -430,6 +431,7 @@ def stream_diagram(
         unchanged_label="Nothing changed — the cached diagram is current",
         empty_warning_label="The project has no indexed material yet",
         empty_done_label="No diagram could be assembled",
+        project_ids=project_ids,
     )
     if early_outcome is not None:
         yield from early_events
@@ -449,6 +451,7 @@ def stream_diagram(
             min_score=_MIN_SCORE,
             bm25_cache=bm25_cache,
             exclude_roles=GROUNDING_EXCLUDED_ROLES,
+            filters=RetrievalFilters(project_ids=project_ids),
         ):
             existing = by_id.get(chunk.id)
             if existing is None or chunk.score > existing.score:
@@ -554,6 +557,7 @@ def assemble_diagram(
     store: VectorStore,
     *,
     subject: str,
+    project_ids: frozenset[str],
     last_fingerprint: str | None = None,
 ) -> DiagramOutcome:
     """Assemble a diagram of one subject from the project's own material.
@@ -581,6 +585,7 @@ def assemble_diagram(
             llm,
             store,
             subject=subject,
+            project_ids=project_ids,
             last_fingerprint=last_fingerprint,
         )
     )
