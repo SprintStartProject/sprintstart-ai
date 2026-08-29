@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
@@ -196,16 +197,17 @@ class IngestionMetadataStore:
         self,
         status: IngestionStatus | None = "completed",
         project_id: str | None = None,
+        project_ids: Sequence[str] | None = None,
     ) -> list[ArtifactRecord]:
         """Return all artifacts, optionally filtered by status and project.
 
-        Used by corpus-wide insights (e.g. knowledge-gap detection) that need to
-        enumerate the ingestion index rather than look up a single id. Defaults
-        to ``completed`` so callers see only fully-indexed material.
+        Used by corpus-wide insights (e.g. knowledge-gap detection) and starter-work
+        mining that need to enumerate the ingestion index rather than look up a single
+        id. Defaults to ``completed`` so callers see only fully-indexed material.
 
-        ``project_id`` scopes the result to one project. Like retrieval, it is
-        fail-closed: artifacts with no recorded project are excluded, so an
-        insight never reports on material outside the requested project.
+        ``project_id`` and ``project_ids`` scope the result to one or more projects.
+        Like retrieval, it is fail-closed: artifacts with no recorded project are
+        excluded, and an empty ``project_ids`` admits nothing.
         """
         query = f"SELECT {', '.join(_COLUMNS)} FROM artifacts"
         params: tuple[str, ...] = ()
@@ -219,10 +221,18 @@ class IngestionMetadataStore:
 
         records = [self._row_to_record(cast(sqlite3.Row, row)) for row in rows]
 
-        if project_id is None:
-            return records
+        if project_id is not None:
+            records = [record for record in records if project_id in record.project_ids]
 
-        return [record for record in records if project_id in record.project_ids]
+        if project_ids is not None:
+            target_pids = set(project_ids)
+            records = [
+                record
+                for record in records
+                if any(pid in target_pids for pid in record.project_ids)
+            ]
+
+        return records
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:
