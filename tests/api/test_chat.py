@@ -8,7 +8,14 @@ from fastapi.testclient import TestClient
 from api.app import app
 from api.dependencies import get_llm, get_source_state_store, get_store
 from ingestion.source_state_store import SourceStateStore
-from llm.base import Message
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 from rag.types import Chunk
 from tests.conftest import llm_required, parse_sse_events
@@ -35,6 +42,9 @@ def real_client() -> Generator[TestClient, Any, None]:
     app.dependency_overrides.clear()
 
 
+_PROJECT = "project-1"
+
+
 def _parse_events(text: str) -> list[dict[str, object]]:
     return [
         json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")
@@ -48,7 +58,7 @@ def test_chat_streams_tokens_and_done(
 
     response = http_client.post(
         "/api/v1/chat",
-        json={"prompt": "What were the blockers?"},
+        json={"prompt": "What were the blockers?", "projectId": _PROJECT},
     )
 
     assert response.status_code == 200
@@ -76,18 +86,69 @@ def test_chat_token_event_contains_llm_response(
                 filename="retro.md",
                 text="Missing designs and flaky CI.",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
             )
         ]
     )
 
     response = http_client.post(
         "/api/v1/chat",
-        json={"prompt": "What were the blockers?", "min_score": 0.0},
+        json={
+            "prompt": "What were the blockers?",
+            "projectId": _PROJECT,
+            "min_score": 0.0,
+        },
     )
 
     token_events = [e for e in parse_sse_events(response.text) if e["type"] == "token"]
     assert len(token_events) == 1
     assert token_events[0]["content"] == "Missing designs and flaky CI."
+
+
+def test_filtered_chat_forwards_reasoning_without_mixing_it_into_tokens(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    http_client, _, store = client
+    embedding = [1.0] + [0.0] * 767
+
+    class ReasoningLLM(StubLLMClient):
+        def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
+            yield ReasoningDelta("")
+            yield ReasoningDelta("Comparing the selected sources.")
+            yield TextDelta("The answer.")
+
+    app.dependency_overrides[get_llm] = lambda: ReasoningLLM(embedding=embedding)
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="doc-1",
+                filename="retro.md",
+                text="The answer.",
+                embedding=embedding,
+                project_ids=(_PROJECT,),
+                source_system="GITHUB",
+            )
+        ]
+    )
+
+    response = http_client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "What happened?",
+            "projectId": _PROJECT,
+            "filters": {"source_systems": ["GITHUB"]},
+        },
+    )
+
+    events = parse_sse_events(response.text)
+    assert {
+        "type": "reasoning",
+        "reasoning": "Comparing the selected sources.",
+    } in events
+    assert [event["content"] for event in events if event["type"] == "token"] == [
+        "The answer."
+    ]
 
 
 def test_chat_emits_citation_when_chunks_exist(
@@ -96,12 +157,7 @@ def test_chat_emits_citation_when_chunks_exist(
     http_client, _, store = client
     # Use a non-zero embedding so cosine similarity is > 0
     embedding = [1.0] + [0.0] * 767
-    script: list[Turn] = [
-        [("synthesis", {"task": "blockers"})],
-        [("retrieve", {"query": "blockers"})],
-        [],
-        [],
-    ]
+    script: list[Turn] = [[("retrieve", {"query": "blockers"})]]
     app.dependency_overrides[get_llm] = lambda: ScriptedLLMClient(
         script, embedding=embedding
     )
@@ -114,6 +170,7 @@ def test_chat_emits_citation_when_chunks_exist(
                 filename="retro.md",
                 text="Missing designs blocked the auth feature.",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
                 start_line=5,
             )
         ]
@@ -121,7 +178,7 @@ def test_chat_emits_citation_when_chunks_exist(
 
     response = http_client.post(
         "/api/v1/chat",
-        json={"prompt": "What were the blockers?"},
+        json={"prompt": "What were the blockers?", "projectId": _PROJECT},
     )
 
     events = parse_sse_events(response.text)
@@ -136,11 +193,7 @@ def test_chat_emits_citation_when_chunks_exist(
         for e in events
         if e["type"] == "tool_use"
     ]
-    assert tool_uses == [
-        {"name": "synthesis", "kind": "agent"},
-        {"name": "retrieve", "kind": "tool"},
-        {"name": "retrieve", "kind": "tool"},
-    ]
+    assert tool_uses == [{"name": "retrieve", "kind": "tool"}]
     assert events[-1] == {"type": "done"}
 
 
@@ -153,6 +206,7 @@ def test_chat_with_history_succeeds(
         "/api/v1/chat",
         json={
             "prompt": "Can you summarize that?",
+            "projectId": _PROJECT,
             "context": [
                 {"role": "user", "content": "What were the blockers?"},
                 {"role": "assistant", "content": "Missing designs and flaky CI."},
@@ -175,6 +229,131 @@ def test_chat_missing_question_returns_422(
     assert response.status_code == 422
 
 
+def test_chat_missing_project_id_returns_422(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    http_client, _, _ = client
+
+    response = http_client.post("/api/v1/chat", json={"question": "What changed?"})
+
+    assert response.status_code == 422
+
+
+def test_chat_does_not_cite_another_projects_chunks(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    """The agentic path must stay inside the requesting project."""
+    http_client, _, store = client
+    embedding = [1.0] + [0.0] * 767
+    script: list[Turn] = [[("retrieve", {"query": "blockers"})]]
+    app.dependency_overrides[get_llm] = lambda: ScriptedLLMClient(
+        script, embedding=embedding
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-own",
+                artifact_id="artifact-own",
+                filename="retro.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                project_ids=(_PROJECT,),
+            ),
+            Chunk(
+                id="chunk-foreign",
+                artifact_id="artifact-foreign",
+                filename="secret-retro.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                project_ids=("project-2",),
+            ),
+        ]
+    )
+
+    response = http_client.post(
+        "/api/v1/chat",
+        json={"prompt": "What were the blockers?", "projectId": _PROJECT},
+    )
+
+    events = parse_sse_events(response.text)
+    citation_events = [e for e in events if e["type"] == "citation"]
+    assert [e["artifact_id"] for e in citation_events] == ["artifact-own"]
+
+
+def test_chat_with_filters_does_not_use_another_projects_chunks(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    """The filtered path applies the project scope on top of the user filters."""
+    http_client, _, store = client
+    embedding = [1.0] + [0.0] * 767
+    app.dependency_overrides[get_llm] = lambda: StubLLMClient(embedding=embedding)
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-foreign",
+                artifact_id="artifact-foreign",
+                filename="app.py",
+                text="GitHub text",
+                embedding=embedding,
+                source_system="GITHUB",
+                project_ids=("project-2",),
+            )
+        ]
+    )
+
+    response = http_client.post(
+        "/api/v1/chat",
+        json={
+            "question": "What changed in code?",
+            "projectId": _PROJECT,
+            "filters": {"source_systems": ["GITHUB"]},
+        },
+    )
+
+    events = _parse_events(response.text)
+    token_events = [event for event in events if event["type"] == "token"]
+    content = token_events[0]["content"]
+    assert isinstance(content, str)
+    assert "could not find any matching sources" in content
+    assert [event for event in events if event["type"] == "citation"] == []
+
+
+def test_chat_ignores_chunks_without_a_project(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    """Fail-closed: pre-project-separation chunks are invisible until re-synced."""
+    http_client, _, store = client
+    embedding = [1.0] + [0.0] * 767
+    app.dependency_overrides[get_llm] = lambda: StubLLMClient(embedding=embedding)
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-legacy",
+                artifact_id="artifact-legacy",
+                filename="old.md",
+                text="GitHub text",
+                embedding=embedding,
+                source_system="GITHUB",
+            )
+        ]
+    )
+
+    response = http_client.post(
+        "/api/v1/chat",
+        json={
+            "question": "What changed in code?",
+            "projectId": _PROJECT,
+            "filters": {"source_systems": ["GITHUB"]},
+        },
+    )
+
+    events = _parse_events(response.text)
+    assert [event for event in events if event["type"] == "citation"] == []
+
+
 def test_chat_llm_unavailable_emits_error_event(
     client: tuple[TestClient, StubLLMClient, StubVectorStore],
 ) -> None:
@@ -182,11 +361,18 @@ def test_chat_llm_unavailable_emits_error_event(
 
     embedding = [1.0] + [0.0] * 767
 
-    class StreamFailingLLM(StubLLMClient):
+    class UnavailableLLM(StubLLMClient):
+        """Down however the agent reaches it — deciding or streaming."""
+
         def __init__(self) -> None:
             super().__init__(embedding=embedding)
 
-        def stream(self, messages: list[Message]) -> Iterator[str]:
+        def chat(
+            self, messages: list[Message], tools: list[ToolSpec] | None = None
+        ) -> ChatResult:
+            raise LLMUnavailableError("http://localhost:11434")
+
+        def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
             raise LLMUnavailableError("http://localhost:11434")
 
     store.add(
@@ -197,15 +383,20 @@ def test_chat_llm_unavailable_emits_error_event(
                 filename="retro.md",
                 text="Missing designs blocked the auth feature.",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
             )
         ]
     )
 
-    app.dependency_overrides[get_llm] = lambda: StreamFailingLLM()
+    app.dependency_overrides[get_llm] = lambda: UnavailableLLM()
 
     response = http_client.post(
         "/api/v1/chat",
-        json={"prompt": "What were the blockers?", "min_score": 0.0},
+        json={
+            "prompt": "What were the blockers?",
+            "projectId": _PROJECT,
+            "min_score": 0.0,
+        },
     )
 
     assert response.status_code == 200
@@ -218,7 +409,7 @@ def test_chat_llm_unavailable_emits_error_event(
 def test_chat_with_real_llm(real_client: TestClient) -> None:
     response = real_client.post(
         "/api/v1/chat",
-        json={"prompt": "Reply with one word: hello."},
+        json={"prompt": "Reply with one word: hello.", "projectId": _PROJECT},
     )
 
     assert response.status_code == 200
@@ -241,6 +432,7 @@ def test_chat_with_filter_no_matching_chunks_returns_fallback(
                 filename="doc.md",
                 text="Upload text",
                 embedding=[1.0] + [0.0] * 767,
+                project_ids=(_PROJECT,),
                 source_system="UPLOAD",
             )
         ]
@@ -250,6 +442,7 @@ def test_chat_with_filter_no_matching_chunks_returns_fallback(
         "/api/v1/chat",
         json={
             "question": "What changed in code?",
+            "projectId": _PROJECT,
             "filters": {"source_systems": ["GITHUB"]},
         },
     )
@@ -281,6 +474,7 @@ def test_chat_with_source_filter_uses_matching_chunks(
                 filename="doc.md",
                 text="Upload text",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
                 source_system="UPLOAD",
             ),
             Chunk(
@@ -289,6 +483,7 @@ def test_chat_with_source_filter_uses_matching_chunks(
                 filename="app.py",
                 text="GitHub text",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
                 source_system="GITHUB",
             ),
         ]
@@ -298,6 +493,7 @@ def test_chat_with_source_filter_uses_matching_chunks(
         "/api/v1/chat",
         json={
             "question": "What changed in code?",
+            "projectId": _PROJECT,
             "filters": {"source_systems": ["GITHUB"]},
         },
     )
@@ -320,6 +516,7 @@ def test_chat_without_chunks_returns_fallback_without_llm_hallucination(
         "/api/v1/chat",
         json={
             "question": "What changed?",
+            "projectId": _PROJECT,
             "filters": {"source_systems": ["GITHUB"]},
         },
     )
@@ -350,12 +547,7 @@ def test_chat_applies_source_exclusions_in_unfiltered_path(
     http_client, _, store = client
     embedding = [1.0] + [0.0] * 767
 
-    script: list[Turn] = [
-        [("synthesis", {"task": "blockers"})],
-        [("retrieve", {"query": "blockers"})],
-        [],
-        [],
-    ]
+    script: list[Turn] = [[("retrieve", {"query": "blockers"})]]
     app.dependency_overrides[get_llm] = lambda: ScriptedLLMClient(
         script, embedding=embedding
     )
@@ -372,6 +564,7 @@ def test_chat_applies_source_exclusions_in_unfiltered_path(
                 filename="excluded.md",
                 text="Missing designs blocked the auth feature.",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
                 connector_id="github",
                 connector_source_id="owner/repo",
             ),
@@ -381,6 +574,7 @@ def test_chat_applies_source_exclusions_in_unfiltered_path(
                 filename="included.md",
                 text="Missing designs blocked the auth feature.",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
                 connector_id="jira",
                 connector_source_id="PROJ",
             ),
@@ -389,7 +583,7 @@ def test_chat_applies_source_exclusions_in_unfiltered_path(
 
     response = http_client.post(
         "/api/v1/chat",
-        json={"prompt": "What were the blockers?"},
+        json={"prompt": "What were the blockers?", "projectId": _PROJECT},
     )
 
     events = parse_sse_events(response.text)
@@ -416,6 +610,7 @@ def test_chat_applies_source_exclusions_with_retrieval_filters(
                 filename="excluded.py",
                 text="GitHub text",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
                 source_system="GITHUB",
                 connector_id="github",
                 connector_source_id="owner/repo",
@@ -426,6 +621,7 @@ def test_chat_applies_source_exclusions_with_retrieval_filters(
                 filename="included.py",
                 text="GitHub text",
                 embedding=embedding,
+                project_ids=(_PROJECT,),
                 source_system="GITHUB",
                 connector_id="github",
                 connector_source_id="owner/other-repo",
@@ -437,6 +633,7 @@ def test_chat_applies_source_exclusions_with_retrieval_filters(
         "/api/v1/chat",
         json={
             "question": "What changed in code?",
+            "projectId": _PROJECT,
             "filters": {"source_systems": ["GITHUB"]},
         },
     )

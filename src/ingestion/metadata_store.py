@@ -1,12 +1,36 @@
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import Literal, cast
 
+from rag.filters import decode_project_ids, encode_project_ids
+
 IngestionStatus = Literal["processing", "completed", "failed", "deindexed"]
+
+_COLUMNS = (
+    "id",
+    "filename",
+    "content_type",
+    "source_type",
+    "size_bytes",
+    "chunk_count",
+    "status",
+    "created_at",
+    "updated_at",
+    "error_message",
+    "source_id",
+    "source_url",
+    "artifact_type",
+    "language",
+    "project_ids",
+    "state",
+    "has_assignee",
+    "labels",
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +49,22 @@ class ArtifactRecord:
     source_url: str | None = None
     artifact_type: str | None = None
     language: str | None = None
+    # Projects the artifact belongs to; empty for artifacts ingested before the
+    # backend started sending them (see ``list_artifacts``).
+    project_ids: tuple[str, ...] = ()
+    # Issue state at the tracker (e.g. "OPEN"/"CLOSED") and labels (e.g. "good
+    # first issue"); both unset for non-issue artifacts. Used by starter-work
+    # mining to deterministically exclude closed issues rather than relying on
+    # an LLM to notice.
+    state: str | None = None
+    # Whether somebody at the source is already assigned to this issue, or None
+    # when the connector cannot tell. Mining withholds an issue on a definite
+    # True -- work somebody else has taken is not work a hire can pick up.
+    # None is "unknown", never "nobody": GitHub issues have assignees this
+    # system does not ingest, and reading that absence as "free" would be the
+    # same defect as reading an absent history as "beginner".
+    has_assignee: bool | None = None
+    labels: list[str] = field(default_factory=list[str])
 
 
 class IngestionMetadataStore:
@@ -57,13 +97,39 @@ class IngestionMetadataStore:
                     source_id TEXT,
                     source_url TEXT,
                     artifact_type TEXT,
-                    language TEXT
+                    language TEXT,
+                    project_ids TEXT,
+                    state TEXT,
+                    has_assignee INTEGER,
+                    labels TEXT
                 )
                 """
             )
+            self._migrate_columns()
 
             self._connection.execute("DROP TABLE IF EXISTS artifact_chunks")
             self._connection.commit()
+
+    def _migrate_columns(self) -> None:
+        """Add columns introduced after a database was first created.
+
+        ``project_ids`` was added with the project-separation work, and
+        ``state``/``has_assignee``/``labels`` with starter-work mining; databases
+        created before either exist in the wild, and SQLite has no
+        ``ADD COLUMN IF NOT EXISTS``.
+        """
+        cursor = self._connection.execute("PRAGMA table_info(artifacts)")
+        existing = {str(row["name"]) for row in cursor.fetchall()}
+        for column, decl in (
+            ("project_ids", "TEXT"),
+            ("state", "TEXT"),
+            ("has_assignee", "INTEGER"),
+            ("labels", "TEXT"),
+        ):
+            if column not in existing:
+                self._connection.execute(
+                    f"ALTER TABLE artifacts ADD COLUMN {column} {decl}"
+                )
 
     def close(self) -> None:
         with self._lock:
@@ -116,25 +182,7 @@ class IngestionMetadataStore:
     def get_artifact(self, artifact_id: str) -> ArtifactRecord | None:
         with self._lock:
             cursor = self._connection.execute(
-                """
-                SELECT
-                    id,
-                    filename,
-                    content_type,
-                    source_type,
-                    size_bytes,
-                    chunk_count,
-                    status,
-                    created_at,
-                    updated_at,
-                    error_message,
-                    source_id,
-                    source_url,
-                    artifact_type,
-                    language
-                FROM artifacts
-                WHERE id = ?
-                """,
+                f"SELECT {', '.join(_COLUMNS)} FROM artifacts WHERE id = ?",
                 (artifact_id,),
             )
             row = cast(sqlite3.Row | None, cursor.fetchone())
@@ -145,19 +193,21 @@ class IngestionMetadataStore:
         return self._row_to_record(row)
 
     def list_artifacts(
-        self, status: IngestionStatus | None = "completed"
+        self,
+        status: IngestionStatus | None = "completed",
+        project_id: str | None = None,
     ) -> list[ArtifactRecord]:
-        """Return all artifacts, optionally filtered by status.
+        """Return all artifacts, optionally filtered by status and project.
 
         Used by corpus-wide insights (e.g. knowledge-gap detection) that need to
-        enumerate the whole ingestion index rather than look up a single id.
-        Defaults to ``completed`` so callers see only fully-indexed material.
+        enumerate the ingestion index rather than look up a single id. Defaults
+        to ``completed`` so callers see only fully-indexed material.
+
+        ``project_id`` scopes the result to one project. Like retrieval, it is
+        fail-closed: artifacts with no recorded project are excluded, so an
+        insight never reports on material outside the requested project.
         """
-        query = (
-            "SELECT id, filename, content_type, source_type, size_bytes, "
-            "chunk_count, status, created_at, updated_at, error_message, "
-            "source_id, source_url, artifact_type, language FROM artifacts"
-        )
+        query = f"SELECT {', '.join(_COLUMNS)} FROM artifacts"
         params: tuple[str, ...] = ()
         if status is not None:
             query += " WHERE status = ?"
@@ -167,7 +217,12 @@ class IngestionMetadataStore:
             cursor = self._connection.execute(query, params)
             rows = cursor.fetchall()
 
-        return [self._row_to_record(cast(sqlite3.Row, row)) for row in rows]
+        records = [self._row_to_record(cast(sqlite3.Row, row)) for row in rows]
+
+        if project_id is None:
+            return records
+
+        return [record for record in records if project_id in record.project_ids]
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:
@@ -190,29 +245,19 @@ class IngestionMetadataStore:
                 None if row["artifact_type"] is None else str(row["artifact_type"])
             ),
             language=None if row["language"] is None else str(row["language"]),
+            project_ids=decode_project_ids(row["project_ids"]),
+            state=None if row["state"] is None else str(row["state"]),
+            has_assignee=(
+                None if row["has_assignee"] is None else bool(row["has_assignee"])
+            ),
+            labels=json.loads(row["labels"]) if row["labels"] else [],
         )
 
     def _upsert_artifact(self, artifact: ArtifactRecord) -> None:
+        placeholders = ", ".join("?" for _ in _COLUMNS)
         self._connection.execute(
-            """
-            INSERT OR REPLACE INTO artifacts (
-                id,
-                filename,
-                content_type,
-                source_type,
-                size_bytes,
-                chunk_count,
-                status,
-                created_at,
-                updated_at,
-                error_message,
-                source_id,
-                source_url,
-                artifact_type,
-                language
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            f"INSERT OR REPLACE INTO artifacts ({', '.join(_COLUMNS)}) "
+            f"VALUES ({placeholders})",
             (
                 artifact.id,
                 artifact.filename,
@@ -228,5 +273,9 @@ class IngestionMetadataStore:
                 artifact.source_url,
                 artifact.artifact_type,
                 artifact.language,
+                encode_project_ids(artifact.project_ids),
+                artifact.state,
+                artifact.has_assignee,
+                json.dumps(artifact.labels) if artifact.labels else None,
             ),
         )

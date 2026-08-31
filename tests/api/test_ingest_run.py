@@ -1,3 +1,4 @@
+import base64
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -132,7 +133,7 @@ def test_ingest_run_empty_body_returns_empty_list(client: TestClient) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json() == {"artifacts": []}
+    assert response.json() == {"artifacts": [], "deindexed": []}
 
 
 def test_ingest_run_artifact_with_no_content_returns_zero_chunks(
@@ -183,6 +184,43 @@ def test_ingest_run_filename_derived_for_issue(
     record = metadata_store.get_artifact("uuid-issue")
     assert record is not None
     assert record.filename == "issue-42.md"
+
+
+def test_ingest_run_persists_issue_state_and_labels(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact = _issue_artifact("uuid-state")
+    artifact["state"] = "OPEN"
+    artifact["labels"] = ["bug", "good first issue"]
+
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    record = metadata_store.get_artifact("uuid-state")
+    assert record is not None
+    assert record.state == "OPEN"
+    assert record.labels == ["bug", "good first issue"]
+
+
+def test_ingest_run_defaults_state_and_labels_when_absent(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    client.post(
+        "/api/v1/ingest/sync",
+        json={
+            "artifactsToIngest": [_issue_artifact("uuid-no-state")],
+            "artifactsToDeindex": [],
+        },
+    )
+
+    record = metadata_store.get_artifact("uuid-no-state")
+    assert record is not None
+    assert record.state is None
+    assert record.labels == []
 
 
 class _FlakyEmbedLLMClient(StubLLMClient):
@@ -362,3 +400,529 @@ def test_ingest_run_processes_artifacts_concurrently(
     # Sequential would take >= 5 * 0.15s = 0.75s. Comfortably below that
     # (but above a single 0.15s call) proves real concurrent overlap.
     assert elapsed < 0.5
+
+
+def test_ingest_run_stores_project_ids_on_chunks_and_record(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact = _file_artifact()
+    artifact["projectIds"] = ["project-1", "project-2"]
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    assert vector_store.chunks
+    for chunk in vector_store.chunks:
+        assert chunk.project_ids == ("project-1", "project-2")
+
+    record = metadata_store.get_artifact("uuid-1")
+    assert record is not None
+    assert record.project_ids == ("project-1", "project-2")
+
+
+def test_ingest_run_without_project_ids_stores_none(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    """Backends that haven't been updated yet still ingest — the artifact is
+    simply not reachable from any project-scoped request."""
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [_file_artifact()], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    assert all(chunk.project_ids == () for chunk in vector_store.chunks)
+
+    record = metadata_store.get_artifact("uuid-1")
+    assert record is not None
+    assert record.project_ids == ()
+
+
+def test_ingest_run_reports_failed_deindex(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    """A deletion that raises must be reported, not just logged.
+
+    A silent failure leaves the artifact indexed while the backend reads the
+    200 as "revoked" and never retries.
+    """
+
+    def failing_delete(artifact_id: str, exclude_ids: list[str] | None = None) -> int:
+        raise RuntimeError("chroma unavailable")
+
+    vector_store.delete = failing_delete  # type: ignore[method-assign]
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [], "artifactsToDeindex": ["gone-artifact"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deindexed"] == [
+        {
+            "artifact_id": "gone-artifact",
+            "status": "failed",
+            "error_message": "chroma unavailable",
+        }
+    ]
+
+
+def test_ingest_run_reports_successful_deindex(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    vector_store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="old-artifact",
+                filename="doc.md",
+                text="text",
+                embedding=[1.0, 0.0],
+            )
+        ]
+    )
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [], "artifactsToDeindex": ["old-artifact"]},
+    )
+
+    assert response.json()["deindexed"] == [
+        {
+            "artifact_id": "old-artifact",
+            "status": "completed",
+            "error_message": None,
+        }
+    ]
+
+
+def test_ingest_run_revokes_lost_membership_when_embedding_fails(
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    """An artifact that leaves a project must not stay retrievable from it.
+
+    The re-ingest that would replace its chunks fails at the embedding step, so
+    without an up-front revocation the old chunks — still carrying project-a —
+    survive until the backend happens to retry.
+    """
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a"]
+
+    app.dependency_overrides[get_store] = lambda: vector_store
+    app.dependency_overrides[get_llm] = lambda: StubLLMClient()
+    app.dependency_overrides[get_ingestion_metadata_store] = lambda: metadata_store
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/ingest/sync",
+            json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+        )
+        assert vector_store.project_ids_for_artifact("uuid-1") == frozenset(
+            {"project-a"}
+        )
+
+        app.dependency_overrides[get_llm] = lambda: _FlakyEmbedLLMClient()
+        moved: Artifact = _file_artifact()
+        moved["projectIds"] = ["project-b"]
+
+        response = TestClient(app).post(
+            "/api/v1/ingest/sync",
+            json={"artifactsToIngest": [moved], "artifactsToDeindex": []},
+        )
+
+        assert response.json()["artifacts"][0]["status"] == "failed"
+        assert vector_store.project_ids_for_artifact("uuid-1") == frozenset()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ingest_run_keeps_chunks_when_membership_only_grows(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    """Adding a project is not a revocation — nothing should be dropped early."""
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a"]
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    grown: Artifact = _file_artifact()
+    grown["projectIds"] = ["project-a", "project-b"]
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [grown], "artifactsToDeindex": []},
+    )
+
+    assert vector_store.project_ids_for_artifact("uuid-1") == frozenset(
+        {"project-a", "project-b"}
+    )
+
+
+def test_ingest_run_rejects_project_id_containing_delimiter(
+    client: TestClient,
+) -> None:
+    """``["a|b"]`` would encode as ``|a|b|`` and read back as two memberships."""
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a|project-b"]
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 422
+
+
+def test_ingest_run_deduplicates_project_ids(
+    client: TestClient,
+    vector_store: StubVectorStore,
+) -> None:
+    artifact: Artifact = _file_artifact()
+    artifact["projectIds"] = ["project-a", "project-a"]
+
+    client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    chunks = vector_store.list_chunks_by_artifact("uuid-1", limit=10)
+    assert chunks
+    assert chunks[0].project_ids == ("project-a",)
+
+
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+    "/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg=="
+)
+
+_PDF_FIXTURE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "ingestion"
+    / "fixtures"
+    / "single_page.pdf"
+)
+
+
+def test_assemble_content_skips_title_for_image_and_pdf() -> None:
+    from api.routes.ingest_run import _assemble_content
+    from api.schemas import ArtifactRunIngestRequest
+
+    image_req = ArtifactRunIngestRequest(
+        artifact_id="img-1",
+        source_id="github:owner/repo:FILE:docs/diagram.png",
+        artifact_type="FILE",
+        title="Architecture Diagram",
+        body_text=_TINY_PNG_B64,
+        mime="image/png",
+    )
+    assert _assemble_content(image_req) == _TINY_PNG_B64
+
+    pdf_req = ArtifactRunIngestRequest(
+        artifact_id="pdf-1",
+        source_id="github:owner/repo:FILE:docs/report.pdf",
+        artifact_type="FILE",
+        title="Quarterly Report",
+        body_text="JVBERi0xLjQK...",
+        mime="application/pdf",
+    )
+    assert _assemble_content(pdf_req) == "JVBERi0xLjQK..."
+
+    text_req = ArtifactRunIngestRequest(
+        artifact_id="txt-1",
+        source_id="github:owner/repo:FILE:docs/readme.md",
+        artifact_type="FILE",
+        title="Readme",
+        body_text="Hello world",
+        mime="text/markdown",
+    )
+    assert _assemble_content(text_req) == "# Readme\n\nHello world"
+
+
+def test_filename_for_uses_title_for_upload_file_artifacts() -> None:
+    from api.routes.ingest_run import _filename_for
+    from api.schemas import ArtifactRunIngestRequest
+
+    upload_file = ArtifactRunIngestRequest(
+        artifact_id="uuid-upload",
+        source_system="UPLOAD",
+        source_id="123e4567-e89b-12d3-a456-426614174000",
+        artifact_type="FILE",
+        title="uploaded_chart.png",
+    )
+    assert _filename_for(upload_file) == "uploaded_chart.png"
+
+    github_file = ArtifactRunIngestRequest(
+        artifact_id="uuid-gh",
+        source_system="GITHUB",
+        source_id="github:owner/repo:FILE:src/main/App.kt",
+        artifact_type="FILE",
+        title="App.kt",
+    )
+    assert _filename_for(github_file) == "src/main/App.kt"
+
+    issue = ArtifactRunIngestRequest(
+        artifact_id="uuid-issue",
+        source_system="GITHUB",
+        source_id="github:owner/repo:ISSUE:42",
+        artifact_type="ISSUE",
+        title="Some bug",
+    )
+    assert _filename_for(issue) == "issue-42.md"
+
+
+def test_ingest_run_indexes_image_artifact_with_caption(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact: Artifact = {
+        "artifactId": "image-1",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-1",
+        "artifactType": "FILE",
+        "title": "architecture.png",
+        "bodyText": _TINY_PNG_B64,
+        "mime": "image/png",
+        "language": None,
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["artifacts"]) == 1
+    assert data["artifacts"][0]["artifact_id"] == "image-1"
+    assert data["artifacts"][0]["chunk_count"] == 1
+    assert data["artifacts"][0]["status"] == "completed"
+
+    assert len(vector_store.chunks) == 1
+    chunk = vector_store.chunks[0]
+    assert chunk.filename == "architecture.png"
+    assert chunk.kind == "image"
+    assert chunk.text == "stub caption"
+    assert _TINY_PNG_B64 not in chunk.text
+
+    record = metadata_store.get_artifact("image-1")
+    assert record is not None
+    assert record.filename == "architecture.png"
+    assert record.size_bytes == len(base64.b64decode(_TINY_PNG_B64))
+
+
+def test_ingest_run_indexes_pdf_artifact(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    pdf_bytes = _PDF_FIXTURE_PATH.read_bytes()
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+
+    artifact: Artifact = {
+        "artifactId": "pdf-1",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-2",
+        "artifactType": "FILE",
+        "title": "report.pdf",
+        "bodyText": pdf_b64,
+        "mime": "application/pdf",
+        "language": None,
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["artifacts"]) == 1
+    assert data["artifacts"][0]["artifact_id"] == "pdf-1"
+    assert data["artifacts"][0]["chunk_count"] > 0
+    assert data["artifacts"][0]["status"] == "completed"
+
+    pdf_chunks = [c for c in vector_store.chunks if c.artifact_id == "pdf-1"]
+    assert len(pdf_chunks) > 0
+    assert all(c.kind == "pdf" for c in pdf_chunks)
+    assert all(c.filename == "report.pdf" for c in pdf_chunks)
+
+    record = metadata_store.get_artifact("pdf-1")
+    assert record is not None
+    assert record.filename == "report.pdf"
+    assert record.size_bytes == len(pdf_bytes)
+
+
+class _FailingVisionLLMClient(StubLLMClient):
+    def caption_image(self, image_bytes: bytes) -> str:
+        raise LLMUnavailableError("Vision model offline")
+
+
+def test_ingest_run_handles_image_vision_outage(
+    vector_store: StubVectorStore,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    app.dependency_overrides[get_store] = lambda: vector_store
+    app.dependency_overrides[get_llm] = lambda: _FailingVisionLLMClient()
+    app.dependency_overrides[get_ingestion_metadata_store] = lambda: metadata_store
+    try:
+        client = TestClient(app)
+        artifact: Artifact = {
+            "artifactId": "image-fail",
+            "sourceSystem": "UPLOAD",
+            "sourceId": "upload-uuid-fail",
+            "artifactType": "FILE",
+            "title": "architecture.png",
+            "bodyText": _TINY_PNG_B64,
+            "mime": "image/png",
+        }
+
+        response = client.post(
+            "/api/v1/ingest/sync",
+            json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["artifacts"][0]["artifact_id"] == "image-fail"
+        assert data["artifacts"][0]["status"] == "failed"
+        assert data["artifacts"][0]["chunk_count"] == 0
+
+        record = metadata_store.get_artifact("image-fail")
+        assert record is not None
+        assert record.status == "failed"
+        assert "Vision model offline" in (record.error_message or "")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_ingest_run_handles_invalid_base64_image(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact: Artifact = {
+        "artifactId": "image-bad-b64",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-bad-img",
+        "artifactType": "FILE",
+        "title": "bad.png",
+        "bodyText": "!!!not-valid-base64!!!",
+        "mime": "image/png",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "image-bad-b64"
+    assert data["artifacts"][0]["status"] == "failed"
+    assert data["artifacts"][0]["chunk_count"] == 0
+
+    record = metadata_store.get_artifact("image-bad-b64")
+    assert record is not None
+    assert record.status == "failed"
+    assert "not valid base64" in (record.error_message or "")
+
+
+def test_ingest_run_handles_invalid_base64_pdf(
+    client: TestClient,
+    metadata_store: IngestionMetadataStore,
+) -> None:
+    artifact: Artifact = {
+        "artifactId": "pdf-bad-b64",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-bad-pdf",
+        "artifactType": "FILE",
+        "title": "bad.pdf",
+        "bodyText": "!!!not-valid-base64!!!",
+        "mime": "application/pdf",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "pdf-bad-b64"
+    assert data["artifacts"][0]["status"] == "failed"
+    assert data["artifacts"][0]["chunk_count"] == 0
+
+    record = metadata_store.get_artifact("pdf-bad-b64")
+    assert record is not None
+    assert record.status == "failed"
+    assert "not valid base64" in (record.error_message or "")
+
+
+def test_ingest_run_uses_binary_limit_not_content_length_limit(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INGEST_MAX_CONTENT_LENGTH", "10")
+
+    artifact: Artifact = {
+        "artifactId": "image-under-binary-limit",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-size",
+        "artifactType": "FILE",
+        "title": "diagram.png",
+        "bodyText": _TINY_PNG_B64,
+        "mime": "image/png",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "image-under-binary-limit"
+    assert data["artifacts"][0]["chunk_count"] == 1
+    assert data["artifacts"][0]["status"] == "completed"
+
+
+def test_ingest_run_skips_binary_artifact_exceeding_binary_limit(
+    client: TestClient,
+    vector_store: StubVectorStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INGEST_MAX_BINARY_BYTES", "10")
+
+    artifact: Artifact = {
+        "artifactId": "image-over-binary-limit",
+        "sourceSystem": "UPLOAD",
+        "sourceId": "upload-uuid-oversize",
+        "artifactType": "FILE",
+        "title": "diagram.png",
+        "bodyText": _TINY_PNG_B64,
+        "mime": "image/png",
+    }
+
+    response = client.post(
+        "/api/v1/ingest/sync",
+        json={"artifactsToIngest": [artifact], "artifactsToDeindex": []},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["artifacts"][0]["artifact_id"] == "image-over-binary-limit"
+    assert data["artifacts"][0]["chunk_count"] == 0
+    assert data["artifacts"][0]["status"] == "completed"

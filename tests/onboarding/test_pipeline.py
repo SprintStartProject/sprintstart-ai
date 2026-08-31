@@ -24,7 +24,7 @@ from onboarding.pipeline import (
     _step_applies,
 )
 from onboarding.quality import evaluate
-from rag.types import Chunk
+from rag.types import Chunk, RetrievalFilters
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
@@ -270,11 +270,35 @@ def test_retrieve_per_step_uses_step_specific_queries(
         ),
     ]
 
-    pipe._retrieve_per_step(steps)
+    pipe._retrieve_per_step(steps, "project-1")
 
     assert len(captured) == 2
     assert any("Install dependencies" in q for q in captured)
     assert any("Understand the RAG pipeline" in q for q in captured)
+
+
+def test_retrieve_per_step_scopes_evidence_to_the_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[RetrievalFilters | None] = []
+
+    def fake_retrieve(
+        *, filters: RetrievalFilters | None = None, **_: object
+    ) -> list[object]:
+        captured.append(filters)
+        return []
+
+    monkeypatch.setattr(pipeline, "hybrid_retrieve", fake_retrieve)
+
+    store = StubVectorStore()
+    store.add(
+        [Chunk(id="c1", artifact_id="a1", filename="d.md", text="x", embedding=[0.1])]
+    )
+    pipe = OnboardingPipeline(StubLLMClient(), store)
+
+    pipe._retrieve_per_step([BlueprintStep(id="x", title="Install")], "project-1")
+
+    assert captured == [RetrievalFilters(project_id="project-1")]
 
 
 def test_build_phases_drops_semantic_duplicate_across_scopes() -> None:

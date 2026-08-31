@@ -1,8 +1,9 @@
 from pydantic import BaseModel, field_validator
 
 from agents.tools.base import Tool, ToolResult
+from rag.filters import matches_retrieval_filters
 from rag.source_filter import SourceExclusions, is_excluded
-from rag.types import ScoredChunk
+from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 _GREP_SCORE = 1.0
@@ -26,10 +27,15 @@ class GrepTool(Tool[GrepArgs]):
     args_model = GrepArgs
 
     def __init__(
-        self, store: VectorStore, *, exclusions: SourceExclusions = SourceExclusions()
+        self,
+        store: VectorStore,
+        *,
+        exclusions: SourceExclusions = SourceExclusions(),
+        filters: RetrievalFilters | None = None,
     ) -> None:
         self._store = store
         self._exclusions = exclusions
+        self._filters = filters
 
     def run(self, args: GrepArgs) -> ToolResult:
         needles = [p.lower() for p in args.patterns]
@@ -44,9 +50,14 @@ class GrepTool(Tool[GrepArgs]):
                 kind=chunk.kind,
                 start_line=chunk.start_line,
                 start_page=chunk.start_page,
+                project_ids=chunk.project_ids,
             )
-            for chunk in self._store.all_chunks_without_embeddings()
-            if not is_excluded(chunk, self._exclusions)
+            # This tool scans the whole corpus in memory rather than going
+            # through the vector store's query path, so the retrieval filters
+            # (notably the project scope) have to be applied here explicitly.
+            for chunk in self._store.iter_chunks_without_embeddings()
+            if matches_retrieval_filters(chunk, self._filters)
+            and not is_excluded(chunk, self._exclusions)
             and any(needle in chunk.text.lower() for needle in needles)
         ]
         return ToolResult(

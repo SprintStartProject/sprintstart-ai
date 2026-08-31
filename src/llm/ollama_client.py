@@ -5,13 +5,30 @@ from uuid import uuid4
 
 import ollama
 
-from llm.base import ChatResult, Message, ToolCall, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
+from llm.tool_call_recovery import guard_event_stream, recover_tool_calls
 
 logger = logging.getLogger(__name__)
 
 
-def _to_ollama_messages(messages: list[Message]) -> list[dict[str, Any]]:
+def _to_ollama_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """Internal messages in Ollama's wire shape.
+
+    Every path that sends messages to the daemon goes through this. Our
+    ``Message`` carries ``ToolCall`` objects and a ``name``/``tool_call_id``
+    pair; Ollama expects ``{"function": {...}}`` and ``tool_name``. Handing it
+    the internal shape fails validation or silently loses the tool
+    association, so no caller may skip the conversion.
+    """
     out: list[dict[str, Any]] = []
     for message in messages:
         item: dict[str, Any] = {
@@ -55,14 +72,24 @@ def _from_ollama_response(response: ollama.ChatResponse) -> ChatResult:
         )
         for call in message.tool_calls or []
     ]
-    return ChatResult(text=message.content or "", tool_calls=calls)
+    text = message.content or ""
+    # A local model may also emit tool calls as markup in the content instead of
+    # returning them structurally; recover them when none came through the API so
+    # the agent runs the tool rather than showing the hire the raw markup.
+    if not calls:
+        recovered, cleaned = recover_tool_calls(text)
+        if recovered:
+            return ChatResult(text=cleaned, tool_calls=recovered)
+    return ChatResult(text=text, tool_calls=calls)
 
 
 class OllamaBackend(Protocol):
     def chat(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        options: Mapping[str, Any] | None = None,
     ) -> ollama.ChatResponse: ...
 
     def chat_tools(
@@ -75,7 +102,7 @@ class OllamaBackend(Protocol):
     def chat_stream(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]: ...
 
     def embed(
@@ -94,9 +121,16 @@ class OllamaBackend(Protocol):
 
 class _OllamaAdapter:
     def __init__(
-        self, host: str | None, temperature: float, num_ctx: int | None = None
+        self,
+        host: str | None,
+        temperature: float,
+        num_ctx: int | None = None,
+        timeout: float | None = None,
     ) -> None:
-        self._client = ollama.Client(host=host)
+        # Unlike the hosted SDKs, ollama-python defaults to no timeout at all,
+        # so an unreachable or wedged daemon hangs the request forever. Passing
+        # ``timeout=None`` reproduces that default when nothing is configured.
+        self._client = ollama.Client(host=host, timeout=timeout)
         self._options: dict[str, Any] = {"temperature": temperature}
         # num_ctx must be set explicitly: Ollama otherwise defaults to a small
         # context (typically 4096) and silently truncates oversized prompts,
@@ -130,10 +164,13 @@ class _OllamaAdapter:
     def chat(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        options: Mapping[str, Any] | None = None,
     ) -> ollama.ChatResponse:
+        merged = {**self._options, **options} if options else self._options
         response = self._client.chat(  # pyright: ignore[reportUnknownMemberType]
-            model=model, messages=list(messages or []), options=self._options
+            model=model, messages=list(messages or []), options=merged
         )
         self._warn_if_truncated(response)
         return response
@@ -156,7 +193,7 @@ class _OllamaAdapter:
     def chat_stream(
         self,
         model: str = "",
-        messages: Sequence[Message] | None = None,
+        messages: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]:
         stream: Iterator[ollama.ChatResponse] = self._client.chat(  # type: ignore[assignment]
             model=model,
@@ -205,6 +242,7 @@ class OllamaClient:
         client: OllamaBackend | None = None,
         temperature: float = _DEFAULT_TEMPERATURE,
         num_ctx: int | None = None,
+        timeout: float | None = None,
     ) -> None:
         self._host = host
         self._model = model
@@ -213,7 +251,12 @@ class OllamaClient:
         self._client: OllamaBackend = (
             client
             if client is not None
-            else _OllamaAdapter(host=host, temperature=temperature, num_ctx=num_ctx)
+            else _OllamaAdapter(
+                host=host,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                timeout=timeout,
+            )
         )
 
     @property
@@ -235,21 +278,46 @@ class OllamaClient:
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         if self._model is None:
             raise ValueError("No model specified")
         try:
-            response = self._client.chat(model=self._model, messages=messages)
+            options = {"temperature": temperature} if temperature is not None else None
+            response = self._client.chat(
+                model=self._model,
+                messages=_to_ollama_messages(messages),
+                options=options,
+            )
             return response.message.content or ""
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
+        # See OpenAiCompatibleClient.stream: the same models reach this client, and the
+        # streamed answer has no tool loop to hand a recovered call to.
         if self._model is None:
             raise ValueError("No model specified")
+        # The model is passed in rather than re-read off self: this method raises
+        # eagerly, the generator body does not, so the check here is only load-bearing
+        # if the value it checked is the one that reaches the call.
+        return guard_event_stream(self._stream_raw(self._model, messages))
+
+    def _stream_raw(
+        self, model: str, messages: list[Message]
+    ) -> Iterator[LLMStreamEvent]:
         try:
-            for chunk in self._client.chat_stream(model=self._model, messages=messages):
-                yield chunk.message.content or ""
+            for chunk in self._client.chat_stream(
+                model=model, messages=_to_ollama_messages(messages)
+            ):
+                thinking = chunk.message.thinking
+                if isinstance(thinking, str) and thinking.strip():
+                    yield ReasoningDelta(thinking)
+
+                content = chunk.message.content
+                if content:
+                    yield TextDelta(content)
         except (ollama.ResponseError, ConnectionError, OSError) as exc:
             raise LLMUnavailableError(self._host, cause=exc) from exc
 

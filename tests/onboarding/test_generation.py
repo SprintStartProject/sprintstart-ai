@@ -1,5 +1,6 @@
 import json
 
+from ingestion.source_role import SourceRole
 from onboarding.generation import (
     corpus_fingerprint,
     filter_semantic_duplicates,
@@ -18,7 +19,8 @@ from tests.stubs.store import StubVectorStore
 
 # Non-zero embedding so the stub store returns a perfect cosine match.
 _EMBED = [1.0] + [0.0] * 767
-_SCOPE = "area:backend"
+_PROJECT = "project-1"
+_SCOPE = f"project:{_PROJECT}|area:backend"
 
 
 def _llm(steps: list[dict[str, object]]) -> StubLLMClient:
@@ -27,7 +29,7 @@ def _llm(steps: list[dict[str, object]]) -> StubLLMClient:
     return llm
 
 
-def _store(*texts: str) -> StubVectorStore:
+def _store(*texts: str, project_ids: tuple[str, ...] = (_PROJECT,)) -> StubVectorStore:
     store = StubVectorStore()
     store.add(
         [
@@ -37,6 +39,7 @@ def _store(*texts: str) -> StubVectorStore:
                 filename=f"doc{i}.md",
                 text=text,
                 embedding=_EMBED,
+                project_ids=project_ids,
             )
             for i, text in enumerate(texts, start=1)
         ]
@@ -64,7 +67,7 @@ def test_first_time_generation_drafts_grounded_steps() -> None:
         ]
     )
 
-    outcomes = generate_blueprints(llm, store, scopes=[_SCOPE])
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
 
     assert [(o.scope, o.status) for o in outcomes] == [(_SCOPE, "created")]
     bp = outcomes[0].blueprint
@@ -74,7 +77,7 @@ def test_first_time_generation_drafts_grounded_steps() -> None:
     assert [s.id for s in bp.steps] == [content_id("Read the deploy runbook")]
     assert bp.steps[0].citations[0].chunk_id == "c1"
     assert bp.provenance is not None
-    assert bp.provenance.corpus_fingerprint == corpus_fingerprint(store)
+    assert bp.provenance.corpus_fingerprint == corpus_fingerprint(store, _PROJECT)
 
 
 def test_unchanged_corpus_is_a_noop() -> None:
@@ -83,11 +86,12 @@ def test_unchanged_corpus_is_a_noop() -> None:
         [{"id": "x", "title": "X", "requirement": "required", "chunk_ids": ["c1"]}]
     )
 
-    first = generate_blueprints(llm, store, scopes=[_SCOPE])
+    first = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
     # The backend persists the result and passes it back as the active blueprint.
     again = generate_blueprints(
         llm,
         store,
+        project_id=_PROJECT,
         scopes=[_SCOPE],
         active=[first[0].blueprint],  # type: ignore[list-item]
     )
@@ -101,7 +105,7 @@ def test_corpus_change_updates_active_with_new_version() -> None:
         [{"id": "x", "title": "X", "requirement": "required", "chunk_ids": ["c1"]}]
     )
 
-    first = generate_blueprints(llm, store, scopes=[_SCOPE])
+    first = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
     active = first[0].blueprint
     assert active is not None
 
@@ -113,13 +117,67 @@ def test_corpus_change_updates_active_with_new_version() -> None:
                 filename="d2.md",
                 text="new",
                 embedding=_EMBED,
+                project_ids=(_PROJECT,),
             )
         ]
     )
-    outcomes = generate_blueprints(llm, store, scopes=[_SCOPE], active=[active])
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
 
     assert outcomes[0].status == "updated"
     assert outcomes[0].draft_version == "2"
+
+
+def test_another_projects_corpus_change_does_not_invalidate_blueprints() -> None:
+    """The fingerprint is per project, so a foreign ingest is not a change."""
+    store = _store("backend onboarding deploy runbook")
+    llm = _llm(
+        [{"id": "x", "title": "X", "requirement": "required", "chunk_ids": ["c1"]}]
+    )
+
+    first = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
+    active = first[0].blueprint
+    assert active is not None
+
+    store.add(
+        [
+            Chunk(
+                id="other-1",
+                artifact_id="other-artifact",
+                filename="other.md",
+                text="another project's secret runbook",
+                embedding=_EMBED,
+                project_ids=("project-2",),
+            )
+        ]
+    )
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
+
+    assert outcomes[0].status == "unchanged"
+
+
+def test_generation_ignores_other_projects_evidence() -> None:
+    store = _store("another project's runbook", project_ids=("project-2",))
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
+
+    assert outcomes[0].status == "skipped"
+    assert outcomes[0].blueprint is None
+
+
+def test_plain_scope_names_are_qualified_with_the_project() -> None:
+    store = _store("backend onboarding deploy runbook")
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=["area:backend"]
+    )
+
+    assert [o.scope for o in outcomes] == [_SCOPE]
 
 
 def test_invariant_removal_is_blocked_and_reinjected() -> None:
@@ -131,7 +189,9 @@ def test_invariant_removal_is_blocked_and_reinjected() -> None:
     # The draft omits the required "security" step entirely.
     llm = _llm([{"title": "Deploy", "requirement": "recommended", "chunk_ids": ["c1"]}])
 
-    outcomes = generate_blueprints(llm, store, scopes=[_SCOPE], active=[active])
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
 
     assert outcomes[0].status == "escalated"
     bp = outcomes[0].blueprint
@@ -156,7 +216,9 @@ def test_invariant_flag_protects_recommended_step() -> None:
     store = _store("backend onboarding")
     llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
 
-    outcomes = generate_blueprints(llm, store, scopes=[_SCOPE], active=[active])
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
 
     assert outcomes[0].status == "escalated"
     bp = outcomes[0].blueprint
@@ -173,7 +235,7 @@ def test_ungrounded_steps_are_dropped() -> None:
         ]
     )
 
-    outcomes = generate_blueprints(llm, store, scopes=[_SCOPE])
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
 
     bp = outcomes[0].blueprint
     assert bp is not None
@@ -189,7 +251,7 @@ def test_identical_title_proposals_dedup() -> None:
         ]
     )
 
-    outcomes = generate_blueprints(llm, store, scopes=[_SCOPE])
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
 
     bp = outcomes[0].blueprint
     assert bp is not None
@@ -198,7 +260,9 @@ def test_identical_title_proposals_dedup() -> None:
 
 
 def test_empty_corpus_is_skipped() -> None:
-    outcomes = generate_blueprints(_llm([]), StubVectorStore(), scopes=[_SCOPE])
+    outcomes = generate_blueprints(
+        _llm([]), StubVectorStore(), project_id=_PROJECT, scopes=[_SCOPE]
+    )
     assert outcomes[0].status == "skipped"
 
 
@@ -314,3 +378,167 @@ def testfilter_semantic_duplicates_within_scope() -> None:
     assert first_id in kept_ids  # first occurrence wins
     assert dup_id not in kept_ids  # within-scope duplicate dropped
     assert docker_id in kept_ids  # genuinely different step survives
+
+
+def test_corpus_fingerprint_changes_when_source_role_changes() -> None:
+    """Reclassifying content as test material must invalidate blueprints.
+
+    Chunk ids hash artifact_id, position and content only, so the id survives
+    the reclassification — but test chunks are excluded from onboarding
+    grounding, and a blueprint drafted from them is no longer supportable.
+    """
+    store = StubVectorStore()
+
+    def chunk(source_role: SourceRole) -> Chunk:
+        return Chunk(
+            id="c1",
+            artifact_id="a1",
+            filename="doc.md",
+            text="backend onboarding deploy runbook",
+            embedding=_EMBED,
+            project_ids=(_PROJECT,),
+            source_role=source_role,
+        )
+
+    store.add([chunk("primary")])
+    before = corpus_fingerprint(store, _PROJECT)
+
+    store.add([chunk("test")])
+
+    assert corpus_fingerprint(store, _PROJECT) != before
+
+
+def test_corpus_fingerprint_changes_when_filename_changes() -> None:
+    """The filename appears in citations, so a rename changes the output."""
+    store = StubVectorStore()
+
+    def chunk(filename: str) -> Chunk:
+        return Chunk(
+            id="c1",
+            artifact_id="a1",
+            filename=filename,
+            text="backend onboarding deploy runbook",
+            embedding=_EMBED,
+            project_ids=(_PROJECT,),
+        )
+
+    store.add([chunk("runbook.md")])
+    before = corpus_fingerprint(store, _PROJECT)
+
+    store.add([chunk("docs/runbook.md")])
+
+    assert corpus_fingerprint(store, _PROJECT) != before
+
+
+def test_corpus_fingerprint_stable_for_unchanged_corpus() -> None:
+    store = _store("backend onboarding deploy runbook")
+
+    assert corpus_fingerprint(store, _PROJECT) == corpus_fingerprint(store, _PROJECT)
+
+
+def _generated_active(store: StubVectorStore, llm: StubLLMClient) -> Blueprint:
+    """A `source: generated` active blueprint, as a prior run would have made it."""
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
+    blueprint = outcomes[0].blueprint
+    assert blueprint is not None and blueprint.source == "generated"
+    return blueprint
+
+
+def test_generated_blueprint_is_invalidated_when_its_evidence_leaves_project() -> None:
+    """Regression: a blueprint outliving its evidence must not stay active.
+
+    The artifact grounding the blueprint is reassigned to another project, so
+    nothing eligible is retrievable here any more. Reporting `skipped` would
+    leave the backend serving steps and citations pointing at content this
+    project can no longer see.
+    """
+    store = _store("backend onboarding deploy runbook")
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+    active = _generated_active(store, llm)
+
+    # The backend re-syncs the artifact into a different project.
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="doc1.md",
+                text="backend onboarding deploy runbook",
+                embedding=_EMBED,
+                project_ids=("project-2",),
+            )
+        ]
+    )
+
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
+
+    assert outcomes[0].status == "invalidated"
+    assert outcomes[0].blueprint is None
+
+
+def test_generated_blueprint_is_invalidated_when_the_corpus_empties() -> None:
+    store = _store("backend onboarding deploy runbook")
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+    active = _generated_active(store, llm)
+
+    store.delete("a1")
+
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
+
+    assert outcomes[0].status == "invalidated"
+
+
+def test_authored_blueprint_is_never_invalidated_by_missing_evidence() -> None:
+    """Human-owned content is not withdrawn on the strength of a retrieval."""
+    store = _store("another project's runbook", project_ids=("project-2",))
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+    authored = _active(
+        BlueprintStep(id="s1", title="Read the handbook", requirement="required")
+    )
+
+    outcomes = generate_blueprints(
+        llm, store, project_id=_PROJECT, scopes=[_SCOPE], active=[authored]
+    )
+
+    assert outcomes[0].status == "skipped"
+
+
+def test_missing_evidence_without_an_active_blueprint_is_skipped() -> None:
+    """Nothing generated to withdraw, so there is nothing for the backend to do."""
+    store = _store("another project's runbook", project_ids=("project-2",))
+    llm = _llm([{"title": "Deploy", "chunk_ids": ["c1"]}])
+
+    outcomes = generate_blueprints(llm, store, project_id=_PROJECT, scopes=[_SCOPE])
+
+    assert outcomes[0].status == "skipped"
+
+
+def test_ungrounded_llm_output_does_not_invalidate_an_active_blueprint() -> None:
+    """A retry-able model failure must not look like the evidence disappeared."""
+    store = _store("backend onboarding deploy runbook")
+    active = _generated_active(store, _llm([{"title": "Deploy", "chunk_ids": ["c1"]}]))
+
+    # Evidence is still there; the model just cites nothing, so no step grounds.
+    ungrounded = _llm([{"title": "Deploy", "chunk_ids": []}])
+    store.add(
+        [
+            Chunk(
+                id="c2",
+                artifact_id="a2",
+                filename="doc2.md",
+                text="new evidence so the run is not a no-op",
+                embedding=_EMBED,
+                project_ids=(_PROJECT,),
+            )
+        ]
+    )
+
+    outcomes = generate_blueprints(
+        ungrounded, store, project_id=_PROJECT, scopes=[_SCOPE], active=[active]
+    )
+
+    assert outcomes[0].status == "skipped"

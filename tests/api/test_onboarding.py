@@ -17,6 +17,7 @@ from tests.stubs.store import StubVectorStore
 
 # Non-zero embedding so the stub store returns a perfect cosine match.
 _EMBED = [1.0] + [0.0] * 767
+_PROJECT = "project-1"
 
 _ACCOUNTS = "Set up your accounts and access"
 _LOCAL_DB = "Set up your local database"
@@ -25,7 +26,7 @@ _LOCAL_DB = "Set up your local database"
 # request. These mirror what the backend would send for a backend user.
 _BLUEPRINTS: list[dict[str, Any]] = [
     {
-        "scope": "global",
+        "scope": f"project:{_PROJECT}|global",
         "version": "1",
         "source": "authored",
         "steps": [
@@ -37,7 +38,7 @@ _BLUEPRINTS: list[dict[str, Any]] = [
         ],
     },
     {
-        "scope": "area:backend",
+        "scope": f"project:{_PROJECT}|area:backend",
         "version": "1",
         "source": "authored",
         "steps": [
@@ -66,6 +67,7 @@ def client() -> Generator[tuple[TestClient, StubLLMClient, StubVectorStore], Any
 
 def _post(http: TestClient, **body: Any) -> list[dict[str, Any]]:
     body.setdefault("blueprints", _BLUEPRINTS)
+    body.setdefault("projectId", _PROJECT)
     response = http.post("/api/v1/onboarding/path", json=body)
     assert response.status_code == 200
     return parse_sse_events(response.text)
@@ -160,6 +162,7 @@ def test_invalid_llm_output_falls_back_without_error(
                 filename="deploy.md",
                 text="backend onboarding deploy runbook",
                 embedding=_EMBED,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -206,6 +209,7 @@ def test_grounded_llm_steps_are_added_and_cited(
                 filename="deploy.md",
                 text="backend onboarding deploy runbook local db",
                 embedding=_EMBED,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -258,6 +262,7 @@ def test_synthesis_rewrites_step_description(
                 filename="setup.md",
                 text="backend db setup docker-compose",
                 embedding=_EMBED,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -294,6 +299,7 @@ def test_ungrounded_llm_step_is_dropped(
                 filename="deploy.md",
                 text="backend onboarding",
                 embedding=_EMBED,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -315,6 +321,89 @@ def test_missing_request_field_returns_422(
     assert response.status_code == 422
 
 
+def test_missing_project_id_returns_422(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    http, _, _ = client
+
+    response = http.post(
+        "/api/v1/onboarding/path",
+        json={"working_area": "backend", "blueprints": _BLUEPRINTS},
+    )
+
+    assert response.status_code == 422
+
+
+def test_path_is_not_grounded_in_another_projects_corpus(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    """A step may only cite evidence from the requesting project."""
+    http, llm, store = client
+    llm.embedding = _EMBED
+    llm.generate_response = json.dumps(
+        {
+            "steps": [],
+            "added": [
+                {
+                    "title": "Read the other project's runbook",
+                    "chunk_ids": ["foreign-1"],
+                }
+            ],
+        }
+    )
+    store.add(
+        [
+            Chunk(
+                id="foreign-1",
+                artifact_id="foreign-artifact",
+                filename="secret-runbook.md",
+                text="backend onboarding deploy runbook local db",
+                embedding=_EMBED,
+                project_ids=("project-2",),
+            )
+        ]
+    )
+
+    events = _post(http, working_area="backend")
+    path = _path_event(events)["path"]
+
+    citations = [
+        citation
+        for phase in path["phases"]
+        for step in phase["steps"]
+        for citation in step["citations"]
+    ]
+    assert citations == []
+    origins = {s["origin"] for phase in path["phases"] for s in phase["steps"]}
+    assert origins == {"blueprint"}
+
+
+def test_other_projects_blueprints_are_ignored(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    http, _, _ = client
+
+    foreign: list[dict[str, Any]] = [
+        {
+            "scope": "project:project-2|global",
+            "version": "1",
+            "source": "authored",
+            "steps": [
+                {
+                    "id": content_id("Foreign step"),
+                    "title": "Foreign step",
+                    "requirement": "required",
+                }
+            ],
+        }
+    ]
+
+    events = _post(http, working_area="backend", blueprints=_BLUEPRINTS + foreign)
+    path = _path_event(events)["path"]
+
+    assert content_id("Foreign step") not in _all_step_ids(path)
+
+
 # --- /path/yaml (synchronous YAML endpoint) ---
 
 
@@ -326,6 +415,7 @@ def test_yaml_endpoint_returns_valid_yaml(
     response = http.post(
         "/api/v1/onboarding/path/yaml",
         json={
+            "projectId": _PROJECT,
             "working_area": "backend",
             "blueprints": _BLUEPRINTS,
         },
@@ -353,6 +443,7 @@ def test_yaml_endpoint_includes_quality_report(
     response = http.post(
         "/api/v1/onboarding/path/yaml",
         json={
+            "projectId": _PROJECT,
             "working_area": "backend",
             "blueprints": _BLUEPRINTS,
         },
@@ -393,6 +484,7 @@ def test_yaml_endpoint_returns_503_when_llm_unavailable(
     response = http.post(
         "/api/v1/onboarding/path/yaml",
         json={
+            "projectId": _PROJECT,
             "working_area": "backend",
             "blueprints": _BLUEPRINTS,
         },

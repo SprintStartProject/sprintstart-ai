@@ -50,3 +50,49 @@ def test_to_chunk_without_line_or_page_metadata_defaults_to_none():
 
     assert chunk.start_line is None
     assert chunk.start_page is None
+
+
+def test_to_chunk_carries_project_ids():
+    parsed = ParsedChunk(
+        content="text",
+        kind="text",
+        metadata={"filename": "doc.md", "chunk_index": "0"},
+    )
+
+    chunk = to_chunk(
+        parsed,
+        artifact_id="artifact-1",
+        embedding=[0.1],
+        project_ids=["project-1", "project-2"],
+    )
+
+    assert chunk.project_ids == ("project-1", "project-2")
+
+
+def test_to_chunk_deduplicates_and_drops_blank_project_ids():
+    parsed = ParsedChunk(
+        content="text",
+        kind="text",
+        metadata={"filename": "doc.md", "chunk_index": "0"},
+    )
+
+    chunk = to_chunk(
+        parsed,
+        artifact_id="artifact-1",
+        embedding=[0.1],
+        project_ids=["project-1", "", "project-1"],
+    )
+
+    assert chunk.project_ids == ("project-1",)
+
+
+def test_to_chunk_without_project_ids_defaults_to_empty():
+    parsed = ParsedChunk(
+        content="text",
+        kind="text",
+        metadata={"filename": "doc.md", "chunk_index": "0"},
+    )
+
+    chunk = to_chunk(parsed, artifact_id="artifact-1", embedding=[0.1])
+
+    assert chunk.project_ids == ()

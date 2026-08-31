@@ -2,15 +2,22 @@ from collections.abc import Iterator
 
 from agents.orchestrator import ChatOrchestrator
 from api.schemas import HistoryEntry
-from llm.base import Message
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 from rag.types import Chunk
 from tests.conftest import parse_sse_events
 from tests.stubs.llm import ScriptedLLMClient
 from tests.stubs.store import StubVectorStore
 
-_SYNTH_CALL = ("synthesis", {"task": "blockers"})
 _RETRIEVE_CALL = ("retrieve", {"query": "blockers"})
+_GREP_CALL = ("grep", {"patterns": ["designs"]})
 _EMBEDDING = [1.0] + [0.0] * 767
 
 
@@ -35,12 +42,10 @@ def _store_with_chunk() -> StubVectorStore:
     return store
 
 
-def test_orchestrator_reports_nested_tool_use_in_order() -> None:
+def test_orchestrator_reports_tool_use_before_the_answer() -> None:
     store = _store_with_chunk()
     llm = ScriptedLLMClient(
-        [[_SYNTH_CALL], [_RETRIEVE_CALL], [], []],
-        answer="Missing designs.",
-        embedding=_EMBEDDING,
+        [[_RETRIEVE_CALL]], answer="Missing designs.", embedding=_EMBEDDING
     )
 
     events = _events(ChatOrchestrator(llm, store), "What were the blockers?")
@@ -51,11 +56,7 @@ def test_orchestrator_reports_nested_tool_use_in_order() -> None:
         for e in events
         if e["type"] == "tool_use"
     ]
-    assert tool_uses == [
-        {"name": "synthesis", "kind": "agent"},
-        {"name": "retrieve", "kind": "tool"},  # seed retrieval, before the loop
-        {"name": "retrieve", "kind": "tool"},  # the agent's own in-loop retrieve
-    ]
+    assert tool_uses == [{"name": "retrieve", "kind": "tool"}]
     assert types.index("tool_use") < types.index("token")
 
     citations = [e for e in events if e["type"] == "citation"]
@@ -69,9 +70,7 @@ def test_orchestrator_streams_citation_before_answer_tokens() -> None:
     interleaved with) the tokens it grounds, not only once streaming ends."""
     store = _store_with_chunk()
     llm = ScriptedLLMClient(
-        [[_SYNTH_CALL], [_RETRIEVE_CALL], [], []],
-        answer="Missing designs.",
-        embedding=_EMBEDDING,
+        [[_RETRIEVE_CALL]], answer="Missing designs.", embedding=_EMBEDDING
     )
 
     events = _events(ChatOrchestrator(llm, store), "What were the blockers?")
@@ -84,13 +83,31 @@ def test_orchestrator_streams_citation_before_answer_tokens() -> None:
     assert len(citations) == 1  # not re-emitted again at the end of the stream
 
 
-def test_orchestrator_does_not_duplicate_citations_across_multiple_retrieves() -> None:
-    """The same chunk id surfacing from more than one tool call (e.g. the
-    seed retrieval and the agent's own retrieve both matching) must only
-    produce a single citation event, however many times it is re-gathered."""
+def test_orchestrator_emits_reasoning_separately_before_answer() -> None:
+    llm = ScriptedLLMClient(
+        [[_RETRIEVE_CALL]],
+        embedding=_EMBEDDING,
+        stream_events=[ReasoningDelta("Checking sources."), TextDelta("Answer.")],
+    )
+
+    events = _events(ChatOrchestrator(llm, _store_with_chunk()), "What broke?")
+
+    reasoning = [event for event in events if event["type"] == "reasoning"]
+    assert reasoning == [{"type": "reasoning", "reasoning": "Checking sources."}]
+    assert [event["content"] for event in events if event["type"] == "token"] == [
+        "Answer."
+    ]
+    assert [event["type"] for event in events].index("reasoning") < [
+        event["type"] for event in events
+    ].index("token")
+
+
+def test_orchestrator_does_not_duplicate_citations_across_tool_calls() -> None:
+    """The same chunk id surfacing from more than one tool call in the same
+    turn must only produce a single citation event."""
     store = _store_with_chunk()
     llm = ScriptedLLMClient(
-        [[_SYNTH_CALL], [_RETRIEVE_CALL], [_RETRIEVE_CALL], []],
+        [[_RETRIEVE_CALL, _GREP_CALL]],
         answer="Missing designs.",
         embedding=_EMBEDDING,
     )
@@ -98,22 +115,27 @@ def test_orchestrator_does_not_duplicate_citations_across_multiple_retrieves() -
     events = _events(ChatOrchestrator(llm, store), "What were the blockers?")
     citations = [e for e in events if e["type"] == "citation"]
 
+    assert [e["name"] for e in events if e["type"] == "tool_use"] == [
+        "retrieve",
+        "grep",
+    ]
     assert len(citations) == 1
     assert citations[0]["artifact_id"] == "d1"
 
 
-def test_orchestrator_streams_single_delegation_without_re_synthesising() -> None:
+def test_orchestrator_answers_from_the_search_without_a_second_pass() -> None:
+    """One decision call, one streamed answer — the sources are already in the
+    conversation, so nothing re-synthesises them into a fresh prompt."""
     store = _store_with_chunk()
     llm = ScriptedLLMClient(
-        [[_SYNTH_CALL], [_RETRIEVE_CALL], [], []],
-        answer="Missing designs.",
-        embedding=_EMBEDDING,
+        [[_RETRIEVE_CALL]], answer="Missing designs.", embedding=_EMBEDDING
     )
 
     events = _events(ChatOrchestrator(llm, store), "What were the blockers?")
     tokens = "".join(str(e["content"]) for e in events if e["type"] == "token")
 
     assert tokens == "Missing designs."
+    assert len(llm.chat_calls) == 1
     assert len(llm.stream_calls) == 1
 
 
@@ -127,15 +149,30 @@ def test_orchestrator_chats_directly_without_touching_the_knowledge_base() -> No
     tokens = "".join(str(e["content"]) for e in events if e["type"] == "token")
     assert tokens == "Hi! How can I help with your project?"
     assert events[-1] == {"type": "done"}
+    assert llm.stream_calls == []  # the deciding call already wrote the answer
 
 
 def test_orchestrator_emits_error_event_when_llm_unavailable() -> None:
-    class _FailingStream(ScriptedLLMClient):
-        def stream(self, messages: list[Message]) -> Iterator[str]:
+    class _FailingChat(ScriptedLLMClient):
+        def chat(
+            self, messages: list[Message], tools: list[ToolSpec] | None = None
+        ) -> ChatResult:
             raise LLMUnavailableError("http://localhost:11434")
 
-    llm = _FailingStream([])
+    llm = _FailingChat([])
 
     events = _events(ChatOrchestrator(llm, StubVectorStore()), "hi")
 
     assert events[0]["type"] == "error"
+
+
+def test_orchestrator_emits_error_event_when_the_answer_stream_fails() -> None:
+    class _FailingStream(ScriptedLLMClient):
+        def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
+            raise LLMUnavailableError("http://localhost:11434")
+
+    llm = _FailingStream([[_RETRIEVE_CALL]], embedding=_EMBEDDING)
+
+    events = _events(ChatOrchestrator(llm, _store_with_chunk()), "What broke?")
+
+    assert events[-1]["type"] == "error"

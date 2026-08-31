@@ -2,13 +2,18 @@
 
 Called by the backend's Knowledge-Gaps insight refresh (pull-based, issue #137).
 This service is stateless and sources everything from its ingestion index, so
-the request carries no body.
+the request carries nothing but the project the scan is scoped to.
 
-"Insufficient" is scoped here as *structural coverage*: for each component known
-to the index we determine which expected documentation categories (readme,
+"Insufficient" is scoped here as *structural coverage*: for each component of
+that project we determine which expected documentation categories (readme,
 setup, adr, …) are present versus missing. Detection is hybrid — the LLM
 classifies a component's documents into categories, with a filename heuristic as
 a fallback when the LLM output can't be used.
+
+Every component of the project is reported, including the ones missing nothing;
+those carry the "covered" severity. The result is therefore a coverage roster
+rather than a list of problems: a component in good shape is a finding of its
+own, and leaving it out made it look like it had never been ingested.
 
 Owners and related-question counts are deliberately NOT produced here: the
 ingestion index holds no user/ownership data and this service retains no
@@ -17,6 +22,7 @@ question history. The backend enriches the returned ``component`` with those.
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -28,7 +34,7 @@ from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
-Severity = Literal["high", "medium", "low"]
+Severity = Literal["high", "medium", "low", "covered"]
 
 # Documentation categories every component should ideally have, ordered from
 # most to least foundational. This is the "expected-type checklist" the corpus
@@ -59,12 +65,15 @@ _SNIPPET_CHARS = 600
 # sample fed to the classifier (see ``_doc_priority``).
 _DOC_EXTENSIONS = (".md", ".mdx", ".rst", ".txt")
 
-# Filename substrings mapped to categories, used as the fallback classifier.
+# Filename keywords mapped to categories, used as the fallback classifier.
+# Matched at word boundaries rather than anywhere in the path -- see
+# ``_mentions_keyword`` for why.
 _HEURISTIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "readme": ("readme",),
     "setup": (
         "setup",
         "install",
+        "installation",
         "getting-started",
         "getting_started",
         "quickstart",
@@ -74,10 +83,43 @@ _HEURISTIC_KEYWORDS: dict[str, tuple[str, ...]] = {
         "env.example",
     ),
     "architecture": ("architecture", "design"),
-    "adr": ("adr", "decision-record", "decision_record"),
-    "api": ("api", "openapi", "swagger", "reference"),
-    "runbook": ("runbook", "playbook", "operations", "ops", "oncall", "on-call"),
+    "adr": ("adr", "adrs", "decision-record", "decision_record"),
+    # "reference" deliberately absent: it matched every file under a
+    # ``references/`` directory, so a wiki that files its conventions and
+    # working agreements there read as fully API-documented. An actual API
+    # reference is caught by "api" anyway.
+    "api": ("api", "apis", "openapi", "swagger"),
+    "runbook": (
+        "runbook",
+        "runbooks",
+        "playbook",
+        "operations",
+        "ops",
+        "devops",
+        "oncall",
+        "on-call",
+    ),
 }
+
+
+def _mentions_keyword(name: str, keyword: str) -> bool:
+    """Whether ``name`` contains ``keyword`` as a whole word.
+
+    A plain substring test is far too eager on paths: "api" hides inside
+    "rapid" and "capital", "ops" inside "props", "adr" inside "adrenaline".
+    The heuristic can only ever *add* categories (see ``_classify_present``),
+    so a false positive here is one the LLM can never take back -- it silently
+    turns a real gap into full coverage, which is the failure mode this whole
+    function exists to prevent.
+
+    Both ends are anchored. Legitimate suffixed forms are not inferred from an
+    open-ended prefix match but listed outright in ``_HEURISTIC_KEYWORDS``
+    ("apis", "installation", "adrs"), so the set of things that count as
+    documentation stays something you can read off the table rather than a
+    consequence of how the matcher happens to work.
+    """
+    pattern = rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])"
+    return re.search(pattern, name) is not None
 
 
 @dataclass(frozen=True)
@@ -141,7 +183,7 @@ def _heuristic_present(records: list[ArtifactRecord]) -> set[str]:
     for record in records:
         name = record.filename.lower()
         for category, keywords in _HEURISTIC_KEYWORDS.items():
-            if any(keyword in name for keyword in keywords):
+            if any(_mentions_keyword(name, keyword) for keyword in keywords):
                 present.add(category)
     return present
 
@@ -226,6 +268,10 @@ def _is_stale(last_updated: str) -> bool:
 def _severity(missing: list[str], last_updated: str) -> Severity:
     """Rank a gap.
 
+    A component with nothing missing is "covered" rather than scored: staleness
+    alone would otherwise push a fully documented component to "low", which is
+    indistinguishable from one that is actually missing something.
+
     Missing critical categories (readme/setup) weigh far more than missing
     optional ones: each missing critical type is worth 3 points, so missing
     even one already reaches "medium" and missing both reaches "high" on its
@@ -235,6 +281,9 @@ def _severity(missing: list[str], last_updated: str) -> Severity:
     without the cap, e.g. 4 missing optional categories alone would already
     cross the "high" threshold even though readme/setup both exist.
     """
+    if not missing:
+        return "covered"
+
     missing_set = set(missing)
     critical_missing = len(missing_set & CRITICAL_TYPES)
     noncritical_missing = min(len(missing_set - CRITICAL_TYPES), 3)
@@ -248,17 +297,26 @@ def _severity(missing: list[str], last_updated: str) -> Severity:
     return "low"
 
 
-_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2}
+_SEVERITY_RANK = {"high": 0, "medium": 1, "low": 2, "covered": 3}
 
 
 def detect_knowledge_gaps(
     llm: LLMClient,
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
+    project_id: str,
 ) -> list[KnowledgeGap]:
-    """Detect per-component documentation-coverage gaps across the index."""
+    """Report documentation coverage for every component of one project.
+
+    Components missing nothing are included with severity "covered", so the
+    result is the project's full roster and an absence means "not ingested"
+    rather than "nothing to report".
+
+    Only artifacts belonging to ``project_id`` are considered, so a component
+    is never reported to — or judged by the documents of — another project.
+    """
     components: dict[str, list[ArtifactRecord]] = {}
-    for record in metadata_store.list_artifacts():
+    for record in metadata_store.list_artifacts(project_id=project_id):
         component = _component_of(record)
         if component is None:
             continue
@@ -268,8 +326,10 @@ def detect_knowledge_gaps(
     for component, records in sorted(components.items()):
         present = _classify_present(component, records, llm, store)
         missing = [t for t in EXPECTED_TYPES if t not in present]
-        if not missing:
-            continue
+        # Fully covered components are reported too, as "covered". Dropping them
+        # made a component that is in good shape indistinguishable from one that
+        # was never ingested, and "this repository has no gaps" is a finding a PM
+        # wants to see rather than infer from an absence.
         last_updated = max(record.updated_at for record in records)
         gaps.append(
             KnowledgeGap(

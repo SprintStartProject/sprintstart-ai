@@ -1,6 +1,13 @@
 from collections.abc import Callable, Iterator, Mapping, Sequence
 
-from llm.base import ChatResult, Message, ToolCall, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMStreamEvent,
+    Message,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 
 Turn = Sequence[tuple[str, Mapping[str, object]]]
 
@@ -27,11 +34,13 @@ class StubLLMClient:
     ) -> ChatResult:
         return ChatResult(text=self.generate_response, tool_calls=[])
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         return self.generate_response
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
-        yield self.generate_response
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
+        yield TextDelta(self.generate_response)
 
     def embed(self, text: str) -> list[float]:
         if self.embed_fn is not None:
@@ -60,10 +69,16 @@ class ScriptedLLMClient:
         *,
         answer: str = "final answer",
         embedding: list[float] | None = None,
+        stream_events: Sequence[LLMStreamEvent] | None = None,
+        reasoning: str | None = None,
+        reasoning_details: list[dict[str, object]] | None = None,
     ) -> None:
         self._turns: list[Turn] = list(turns)
         self.answer = answer
         self.embedding = embedding or [0.0] * 768
+        self._stream_events = list(stream_events) if stream_events is not None else None
+        self.reasoning = reasoning
+        self.reasoning_details = reasoning_details or []
         self.chat_calls: list[list[Message]] = []
         self.stream_calls: list[list[Message]] = []
 
@@ -80,14 +95,21 @@ class ScriptedLLMClient:
             ToolCall(id=f"call_{i}", name=name, arguments=dict(args))
             for i, (name, args) in enumerate(turn)
         ]
-        return ChatResult(text="" if calls else self.answer, tool_calls=calls)
+        return ChatResult(
+            text="" if calls else self.answer,
+            tool_calls=calls,
+            reasoning=self.reasoning if calls else None,
+            reasoning_details=self.reasoning_details if calls else [],
+        )
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         return self.answer
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         self.stream_calls.append(messages)
-        yield self.answer
+        yield from self._stream_events or [TextDelta(self.answer)]
 
     def embed(self, text: str) -> list[float]:
         return self.embedding

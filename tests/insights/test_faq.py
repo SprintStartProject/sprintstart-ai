@@ -7,6 +7,7 @@ from rag.types import Chunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
+_PROJECT = "project-1"
 _VPN = [1.0, 0.0, 0.0]
 _PASSWORD = [0.0, 1.0, 0.0]
 
@@ -33,10 +34,18 @@ class _ScriptedFaqLLM(StubLLMClient):
         groups: list[list[str]],
         discard_ids: list[str] | None = None,
         embed_fn: Callable[[str], list[float]] = _embed_fn,
+        titles: list[str] | None = None,
     ) -> None:
         super().__init__(embed_fn=embed_fn)
+        labels = titles or ["Some topic"] * len(groups)
         self._grouping_response = json.dumps(
-            {"groups": groups, "discard_ids": discard_ids or []}
+            {
+                "groups": [
+                    {"ids": ids, "title": label}
+                    for ids, label in zip(groups, labels, strict=True)
+                ],
+                "discard_ids": discard_ids or [],
+            }
         )
         self._calls = 0
 
@@ -63,14 +72,15 @@ def test_group_faqs_clusters_similar_questions_by_llm_grouping() -> None:
         FaqQuestionInput(id="q3", text="How do I reset my password?"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert [g.count for g in groups] == [2, 1]
     assert groups[0].question == "How do I get VPN access?"
-    assert groups[0].questions == [
-        "How do I get VPN access?",
-        "Can someone enable VPN for me?",
+    assert [(q.ids, q.text) for q in groups[0].questions] == [
+        (["q1"], "How do I get VPN access?"),
+        (["q2"], "Can someone enable VPN for me?"),
     ]
+    assert groups[0].question_ids == ["q1", "q2"]
     assert groups[1].question == "How do I reset my password?"
 
 
@@ -84,7 +94,7 @@ def test_group_faqs_discards_smalltalk() -> None:
         FaqQuestionInput(id="q2", text="hey there, how you doing"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].question == "How do I get VPN access?"
@@ -102,7 +112,7 @@ def test_group_faqs_keeps_distinct_components_in_separate_groups() -> None:
         FaqQuestionInput(id="q3", text="How to start sprintstart-backend"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert sorted(g.count for g in groups) == [1, 2]
     frontend_group = next(g for g in groups if g.question == "How to start frontend")
@@ -123,7 +133,7 @@ def test_group_faqs_falls_back_to_ungrouped_on_unparseable_llm_output() -> None:
         FaqQuestionInput(id="q2", text="How do I reset my password?"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 2
     assert {g.count for g in groups} == {1}
@@ -141,7 +151,7 @@ def test_group_faqs_never_drops_an_id_the_model_omits() -> None:
         FaqQuestionInput(id="q2", text="How do I reset my password?"),
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 2
 
@@ -157,6 +167,7 @@ def test_group_faqs_attaches_documents_from_retrieval() -> None:
                 filename="vpn-setup.md",
                 text="How to get VPN access set up",
                 embedding=_VPN,
+                project_ids=(_PROJECT,),
             )
         ]
     )
@@ -177,7 +188,7 @@ def test_group_faqs_attaches_documents_from_retrieval() -> None:
 
     questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].documents == [
@@ -185,12 +196,73 @@ def test_group_faqs_attaches_documents_from_retrieval() -> None:
     ]
 
 
+def test_group_faqs_does_not_attach_another_projects_documents() -> None:
+    llm = _ScriptedFaqLLM(groups=[["q1"]])
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="doc_001",
+                filename="vpn-setup.md",
+                text="How to get VPN access set up",
+                embedding=_VPN,
+                project_ids=("project-2",),
+            )
+        ]
+    )
+    metadata_store = _metadata_store()
+
+    questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert len(groups) == 1
+    assert groups[0].documents == []
+
+
 def test_group_faqs_empty_input_returns_no_groups() -> None:
     llm = _ScriptedFaqLLM(groups=[])
     store = StubVectorStore()
     metadata_store = _metadata_store()
 
-    assert group_faqs([], llm, store, metadata_store) == []
+    assert group_faqs([], llm, store, metadata_store, project_id=_PROJECT) == []
+
+
+def test_group_faqs_keeps_every_asker_of_a_repeated_phrasing() -> None:
+    """A verbatim repeat is what makes a question recurring, so it must survive
+    the sampling — one phrasing, but every ask that used it."""
+    llm = _ScriptedFaqLLM(groups=[["q1", "q2", "q3"]])
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q2", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q3", text="Can someone enable VPN for me?"),
+    ]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert [q.ids for q in groups[0].questions] == [["q1", "q2"], ["q3"]]
+
+
+def test_group_faqs_caps_distinct_phrasings_not_asks() -> None:
+    """The cap limits how many wordings come back, not how many asks they
+    stand for — otherwise a heavily repeated question would look rare."""
+    ids = [f"q{i}" for i in range(8)]
+    llm = _ScriptedFaqLLM(groups=[ids])
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [
+        FaqQuestionInput(id=qid, text="How do I get VPN access?") for qid in ids
+    ]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert len(groups[0].questions) == 1
+    assert groups[0].questions[0].ids == ids
 
 
 def test_group_faqs_caps_sample_size_below_total_count() -> None:
@@ -204,11 +276,127 @@ def test_group_faqs_caps_sample_size_below_total_count() -> None:
         for qid, suffix in zip(ids, ["a", "b", "c", "d", "e", "f", "g"], strict=True)
     ]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].count == 7
     assert len(groups[0].questions) <= 5
+
+
+def test_group_faqs_titles_each_group() -> None:
+    llm = _ScriptedFaqLLM(
+        groups=[["q1"], ["q2"]],
+        titles=["Getting VPN access", "Starting the backend locally"],
+    )
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q2", text="How do I start the backend?"),
+    ]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    assert {g.question: g.title for g in groups} == {
+        "How do I get VPN access?": "Getting VPN access",
+        "How do I start the backend?": "Starting the backend locally",
+    }
+
+
+def test_group_faqs_falls_back_to_the_question_when_no_title_is_given() -> None:
+    llm = _ScriptedFaqLLM(groups=[["q1"]], titles=[" "])
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    # Wordy, but a PM can still tell what the entry is about — unlike an
+    # "Untitled" placeholder.
+    assert groups[0].title == "How do I get VPN access?"
+
+
+def test_group_faqs_titles_from_the_redacted_text_when_falling_back() -> None:
+    class _RedactingLLM(_ScriptedFaqLLM):
+        def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+            self._calls += 1
+            if self._calls == 1:
+                return self._grouping_response
+            payload = json.loads(messages[-1]["content"])  # type: ignore[index]
+            redacted = [t.replace("John Doe", "[NAME]") for t in payload["texts"]]
+            return json.dumps({"texts": redacted})
+
+    llm = _RedactingLLM(groups=[["q1"]], titles=[""])
+    store = StubVectorStore()
+    metadata_store = _metadata_store()
+
+    questions = [FaqQuestionInput(id="q1", text="Ask John Doe for VPN access")]
+
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
+
+    # The fallback title must not smuggle an unredacted name onto the dashboard.
+    assert groups[0].title == "Ask [NAME] for VPN access"
+
+
+def test_group_faqs_redacts_names_from_generated_titles() -> None:
+    """The title is written by the grouping model from the *raw* questions, so
+    it can carry the very name the samples had removed -- a title reading
+    "VPN access for John Doe" beside a sample reading "for [NAME]"."""
+
+    class _RedactingLLM(_ScriptedFaqLLM):
+        def generate(self, messages: list[dict[str, object]]) -> str:  # type: ignore[override]
+            self._calls += 1
+            if self._calls == 1:
+                return self._grouping_response
+            payload = json.loads(messages[-1]["content"])  # type: ignore[index]
+            redacted = [t.replace("John Doe", "[NAME]") for t in payload["texts"]]
+            return json.dumps({"texts": redacted})
+
+    llm = _RedactingLLM(groups=[["q1"]], titles=["VPN access for John Doe"])
+    questions = [FaqQuestionInput(id="q1", text="Ask John Doe for VPN access")]
+
+    groups = group_faqs(
+        questions, llm, StubVectorStore(), _metadata_store(), project_id=_PROJECT
+    )
+
+    assert groups[0].title == "VPN access for [NAME]"
+    assert groups[0].question == "Ask [NAME] for VPN access"
+
+
+def test_group_faqs_redacts_addresses_from_generated_titles() -> None:
+    """Structured redaction runs on titles even when the model is the thing
+    that failed -- redact_pii degrades to its regex pass, and the title has to
+    ride along with it."""
+    llm = _ScriptedFaqLLM(groups=[["q1"]], titles=["Mail admin@corp.example about VPN"])
+    questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
+
+    groups = group_faqs(
+        questions, llm, StubVectorStore(), _metadata_store(), project_id=_PROJECT
+    )
+
+    assert groups[0].title == "Mail [EMAIL] about VPN"
+
+
+def test_group_faqs_keeps_titles_aligned_with_their_own_group() -> None:
+    """Titles are appended to the same batched redaction call as the samples,
+    so an off-by-one in the slicing would hand a group someone else's title."""
+    llm = _ScriptedFaqLLM(
+        groups=[["q1", "q2"], ["q3"]], titles=["First topic", "Second topic"]
+    )
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q2", text="How do I request VPN?"),
+        FaqQuestionInput(id="q3", text="Where is the changelog?"),
+    ]
+
+    groups = group_faqs(
+        questions, llm, StubVectorStore(), _metadata_store(), project_id=_PROJECT
+    )
+
+    by_count = {g.count: g.title for g in groups}
+    assert by_count == {2: "First topic", 1: "Second topic"}
 
 
 def test_group_faqs_redacts_names_from_returned_questions() -> None:
@@ -227,8 +415,8 @@ def test_group_faqs_redacts_names_from_returned_questions() -> None:
 
     questions = [FaqQuestionInput(id="q_name", text="Ask John Doe for VPN access")]
 
-    groups = group_faqs(questions, llm, store, metadata_store)
+    groups = group_faqs(questions, llm, store, metadata_store, project_id=_PROJECT)
 
     assert len(groups) == 1
     assert groups[0].question == "Ask [NAME] for VPN access"
-    assert groups[0].questions == ["Ask [NAME] for VPN access"]
+    assert [q.text for q in groups[0].questions] == ["Ask [NAME] for VPN access"]

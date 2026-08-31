@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Any
 
+from ingestion.source_role import SourceRole
+from rag.source_filter import SourceExclusions
 from rag.types import (
     Chunk,
     RetrievalFilters,
@@ -22,6 +24,38 @@ def normalize_source_system(value: str | None) -> SourceSystem | None:
     return None
 
 
+_PROJECT_DELIMITER = "|"
+# Prefix of the per-project marker keys written into the chunk metadata. Chroma
+# metadata values cannot be lists, so membership is encoded as one boolean key
+# per project (``project:<uuid> = True``), which ``$eq`` can filter on
+# server-side. ``project_ids`` (a delimited string) carries the same
+# information in a form that can be read back into a ``Chunk``.
+PROJECT_METADATA_PREFIX = "project:"
+PROJECT_IDS_METADATA_KEY = "project_ids"
+
+
+def project_metadata_key(project_id: str) -> str:
+    return f"{PROJECT_METADATA_PREFIX}{project_id}"
+
+
+def encode_project_ids(project_ids: tuple[str, ...] | list[str]) -> str:
+    """Encode project ids as a delimited string, e.g. ``|uuid1|uuid2|``.
+
+    Empty input encodes to the empty string so "no projects" never looks like a
+    membership marker.
+    """
+    unique = list(dict.fromkeys(pid for pid in project_ids if pid))
+    if not unique:
+        return ""
+    return _PROJECT_DELIMITER + _PROJECT_DELIMITER.join(unique) + _PROJECT_DELIMITER
+
+
+def decode_project_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, str) or not value:
+        return ()
+    return tuple(part for part in value.split(_PROJECT_DELIMITER) if part)
+
+
 def timestamp_from_iso(value: str | None) -> float:
     parsed = _parse_timestamp(value)
     return parsed or 0.0
@@ -41,8 +75,30 @@ def matches_retrieval_filters(
     chunk: Chunk | ScoredChunk,
     filters: RetrievalFilters | None,
 ) -> bool:
+    """Whether ``chunk`` survives ``filters``.
+
+    The project rule is the one worth stating, and it is deliberately
+    fail-closed: material that belongs to **no** project is visible to **no**
+    project. A chunk ingested before the backend sent ``projectIds`` carries no
+    association, and stays unreachable until it is re-synced.
+    """
     if filters is None:
         return True
+
+    if filters.project_id is not None:
+        # Fail closed: a chunk that carries no project association at all (i.e.
+        # ingested before the backend sent projectIds) is not visible to any
+        # project. Re-sync via /ingest/sync to make it retrievable again.
+        if filters.project_id not in chunk.project_ids:
+            return False
+
+    if filters.project_ids is not None:
+        # Fail closed for the same reason, and note that the empty set admits
+        # nothing rather than everything: a caller that resolved a hire's
+        # projects and got none has established they may see nothing, which is
+        # not the same as not having asked.
+        if not any(pid in filters.project_ids for pid in chunk.project_ids):
+            return False
 
     if filters.source_systems:
         if chunk.source_system not in filters.source_systems:
@@ -69,28 +125,85 @@ def matches_retrieval_filters(
     return True
 
 
-def where_filter_for_chroma(filters: RetrievalFilters | None) -> Any | None:
-    if filters is None:
-        return None
+def where_filter_for_chroma(
+    filters: RetrievalFilters | None,
+    exclude_roles: frozenset[SourceRole] = frozenset(),
+    exclusions: SourceExclusions = SourceExclusions(),
+) -> Any | None:
+    """Translate every eligibility constraint into a Chroma ``where`` clause.
 
+    Everything expressible here is applied *before* Chroma limits to
+    ``n_results``, so ineligible chunks can never crowd eligible ones out of
+    the result window. Constraints left out of this clause would have to be
+    applied to an already-truncated list, which no amount of over-fetching
+    makes correct.
+
+    Chroma treats a document missing a metadata key as *matching* ``$ne``/
+    ``$nin``, which is exactly the legacy-chunk semantics the in-Python
+    predicates use: a chunk with no ``source_role``/``connector_id`` counts as
+    ``primary`` and is never source-excluded.
+    """
     conditions: list[dict[str, object]] = []
 
-    if filters.source_systems:
-        conditions.append({"source_system": {"$in": filters.source_systems}})
+    if filters is not None:
+        if filters.project_id is not None:
+            conditions.append({project_metadata_key(filters.project_id): {"$eq": True}})
 
-    has_time_filter = filters.time_from is not None or filters.time_to is not None
+        if filters.project_ids is not None:
+            # The per-project marker keys make membership in any of several
+            # projects an $or of $eq, so this pushes down like every other
+            # constraint rather than being left to the post-filter. Sorted so
+            # the clause is stable for the same set.
+            markers: list[dict[str, object]] = [
+                {project_metadata_key(pid): {"$eq": True}}
+                for pid in sorted(filters.project_ids)
+            ]
+            # An empty set admits nothing. Chroma has no "match nothing" literal,
+            # so it is left to the in-Python predicate, which rejects it.
+            if len(markers) == 1:
+                conditions.append(markers[0])
+            elif markers:
+                conditions.append({"$or": markers})
 
-    if has_time_filter:
-        conditions.append({"created_at_ts": {"$gt": 0.0}})
+        if filters.source_systems:
+            conditions.append({"source_system": {"$in": filters.source_systems}})
 
-    if filters.time_from is not None:
+        has_time_filter = filters.time_from is not None or filters.time_to is not None
+
+        if has_time_filter:
+            conditions.append({"created_at_ts": {"$gt": 0.0}})
+
+        if filters.time_from is not None:
+            conditions.append(
+                {"created_at_ts": {"$gte": timestamp_from_iso(filters.time_from)}}
+            )
+
+        if filters.time_to is not None:
+            conditions.append(
+                {"created_at_ts": {"$lte": timestamp_from_iso(filters.time_to)}}
+            )
+
+    if exclude_roles:
+        conditions.append({"source_role": {"$nin": sorted(exclude_roles)}})
+
+    # A chunk with no connector is stored with ``connector_id: ""`` and is never
+    # excluded, so the empty id must never reach a $nin list.
+    excluded_connectors = sorted(c for c in exclusions.connectors if c)
+    if excluded_connectors:
+        conditions.append({"connector_id": {"$nin": excluded_connectors}})
+
+    for connector_id, source_id in sorted(exclusions.sources):
+        if not connector_id or not source_id:
+            continue
+        # NOT(connector_id == c AND connector_source_id == s), so a chunk from
+        # the same connector but a different source stays eligible.
         conditions.append(
-            {"created_at_ts": {"$gte": timestamp_from_iso(filters.time_from)}}
-        )
-
-    if filters.time_to is not None:
-        conditions.append(
-            {"created_at_ts": {"$lte": timestamp_from_iso(filters.time_to)}}
+            {
+                "$or": [
+                    {"connector_id": {"$ne": connector_id}},
+                    {"connector_source_id": {"$ne": source_id}},
+                ]
+            }
         )
 
     if not conditions:

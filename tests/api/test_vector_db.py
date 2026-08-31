@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from api.app import app
 from api.dependencies import get_llm, get_store
-from llm.base import Message
+from llm.base import LLMStreamEvent, Message, TextDelta
 from rag.types import Chunk, ScoredChunk
 
 
@@ -90,9 +90,6 @@ class StubVectorStore:
     def count_by_artifact(self, artifact_id: str) -> int:
         return len([chunk for chunk in self.chunks if chunk.artifact_id == artifact_id])
 
-    def all_chunks(self) -> list[Chunk]:
-        return self.chunks
-
     def count(self) -> int:
         return len(self.chunks)
 
@@ -101,8 +98,8 @@ class StubLLMClient:
     def generate(self, messages: list[Message]) -> str:
         return "answer"
 
-    def stream(self, messages: list[Message]) -> Iterable[str]:
-        yield "answer"
+    def stream(self, messages: list[Message]) -> Iterable[LLMStreamEvent]:
+        yield TextDelta("answer")
 
     def embed(self, text: str) -> list[float]:
         return [1.0, 0.0, 0.0]
