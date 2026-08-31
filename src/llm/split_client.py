@@ -1,6 +1,13 @@
 from collections.abc import Iterator
 
-from llm.base import ChatResult, LLMClient, LLMStreamEvent, Message, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMChatStreamEvent,
+    LLMClient,
+    LLMStreamEvent,
+    Message,
+    ToolSpec,
+)
 
 
 class SplitLLMClient(LLMClient):
@@ -16,6 +23,11 @@ class SplitLLMClient(LLMClient):
         self, messages: list[Message], tools: list[ToolSpec] | None = None
     ) -> ChatResult:
         return self._chat.chat(messages, tools)
+
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        return self._chat.chat_stream(messages, tools)
 
     def generate(
         self, messages: list[Message], *, temperature: float | None = None

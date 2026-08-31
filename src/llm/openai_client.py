@@ -18,6 +18,7 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
 from llm.base import (
     ChatResult,
+    LLMChatStreamEvent,
     LLMClient,
     LLMStreamEvent,
     Message,
@@ -27,7 +28,11 @@ from llm.base import (
     ToolSpec,
 )
 from llm.errors import LLMUnavailableError
-from llm.tool_call_recovery import guard_event_stream, recover_tool_calls
+from llm.tool_call_recovery import (
+    GuardedTextCollector,
+    guard_event_stream,
+    recover_tool_calls,
+)
 
 
 def _to_openai_tools(tools: list[ToolSpec]) -> list[ChatCompletionToolParam]:
@@ -316,6 +321,124 @@ class OpenAIClient(LLMClient):
             tool_calls=calls,
             reasoning=reasoning,
             reasoning_details=reasoning_details,
+        )
+
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        """Stream one tool-decision turn with live reasoning and answer deltas.
+
+        Mirrors the parameter shape of the buffered tool-mode ``chat`` (reasoning
+        budget + ``max_tokens`` only when a reasoning model is configured) rather
+        than the plain-answer ``_stream_raw`` parameter set, because only that
+        combination is exercised against the hosted providers.
+        """
+        # Tools present: replicate the buffered tool-mode call shape exactly —
+        # providers reject the plain-stream parameter combination on tool turns.
+        reasoning_enabled = bool(tools) and self.reasoning_max_tokens is not None
+
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.chat_model,
+                messages=_to_openai_messages(messages),
+                max_tokens=(
+                    self.max_tokens
+                    if reasoning_enabled and self.max_tokens is not None
+                    else omit
+                ),
+                tools=_to_openai_tools(tools) if tools else omit,
+                stream=True,
+                stream_options={"include_usage": True},
+                extra_body=self._reasoning_extra_body() if reasoning_enabled else None,
+            )
+        except OpenAIError as exc:
+            raise LLMUnavailableError(
+                "OpenAI-compatible backend unavailable during streaming chat "
+                f"using model {self.chat_model!r} at {self.base_url}: {exc}"
+            ) from exc
+
+        collector = GuardedTextCollector()
+        fragments: list[dict[str, object]] = []
+        calls: dict[int, dict[str, object]] = {}
+
+        try:
+            for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                delta = choice.delta if choice else None
+                if delta is None:
+                    continue
+
+                for fragment in _reasoning_text(delta):
+                    collector.add_reasoning(fragment)
+                    yield ReasoningDelta(fragment)
+
+                content = delta.content
+                if content:
+                    visible = collector.add_text(content)
+                    if visible:
+                        yield TextDelta(visible)
+
+                for tc in delta.tool_calls or []:
+                    slot = calls.setdefault(
+                        tc.index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    if tc.id:
+                        slot["id"] = str(tc.id)
+                    if tc.function and tc.function.name:
+                        slot["name"] = str(tc.function.name)
+                    if tc.function and tc.function.arguments:
+                        slot["arguments"] = str(slot["arguments"]) + str(
+                            tc.function.arguments
+                        )
+        except OpenAIError as exc:
+            raise LLMUnavailableError(
+                "OpenAI-compatible backend unavailable during streaming chat "
+                f"using model {self.chat_model!r} at {self.base_url}: {exc}"
+            ) from exc
+
+        structured = [
+            ToolCall(
+                id=str(slot["id"]) or f"call_{index}",
+                name=str(slot["name"]),
+                arguments=_loads_arguments(str(slot["arguments"])),
+            )
+            for index, slot in sorted(calls.items())
+        ]
+        # Release whatever the leak guard was still holding back (partial-marker
+        # tail of a plain answer). Never re-emit full_content here: when the
+        # guard cut markup and recovery found nothing, that text must stay cut.
+        tail = collector.flush_visible()
+        if tail:
+            yield TextDelta(tail)
+        reasoning = collector.finish()[2]
+
+        if structured:
+            # Structured calls won: buffered parity — content returned raw
+            # (any markup leak stays in the result text for the model context).
+            yield ChatResult(
+                text=collector.full_content,
+                tool_calls=structured,
+                reasoning=reasoning or None,
+                reasoning_details=fragments,
+            )
+            return
+
+        recovered, cleaned, _ = collector.finish()
+        if recovered:
+            yield ChatResult(
+                text=cleaned,
+                tool_calls=recovered,
+                reasoning=reasoning or None,
+                reasoning_details=fragments,
+            )
+            return
+
+        yield ChatResult(
+            text=collector.full_content,
+            tool_calls=[],
+            reasoning=reasoning or None,
+            reasoning_details=fragments,
         )
 
     def generate(
