@@ -183,6 +183,75 @@ def _reasoning_text(delta: ChoiceDelta) -> list[str]:
     return fragments
 
 
+# Fields whose payload a provider streams in pieces; every other field is a
+# per-block constant that the last delta carrying it wins.
+_DETAIL_PAYLOAD_FIELDS = ("text", "summary", "data")
+
+
+def _reasoning_detail_fragments(delta: ChoiceDelta) -> list[dict[str, object]]:
+    """Return the structured reasoning blocks carried by one stream delta.
+
+    The plain-text channel ``_reasoning_text`` normalizes is what gets *shown*;
+    it is not what a provider accepts back. OpenRouter requires the structured
+    sequence verbatim on the turn after a tool call (the hotfix #170 bug class),
+    so the streaming path has to capture these as well — for signed or encrypted
+    blocks they are the only preservable form.
+    """
+    details = getattr(delta, "reasoning_details", None)
+    if not isinstance(details, list):
+        return []
+
+    fragments: list[dict[str, object]] = []
+    for detail in cast("list[object]", details):
+        if isinstance(detail, dict):
+            fragments.append(dict(cast("dict[str, object]", detail)))
+            continue
+        dump = getattr(detail, "model_dump", None)
+        if callable(dump):
+            fragments.append(cast("dict[str, object]", dump()))
+    return fragments
+
+
+def _merge_reasoning_details(
+    fragments: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Reassemble streamed reasoning fragments into whole blocks.
+
+    A block's payload arrives across several deltas that all carry the same
+    ``index``; the buffered response contains only the assembled block, and that
+    is what the provider validates on the follow-up turn. Echoing the raw
+    fragments back would replay one signed block as a dozen partial ones.
+    Providers that omit ``index`` are grouped by block id and then by type, so a
+    single reasoning channel is not split into fragment-sized blocks either.
+    """
+    blocks: dict[tuple[str, str], dict[str, object]] = {}
+    order: list[tuple[str, str]] = []
+
+    for position, fragment in enumerate(fragments):
+        key = next(
+            (
+                (field, str(fragment[field]))
+                for field in ("index", "id", "type")
+                if fragment.get(field) is not None
+            ),
+            ("position", str(position)),
+        )
+        block = blocks.get(key)
+        if block is None:
+            block = {}
+            blocks[key] = block
+            order.append(key)
+
+        for field, value in fragment.items():
+            if field in _DETAIL_PAYLOAD_FIELDS and isinstance(value, str):
+                previous = block.get(field)
+                block[field] = (previous if isinstance(previous, str) else "") + value
+            elif value is not None:
+                block[field] = value
+
+    return [blocks[key] for key in order]
+
+
 def _response_reasoning(
     message: ChatCompletionMessage,
 ) -> tuple[str | None, list[dict[str, object]]]:
@@ -358,7 +427,7 @@ class OpenAIClient(LLMClient):
             ) from exc
 
         collector = GuardedTextCollector()
-        fragments: list[dict[str, object]] = []
+        detail_fragments: list[dict[str, object]] = []
         calls: dict[int, dict[str, object]] = {}
 
         try:
@@ -371,6 +440,8 @@ class OpenAIClient(LLMClient):
                 for fragment in _reasoning_text(delta):
                     collector.add_reasoning(fragment)
                     yield ReasoningDelta(fragment)
+
+                detail_fragments.extend(_reasoning_detail_fragments(delta))
 
                 content = delta.content
                 if content:
@@ -412,6 +483,7 @@ class OpenAIClient(LLMClient):
         if tail:
             yield TextDelta(tail)
         reasoning = collector.finish()[2]
+        details = _merge_reasoning_details(detail_fragments)
 
         if structured:
             # Structured calls won: buffered parity — content returned raw
@@ -420,7 +492,7 @@ class OpenAIClient(LLMClient):
                 text=collector.full_content,
                 tool_calls=structured,
                 reasoning=reasoning or None,
-                reasoning_details=fragments,
+                reasoning_details=details,
             )
             return
 
@@ -430,7 +502,7 @@ class OpenAIClient(LLMClient):
                 text=cleaned,
                 tool_calls=recovered,
                 reasoning=reasoning or None,
-                reasoning_details=fragments,
+                reasoning_details=details,
             )
             return
 
@@ -438,7 +510,7 @@ class OpenAIClient(LLMClient):
             text=collector.full_content,
             tool_calls=[],
             reasoning=reasoning or None,
-            reasoning_details=fragments,
+            reasoning_details=details,
         )
 
     def generate(
