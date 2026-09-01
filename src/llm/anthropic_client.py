@@ -1,6 +1,7 @@
 import base64
+import json
 from collections.abc import Iterator
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from anthropic import NOT_GIVEN, Anthropic, APIError, Omit, omit
 from anthropic.types import (
@@ -17,6 +18,7 @@ from anthropic.types.tool_param import InputSchema
 
 from llm.base import (
     ChatResult,
+    LLMChatStreamEvent,
     LLMClient,
     LLMStreamEvent,
     Message,
@@ -250,6 +252,89 @@ class AnthropicClient(LLMClient):
                     )
                 )
         return ChatResult(text="".join(text_parts), tool_calls=calls)
+
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        """Stream one tool-decision turn with live reasoning and answer deltas.
+
+        Mirrors the buffered tool-mode ``chat`` parameter shape: tools are sent,
+        thinking is not. Extended thinking plus tools would require signed
+        thinking blocks to round-trip through the conversation history — the
+        plain-answer ``stream`` path has no tool loop, so its history shape
+        cannot carry them. Yields thinking deltas when a thinking budget is
+        configured, and tool calls accumulate from ``input_json_delta``.
+        """
+        system, converted = _to_anthropic_messages(messages)
+        # Same guard as `stream`: budget None must leave the parameter unset
+        # (None disables the timeout/feature rather than meaning "default").
+        # Tools additionally force thinking off: the assistant turn would come
+        # back with thinking blocks that the buffered `chat` history shape
+        # cannot carry signed into the follow-up request, which the API rejects.
+        thinking: ThinkingConfigEnabledParam | Omit = (
+            {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget_tokens,
+            }
+            if self.thinking_budget_tokens is not None and not tools
+            else omit
+        )
+        try:
+            with self.client.messages.stream(
+                model=self.chat_model,
+                max_tokens=self.max_tokens,
+                system=system,
+                messages=converted,
+                tools=_to_anthropic_tools(tools) if tools else omit,
+                thinking=thinking,
+            ) as stream:
+                text_parts: list[str] = []
+                calls: list[ToolCall] = []
+                current_tool: tuple[str, str] | None = None
+                tool_input: list[str] = []
+                for event in stream:
+                    if event.type == "content_block_start":
+                        block = cast("Any", event).content_block
+                        if block.type == "tool_use":
+                            current_tool = (block.id, block.name)
+                            tool_input = []
+                    elif event.type == "content_block_delta":
+                        delta = cast("Any", event).delta
+                        if delta.type == "thinking_delta":
+                            if delta.thinking.strip():
+                                yield ReasoningDelta(delta.thinking)
+                        elif delta.type == "text_delta" and delta.text:
+                            text_parts.append(delta.text)
+                            yield TextDelta(delta.text)
+                        elif delta.type == "input_json_delta" and current_tool:
+                            tool_input.append(delta.partial_json)
+                    elif (
+                        event.type == "content_block_stop" and current_tool is not None
+                    ):
+                        raw = "".join(tool_input) or "{}"
+                        try:
+                            parsed = json.loads(raw)
+                        except json.JSONDecodeError:
+                            parsed = {}
+                        calls.append(
+                            ToolCall(
+                                id=current_tool[0],
+                                name=current_tool[1],
+                                arguments=cast("dict[str, object]", parsed),
+                            )
+                        )
+                        current_tool = None
+                        tool_input = []
+        except APIError as exc:
+            raise LLMUnavailableError(
+                "Anthropic backend unavailable during streaming chat "
+                f"using model {self.chat_model!r}: {exc}"
+            ) from exc
+
+        yield ChatResult(
+            text="".join(text_parts),
+            tool_calls=calls,
+        )
 
     def generate(
         self, messages: list[Message], *, temperature: float | None = None

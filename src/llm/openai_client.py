@@ -18,6 +18,7 @@ from openai.types.chat.chat_completion_chunk import ChoiceDelta
 
 from llm.base import (
     ChatResult,
+    LLMChatStreamEvent,
     LLMClient,
     LLMStreamEvent,
     Message,
@@ -27,7 +28,11 @@ from llm.base import (
     ToolSpec,
 )
 from llm.errors import LLMUnavailableError
-from llm.tool_call_recovery import guard_event_stream, recover_tool_calls
+from llm.tool_call_recovery import (
+    GuardedTextCollector,
+    guard_event_stream,
+    recover_tool_calls,
+)
 
 
 def _to_openai_tools(tools: list[ToolSpec]) -> list[ChatCompletionToolParam]:
@@ -178,6 +183,75 @@ def _reasoning_text(delta: ChoiceDelta) -> list[str]:
     return fragments
 
 
+# Fields whose payload a provider streams in pieces; every other field is a
+# per-block constant that the last delta carrying it wins.
+_DETAIL_PAYLOAD_FIELDS = ("text", "summary", "data")
+
+
+def _reasoning_detail_fragments(delta: ChoiceDelta) -> list[dict[str, object]]:
+    """Return the structured reasoning blocks carried by one stream delta.
+
+    The plain-text channel ``_reasoning_text`` normalizes is what gets *shown*;
+    it is not what a provider accepts back. OpenRouter requires the structured
+    sequence verbatim on the turn after a tool call (the hotfix #170 bug class),
+    so the streaming path has to capture these as well — for signed or encrypted
+    blocks they are the only preservable form.
+    """
+    details = getattr(delta, "reasoning_details", None)
+    if not isinstance(details, list):
+        return []
+
+    fragments: list[dict[str, object]] = []
+    for detail in cast("list[object]", details):
+        if isinstance(detail, dict):
+            fragments.append(dict(cast("dict[str, object]", detail)))
+            continue
+        dump = getattr(detail, "model_dump", None)
+        if callable(dump):
+            fragments.append(cast("dict[str, object]", dump()))
+    return fragments
+
+
+def _merge_reasoning_details(
+    fragments: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Reassemble streamed reasoning fragments into whole blocks.
+
+    A block's payload arrives across several deltas that all carry the same
+    ``index``; the buffered response contains only the assembled block, and that
+    is what the provider validates on the follow-up turn. Echoing the raw
+    fragments back would replay one signed block as a dozen partial ones.
+    Providers that omit ``index`` are grouped by block id and then by type, so a
+    single reasoning channel is not split into fragment-sized blocks either.
+    """
+    blocks: dict[tuple[str, str], dict[str, object]] = {}
+    order: list[tuple[str, str]] = []
+
+    for position, fragment in enumerate(fragments):
+        key = next(
+            (
+                (field, str(fragment[field]))
+                for field in ("index", "id", "type")
+                if fragment.get(field) is not None
+            ),
+            ("position", str(position)),
+        )
+        block = blocks.get(key)
+        if block is None:
+            block = {}
+            blocks[key] = block
+            order.append(key)
+
+        for field, value in fragment.items():
+            if field in _DETAIL_PAYLOAD_FIELDS and isinstance(value, str):
+                previous = block.get(field)
+                block[field] = (previous if isinstance(previous, str) else "") + value
+            elif value is not None:
+                block[field] = value
+
+    return [blocks[key] for key in order]
+
+
 def _response_reasoning(
     message: ChatCompletionMessage,
 ) -> tuple[str | None, list[dict[str, object]]]:
@@ -316,6 +390,127 @@ class OpenAIClient(LLMClient):
             tool_calls=calls,
             reasoning=reasoning,
             reasoning_details=reasoning_details,
+        )
+
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        """Stream one tool-decision turn with live reasoning and answer deltas.
+
+        Mirrors the parameter shape of the buffered tool-mode ``chat`` (reasoning
+        budget + ``max_tokens`` only when a reasoning model is configured) rather
+        than the plain-answer ``_stream_raw`` parameter set, because only that
+        combination is exercised against the hosted providers.
+        """
+        # Tools present: replicate the buffered tool-mode call shape exactly —
+        # providers reject the plain-stream parameter combination on tool turns.
+        reasoning_enabled = bool(tools) and self.reasoning_max_tokens is not None
+
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.chat_model,
+                messages=_to_openai_messages(messages),
+                max_tokens=(
+                    self.max_tokens
+                    if reasoning_enabled and self.max_tokens is not None
+                    else omit
+                ),
+                tools=_to_openai_tools(tools) if tools else omit,
+                stream=True,
+                stream_options={"include_usage": True},
+                extra_body=self._reasoning_extra_body() if reasoning_enabled else None,
+            )
+        except OpenAIError as exc:
+            raise LLMUnavailableError(
+                "OpenAI-compatible backend unavailable during streaming chat "
+                f"using model {self.chat_model!r} at {self.base_url}: {exc}"
+            ) from exc
+
+        collector = GuardedTextCollector()
+        detail_fragments: list[dict[str, object]] = []
+        calls: dict[int, dict[str, object]] = {}
+
+        try:
+            for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                delta = choice.delta if choice else None
+                if delta is None:
+                    continue
+
+                for fragment in _reasoning_text(delta):
+                    collector.add_reasoning(fragment)
+                    yield ReasoningDelta(fragment)
+
+                detail_fragments.extend(_reasoning_detail_fragments(delta))
+
+                content = delta.content
+                if content:
+                    visible = collector.add_text(content)
+                    if visible:
+                        yield TextDelta(visible)
+
+                for tc in delta.tool_calls or []:
+                    slot = calls.setdefault(
+                        tc.index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    if tc.id:
+                        slot["id"] = str(tc.id)
+                    if tc.function and tc.function.name:
+                        slot["name"] = str(tc.function.name)
+                    if tc.function and tc.function.arguments:
+                        slot["arguments"] = str(slot["arguments"]) + str(
+                            tc.function.arguments
+                        )
+        except OpenAIError as exc:
+            raise LLMUnavailableError(
+                "OpenAI-compatible backend unavailable during streaming chat "
+                f"using model {self.chat_model!r} at {self.base_url}: {exc}"
+            ) from exc
+
+        structured = [
+            ToolCall(
+                id=str(slot["id"]) or f"call_{index}",
+                name=str(slot["name"]),
+                arguments=_loads_arguments(str(slot["arguments"])),
+            )
+            for index, slot in sorted(calls.items())
+        ]
+        # Release whatever the leak guard was still holding back (partial-marker
+        # tail of a plain answer). Never re-emit full_content here: when the
+        # guard cut markup and recovery found nothing, that text must stay cut.
+        tail = collector.flush_visible()
+        if tail:
+            yield TextDelta(tail)
+        reasoning = collector.finish()[2]
+        details = _merge_reasoning_details(detail_fragments)
+
+        if structured:
+            # Structured calls won: buffered parity — content returned raw
+            # (any markup leak stays in the result text for the model context).
+            yield ChatResult(
+                text=collector.full_content,
+                tool_calls=structured,
+                reasoning=reasoning or None,
+                reasoning_details=details,
+            )
+            return
+
+        recovered, cleaned, _ = collector.finish()
+        if recovered:
+            yield ChatResult(
+                text=cleaned,
+                tool_calls=recovered,
+                reasoning=reasoning or None,
+                reasoning_details=details,
+            )
+            return
+
+        yield ChatResult(
+            text=collector.full_content,
+            tool_calls=[],
+            reasoning=reasoning or None,
+            reasoning_details=details,
         )
 
     def generate(
