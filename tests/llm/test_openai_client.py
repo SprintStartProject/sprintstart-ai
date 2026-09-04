@@ -4,14 +4,19 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from llm.base import Message, ToolSpec
+from llm.base import Message, ReasoningDelta, TextDelta, ToolSpec
 from llm.errors import LLMUnavailableError
 from llm.openai_client import OpenAIClient
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
-def make_client(handler: Handler) -> OpenAIClient:
+def make_client(
+    handler: Handler,
+    *,
+    max_tokens: int | None = None,
+    reasoning_max_tokens: int | None = None,
+) -> OpenAIClient:
     transport = httpx.MockTransport(handler)
     http_client = httpx.Client(transport=transport)
 
@@ -22,6 +27,8 @@ def make_client(handler: Handler) -> OpenAIClient:
         embed_model="embed-model",
         vision_model="vision-model",
         http_client=http_client,
+        max_tokens=max_tokens,
+        reasoning_max_tokens=reasoning_max_tokens,
     )
 
 
@@ -63,6 +70,8 @@ def test_stream_yields_tokens() -> None:
 
         body = json.loads(request.content)
         assert body["stream"] is True
+        assert "max_tokens" not in body
+        assert "reasoning" not in body
 
         first_chunk = {
             "id": "1",
@@ -101,7 +110,129 @@ def test_stream_yields_tokens() -> None:
 
     client = make_client(handler)
 
-    assert list(client.stream([Message(role="user", content="Hello")])) == ["Hel", "lo"]
+    assert list(client.stream([Message(role="user", content="Hello")])) == [
+        TextDelta("Hel"),
+        TextDelta("lo"),
+    ]
+
+
+def test_stream_normalizes_reasoning_shapes_and_skips_malformed_deltas() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {
+                "reasoning": "Current field.",
+                "reasoning_content": "Must not be duplicated.",
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "Must not be duplicated."}
+                ],
+            },
+            {"reasoning_content": "Legacy field."},
+            {
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "Structured text."},
+                    {"type": "reasoning.summary", "summary": "Structured summary."},
+                ]
+            },
+            {"reasoning": ""},
+            {"reasoning_content": 42},
+            {"reasoning_details": [{"type": "reasoning.text", "text": 42}]},
+            {"content": "Answer."},
+        ]
+        stream_body = (
+            "".join(
+                "data: "
+                + json.dumps(
+                    {
+                        "id": "1",
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {"index": 0, "delta": delta, "finish_reason": None}
+                        ],
+                    }
+                )
+                + "\n\n"
+                for delta in chunks
+            )
+            + "data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=stream_body,
+        )
+
+    client = make_client(handler)
+
+    assert list(client.stream([Message(role="user", content="Hello")])) == [
+        ReasoningDelta("Current field."),
+        ReasoningDelta("Legacy field."),
+        ReasoningDelta("Structured text."),
+        ReasoningDelta("Structured summary."),
+        TextDelta("Answer."),
+    ]
+
+
+def test_stream_requests_reasoning_with_separate_output_budget() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        assert body["max_tokens"] == 4096
+        assert body["reasoning"] == {"max_tokens": 1024, "exclude": False}
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="data: [DONE]\n\n",
+        )
+
+    client = make_client(
+        handler,
+        max_tokens=4096,
+        reasoning_max_tokens=1024,
+    )
+
+    assert list(client.stream([Message(role="user", content="Hello")])) == []
+
+
+def test_reasoning_settings_do_not_affect_non_streaming_calls() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "max_tokens" not in body
+        assert "reasoning" not in body
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    client = make_client(
+        handler,
+        max_tokens=4096,
+        reasoning_max_tokens=1024,
+    )
+
+    assert client.generate([Message(role="user", content="Hello")]) == "done"
+    assert client.chat([Message(role="user", content="Hello")]).text == "done"
+
+
+def test_reasoning_budget_must_be_lower_than_output_budget() -> None:
+    with pytest.raises(ValueError, match="must be lower than max_tokens"):
+        OpenAIClient(
+            base_url="http://openai-compatible.test/v1",
+            api_key="test-key",
+            chat_model="chat-model",
+            embed_model=None,
+            max_tokens=1024,
+            reasoning_max_tokens=1024,
+        )
 
 
 def test_embed_uses_embeddings_endpoint() -> None:
@@ -263,6 +394,186 @@ _TOOL_SPEC: ToolSpec = {
     "description": "search",
     "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
 }
+
+
+def test_tool_chat_preserves_reasoning_context_for_final_stream() -> None:
+    reasoning_details: list[dict[str, object]] = [
+        {
+            "type": "reasoning.text",
+            "text": "Choosing the repository search.",
+            "signature": "signed-context",
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("stream") is True:
+            assistant = body["messages"][1]
+            # Structured details are the signed form, so plaintext reasoning is
+            # dropped to avoid sending both preservation formats at once.
+            assert assistant["reasoning_details"] == reasoning_details
+            assert "reasoning" not in assistant
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    "data: "
+                    + json.dumps(
+                        {
+                            "id": "2",
+                            "object": "chat.completion.chunk",
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": "Final answer."},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                    )
+                    + "\n\ndata: [DONE]\n\n"
+                ),
+            )
+
+        assert body["max_tokens"] == 4096
+        assert body["reasoning"] == {"max_tokens": 1024, "exclude": False}
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-tool",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning": "Choosing a search.",
+                            "reasoning_details": reasoning_details,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "retrieve",
+                                        "arguments": (
+                                            '{"query": "frontend architecture"}'
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+    client = make_client(
+        handler,
+        max_tokens=4096,
+        reasoning_max_tokens=1024,
+    )
+    messages = [Message(role="user", content="Explain the frontend architecture.")]
+
+    result = client.chat(messages, tools=[_TOOL_SPEC])
+
+    assert result.reasoning == "Choosing a search."
+    assert result.reasoning_details == reasoning_details
+    messages.append(
+        Message(
+            role="assistant",
+            content=result.text,
+            tool_calls=result.tool_calls,
+            reasoning=result.reasoning or "",
+            reasoning_details=result.reasoning_details,
+        )
+    )
+    messages.append(
+        Message(
+            role="tool",
+            content="The frontend uses React context.",
+            tool_call_id=result.tool_calls[0].id,
+            name="retrieve",
+        )
+    )
+
+    assert list(client.stream(messages)) == [TextDelta("Final answer.")]
+
+
+def test_tool_chat_normalizes_legacy_reasoning_content_field() -> None:
+    """Legacy OpenAI-compatible backends expose the channel as
+    reasoning_content on the non-streaming tool response. It must be captured
+    like the streaming path and forwarded as plaintext reasoning when no
+    structured details exist."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("stream") is True:
+            assistant = body["messages"][1]
+            assert assistant["reasoning"] == "Legacy thinking."
+            assert "reasoning_details" not in assistant
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content="data: [DONE]\n\n",
+            )
+
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-legacy",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": "Legacy thinking.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "retrieve",
+                                        "arguments": '{"query": "architecture"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+    client = make_client(handler)
+    messages = [Message(role="user", content="Explain the architecture.")]
+
+    result = client.chat(messages, tools=[_TOOL_SPEC])
+
+    assert result.reasoning == "Legacy thinking."
+    assert result.reasoning_details == []
+    messages.append(
+        Message(
+            role="assistant",
+            content=result.text,
+            tool_calls=result.tool_calls,
+            reasoning=result.reasoning or "",
+            reasoning_details=result.reasoning_details,
+        )
+    )
+    messages.append(
+        Message(
+            role="tool",
+            content="The service is layered.",
+            tool_call_id=result.tool_calls[0].id,
+            name="retrieve",
+        )
+    )
+
+    assert list(client.stream(messages)) == []
 
 
 def test_chat_sends_tools_and_parses_tool_calls() -> None:

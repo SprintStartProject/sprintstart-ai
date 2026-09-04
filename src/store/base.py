@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Protocol
 
 from ingestion.source_role import SourceRole
@@ -44,9 +45,9 @@ class VectorStore(Protocol):
 
     def count_by_artifact(self, artifact_id: str) -> int: ...
 
-    def all_chunks(self) -> list[Chunk]: ...
-
     def all_chunks_without_embeddings(self) -> list[Chunk]: ...
+
+    def iter_chunks_without_embeddings(self) -> Iterator[Chunk]: ...
 
     def list_chunks_without_embeddings(
         self, limit: int, offset: int = 0

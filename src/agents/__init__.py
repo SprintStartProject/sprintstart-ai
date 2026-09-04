@@ -1,4 +1,4 @@
-from agents.chat_agent import ChatAgent, ChatEvent, Evidence, Token
+from agents.chat_agent import ChatAgent, ChatEvent, Evidence, Reasoning, Token
 from agents.orchestrator import ChatOrchestrator
 
 __all__ = [
@@ -6,5 +6,6 @@ __all__ = [
     "ChatEvent",
     "ChatOrchestrator",
     "Evidence",
+    "Reasoning",
     "Token",
 ]

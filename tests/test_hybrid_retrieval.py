@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from src.ingestion.source_role import SourceRole
+from src.rag import hybrid as hybrid_module
 from src.rag.hybrid import (
     BM25IndexCache,
     hybrid_retrieve,
@@ -569,6 +570,7 @@ class NonPushdownStore(StubVectorStore):
     def __init__(self) -> None:
         super().__init__()
         self.query_calls = 0
+        self.query_top_ks: list[int] = []
 
     def query(
         self,
@@ -580,6 +582,7 @@ class NonPushdownStore(StubVectorStore):
         exclusions: SourceExclusions = SourceExclusions(),
     ) -> list[ScoredChunk]:
         self.query_calls += 1
+        self.query_top_ks.append(top_k)
         return super().query(
             embedding=embedding,
             top_k=top_k,
@@ -660,6 +663,29 @@ def test_semantic_only_path_finds_eligible_chunk_behind_excluded_ones() -> None:
     )
 
     assert [chunk.id for chunk in result] == ["eligible"]
+
+
+def test_semantic_widening_stops_at_bounded_query_size(monkeypatch) -> None:
+    class LargeNonPushdownStore(NonPushdownStore):
+        def count(self) -> int:
+            return 32_767
+
+    monkeypatch.setattr(hybrid_module, "_MAX_QUERY_N", 8)
+    store = LargeNonPushdownStore()
+    _crowded_corpus(store, excluded_count=20)
+
+    result = hybrid_retrieve(
+        question="deployment runbook rollback",
+        llm=StubLLMClient(embedding=[1.0, 0.0]),
+        store=store,
+        top_k=3,
+        min_score=0.0,
+        bm25_cache=BM25IndexCache(),
+        exclude_roles=frozenset({"test", "primary"}),
+    )
+
+    assert result == []
+    assert store.query_top_ks == [3, 6, 8]
 
 
 def test_disabled_source_cannot_crowd_out_eligible_chunk() -> None:

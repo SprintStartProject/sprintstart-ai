@@ -1,10 +1,11 @@
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any, cast
 
 import chromadb
 import chromadb.api
-from chromadb.api.types import Metadata, PyEmbeddings
+from chromadb.api.types import Metadata, PyEmbeddings, Where
 from chromadb.config import Settings
 
 from ingestion.source_role import SourceRole
@@ -21,19 +22,39 @@ from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
 
 _NO_POSITION: int = -1
+# Keep every Chroma ``get`` comfortably below SQLite's 32,766 bind-variable
+# ceiling. A page includes ids, documents, and metadata, so using the backend
+# ceiling itself would still be too large once Chroma hydrates those records.
+_MAX_GET_PAGE: int = 10_000
 
 _CLIENT_CACHE: dict[str, chromadb.api.ClientAPI] = {}
+_CLIENT_CACHE_LOCK = threading.Lock()
 
 
 def _get_persistent_client(path: str) -> chromadb.api.ClientAPI:
-    if path not in _CLIENT_CACHE:
+    client = _CLIENT_CACHE.get(path)
+    if client is not None:
+        return client
+
+    # FastAPI resolves synchronous dependencies in a thread pool, so the first
+    # chat and its asynchronous analytics fan-out can arrive here together.
+    # Chroma's PersistentClient instances share process-wide, refcounted state;
+    # constructing two for one path concurrently can make one failed init tear
+    # down the other's system. Re-check inside the lock so exactly one thread
+    # constructs and publishes the client.
+    with _CLIENT_CACHE_LOCK:
+        client = _CLIENT_CACHE.get(path)
+        if client is not None:
+            return client
+
         settings = Settings(
             anonymized_telemetry=False,
             is_persistent=True,
             allow_reset=True,
         )
-        _CLIENT_CACHE[path] = chromadb.PersistentClient(path=path, settings=settings)
-    return _CLIENT_CACHE[path]
+        client = chromadb.PersistentClient(path=path, settings=settings)
+        _CLIENT_CACHE[path] = client
+        return client
 
 
 class ChromaVectorStore:
@@ -246,17 +267,23 @@ class ChromaVectorStore:
         )
         return len(raw_result["ids"])
 
-    def all_chunks(self) -> list[Chunk]:
-        raw_result = self._collection.get(
-            include=["documents", "metadatas", "embeddings"],
-        )
-        return _chunks_from_get_result(raw_result)
-
     def all_chunks_without_embeddings(self) -> list[Chunk]:
-        total = self.count()
-        if total == 0:
-            return []
-        return self.list_chunks_without_embeddings(limit=total, offset=0)
+        return list(self.iter_chunks_without_embeddings())
+
+    def iter_chunks_without_embeddings(self) -> Iterator[Chunk]:
+        """Yield the corpus through bounded, embedding-free Chroma reads."""
+        offset = 0
+
+        while True:
+            page = self.list_chunks_without_embeddings(
+                limit=_MAX_GET_PAGE,
+                offset=offset,
+            )
+            if not page:
+                return
+
+            yield from page
+            offset += len(page)
 
     def list_chunks_without_embeddings(
         self, limit: int, offset: int = 0
@@ -329,28 +356,17 @@ class ChromaVectorStore:
         return frozenset(str(chunk_id) for chunk_id in raw_result["ids"])
 
     def retrieval_fingerprints(self) -> frozenset[str]:
-        raw_result = self._collection.get(include=["metadatas"])
-        metadatas = cast(
-            list[Mapping[str, object]],
-            raw_result.get("metadatas") or [],
-        )
         return frozenset(
-            _retrieval_fingerprint(str(chunk_id), metadata)
-            for chunk_id, metadata in zip(raw_result["ids"], metadatas, strict=True)
+            _retrieval_fingerprint(chunk_id, metadata)
+            for chunk_id, metadata in self._iter_metadata_records()
         )
 
     def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
-        raw_result = self._collection.get(
-            where={"artifact_id": artifact_id},
-            include=["metadatas"],
-        )
-        metadatas = cast(
-            list[Mapping[str, object]],
-            raw_result.get("metadatas") or [],
-        )
         return frozenset(
             project_id
-            for metadata in metadatas
+            for _, metadata in self._iter_metadata_records(
+                where={"artifact_id": artifact_id}
+            )
             for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
         )
 
@@ -359,37 +375,27 @@ class ChromaVectorStore:
         artifact_id: str,
         project_ids: tuple[str, ...],
     ) -> int:
-        chunks = self._chunks_where({"artifact_id": artifact_id})
-        if not chunks:
-            return 0
-
         normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
-        self.add([replace(chunk, project_ids=normalized) for chunk in chunks])
-        return len(chunks)
+        return self._rewrite_membership(
+            {"artifact_id": artifact_id},
+            lambda _chunk: normalized,
+        )
 
     def remove_project(self, project_id: str) -> int:
         # Selected by the boolean marker rather than the delimited string,
         # because the marker is what retrieval filters on -- a chunk that still
         # carries it is still reachable, whatever the string says.
-        chunks = self._chunks_where({project_metadata_key(project_id): {"$eq": True}})
-        if not chunks:
-            return 0
-
-        self.add(
-            [
-                replace(
-                    chunk,
-                    project_ids=tuple(
-                        pid for pid in chunk.project_ids if pid != project_id
-                    ),
-                )
-                for chunk in chunks
-            ]
+        return self._rewrite_membership(
+            {project_metadata_key(project_id): {"$eq": True}},
+            lambda chunk: tuple(pid for pid in chunk.project_ids if pid != project_id),
         )
-        return len(chunks)
 
-    def _chunks_where(self, where: dict[str, Any]) -> list[Chunk]:
-        """Read whole chunks, embeddings included, so they can be re-written.
+    def _rewrite_membership(
+        self,
+        where: dict[str, Any],
+        membership: Callable[[Chunk], tuple[str, ...]],
+    ) -> int:
+        """Rewrite the project membership of every chunk matching ``where``.
 
         Membership lives in the chunk metadata, so moving an artifact between
         projects has to rewrite the metadata -- and Chroma's upsert *merges*
@@ -397,12 +403,57 @@ class ChromaVectorStore:
         Round-tripping through ``add`` reuses the delete-then-upsert there, and
         carries the existing embeddings back unchanged: no re-embedding, no LLM
         call, no cost.
+
+        The matching ids are collected first, through the bounded metadata-only
+        reads, and hydrated a page at a time afterwards. Reading the match in
+        one ``get`` would blow past SQLite's bind-variable ceiling on a corpus
+        of any size, and paging by offset instead would skip chunks: rewriting a
+        page can drop it out of the match -- ``remove_project`` deletes the very
+        marker it selects on -- which shifts everything still to come.
         """
-        raw_result = self._collection.get(
-            where=cast(Any, where),
-            include=["documents", "metadatas", "embeddings"],
-        )
-        return _chunks_from_get_result(raw_result)
+        ids = [
+            chunk_id
+            for chunk_id, _ in self._iter_metadata_records(where=cast(Any, where))
+        ]
+
+        for start in range(0, len(ids), _MAX_GET_PAGE):
+            raw_result = self._collection.get(
+                ids=ids[start : start + _MAX_GET_PAGE],
+                include=["documents", "metadatas", "embeddings"],
+            )
+            self.add(
+                [
+                    replace(chunk, project_ids=membership(chunk))
+                    for chunk in _chunks_from_get_result(raw_result)
+                ]
+            )
+
+        return len(ids)
+
+    def _iter_metadata_records(
+        self,
+        where: Where | None = None,
+    ) -> Iterator[tuple[str, Mapping[str, object]]]:
+        """Yield ids and metadata through bounded reads without hydrating text."""
+        offset = 0
+
+        while True:
+            raw_result = self._collection.get(
+                where=where,
+                include=["metadatas"],
+                limit=_MAX_GET_PAGE,
+                offset=offset,
+            )
+            ids = raw_result["ids"]
+            if not ids:
+                return
+
+            metadatas = cast(
+                list[Mapping[str, object]],
+                raw_result.get("metadatas") or [],
+            )
+            yield from zip(ids, metadatas, strict=True)
+            offset += len(ids)
 
     def count(self) -> int:
         return self._collection.count()

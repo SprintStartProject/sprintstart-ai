@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 RRF_K = 60
 RRF_MIN_RATIO = 0.15
 SEMANTIC_ONLY_CHUNK_LIMIT = 10_000
+# Chroma 1.5.x can exceed SQLite's bind-variable ceiling when a widening
+# request asks it to hydrate tens of thousands of results at once.
+_MAX_QUERY_N = 10_000
 
 # First-guess over-fetch when a role, source, or attribute filter is active.
 # This is a round-trip optimisation only: both retrievers drop ineligible
@@ -94,13 +97,15 @@ def _semantic_candidates(
     implementation that silently ignored a constraint, or a chunk whose
     eligibility isn't expressible in the backend's query language, would
     otherwise let higher-ranked ineligible chunks fill the window and hide every
-    eligible hit. Widening ends at the corpus size, so the invariant holds
-    without relying on a fixed over-fetch multiplier.
+    eligible hit. Widening is bounded below Chroma's backend limit; constraints
+    that Chroma can express are already pushed down, while non-pushdown stores
+    return the best eligible results found inside that bounded window.
     """
     if corpus_size <= 0 or target <= 0:
         return []
 
-    fetch_size = min(target, corpus_size)
+    max_fetch = min(corpus_size, _MAX_QUERY_N)
+    fetch_size = min(target, max_fetch)
 
     while True:
         candidates = store.query(
@@ -115,11 +120,11 @@ def _semantic_candidates(
 
         # A short result means the corpus is exhausted at this score floor:
         # scores fall monotonically, so nothing further down clears min_score.
-        exhausted = len(candidates) < fetch_size or fetch_size >= corpus_size
+        exhausted = len(candidates) < fetch_size or fetch_size >= max_fetch
         if len(eligible) >= target or exhausted:
             return eligible[:target]
 
-        fetch_size = min(fetch_size * 2, corpus_size)
+        fetch_size = min(fetch_size * 2, max_fetch)
 
 
 def reciprocal_rank_fusion(
@@ -270,6 +275,7 @@ def hybrid_retrieve(
             filters is not None
             and (
                 filters.project_id is not None
+                or filters.project_ids is not None
                 or bool(filters.source_systems)
                 or filters.time_from is not None
                 or filters.time_to is not None

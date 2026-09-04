@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Iterator
 
-from agents.chat_agent import ChatAgent, Evidence, Token
+from agents.chat_agent import ChatAgent, Evidence, Reasoning, Token
 from agents.tools.base import Invocation
 from api.schemas import HistoryEntry
 from api.sse import sse_event
@@ -48,6 +48,9 @@ class ChatOrchestrator:
                         yield from _citation_events(chunks, seen_chunk_ids)
                     case Token(text=text):
                         yield sse_event({"type": "token", "content": text})
+                    case Reasoning(text=text):
+                        if text.strip():
+                            yield sse_event({"type": "reasoning", "reasoning": text})
 
             yield sse_event({"type": "done"})
 

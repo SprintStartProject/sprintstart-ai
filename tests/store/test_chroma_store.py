@@ -1,12 +1,89 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import chromadb
+import pytest
 
 from ingestion.source_role import SourceRole
 from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters
+from store import chroma_store as chroma_store_module
 from store.chroma_store import ChromaVectorStore
+
+
+def test_persistent_client_cold_cache_is_constructed_once_concurrently(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "shared-chroma")
+    fake_client = object()
+    worker_count = 8
+    callers_ready = threading.Barrier(worker_count + 1)
+    release_constructor = threading.Event()
+    construction_count = 0
+    count_lock = threading.Lock()
+
+    def construct(*, path: str, settings: object) -> object:
+        del path, settings
+        nonlocal construction_count
+        with count_lock:
+            construction_count += 1
+        release_constructor.wait(timeout=2)
+        return fake_client
+
+    def resolve() -> object:
+        callers_ready.wait(timeout=2)
+        return chroma_store_module._get_persistent_client(path)
+
+    monkeypatch.setattr(chroma_store_module.chromadb, "PersistentClient", construct)
+    chroma_store_module._CLIENT_CACHE.pop(path, None)
+
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(resolve) for _ in range(worker_count)]
+            callers_ready.wait(timeout=2)
+            time.sleep(0.05)
+            release_constructor.set()
+            clients = [future.result(timeout=2) for future in futures]
+    finally:
+        release_constructor.set()
+        chroma_store_module._CLIENT_CACHE.pop(path, None)
+
+    assert construction_count == 1
+    assert all(client is fake_client for client in clients)
+
+
+def test_failed_persistent_client_construction_is_not_cached(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "retry-chroma")
+    fake_client = object()
+    attempts = 0
+
+    def construct(*, path: str, settings: object) -> object:
+        del path, settings
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary Chroma failure")
+        return fake_client
+
+    monkeypatch.setattr(chroma_store_module.chromadb, "PersistentClient", construct)
+    chroma_store_module._CLIENT_CACHE.pop(path, None)
+
+    try:
+        with pytest.raises(RuntimeError, match="temporary Chroma failure"):
+            chroma_store_module._get_persistent_client(path)
+
+        assert path not in chroma_store_module._CLIENT_CACHE
+        assert chroma_store_module._get_persistent_client(path) is fake_client
+        assert attempts == 2
+    finally:
+        chroma_store_module._CLIENT_CACHE.pop(path, None)
 
 
 def test_chroma_query_returns_chunks_above_min_score() -> None:
@@ -79,6 +156,49 @@ def test_chroma_query_round_trips_connector_fields() -> None:
     [listed] = store.list_chunks(limit=5)
     assert listed.connector_id == "github"
     assert listed.connector_source_id == "owner/repo"
+
+
+def test_chroma_round_trips_several_project_ids_through_one_scalar() -> None:
+    # Chroma metadata holds scalars, so a chunk's projects are stored delimited
+    # and decoded on the way out. If that encoding is wrong the failure is silent
+    # -- material simply stops matching its own project.
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_project_ids",
+        client=client,
+    )
+
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                text="Some text",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            ),
+            Chunk(
+                id="chunk-2",
+                artifact_id="artifact-2",
+                filename="shared.md",
+                text="Other text",
+                embedding=[1.0, 0.0],
+            ),
+        ]
+    )
+
+    by_id = {
+        chunk.id: chunk
+        for chunk in store.query(embedding=[1.0, 0.0], top_k=5, min_score=0.0)
+    }
+
+    assert by_id["chunk-1"].project_ids == ("project-a", "project-b")
+    # Unscoped stays genuinely empty rather than becoming a one-element tuple of "".
+    assert by_id["chunk-2"].project_ids == ()
+
+    listed = {chunk.id: chunk for chunk in store.list_chunks(limit=5)}
+    assert listed["chunk-1"].project_ids == ("project-a", "project-b")
 
 
 def test_chroma_query_returns_empty_list_when_threshold_too_high() -> None:
@@ -266,7 +386,7 @@ def test_chroma_round_trips_source_role() -> None:
     scored = store.query(embedding=[1.0, 0.0], top_k=1, min_score=0.1)
     assert scored[0].source_role == "test"
 
-    listed = store.all_chunks()
+    listed = store.list_chunks(limit=store.count())
     assert listed[0].source_role == "test"
 
 
@@ -310,6 +430,46 @@ def test_chroma_all_chunks_without_embeddings_omits_embeddings() -> None:
     assert len(chunks) == 1
     assert chunks[0].text == "Some text"
     assert chunks[0].embedding == []
+
+
+def test_chroma_paged_reads_return_every_chunk_exactly_once(monkeypatch) -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(collection_name="test_paged_reads", client=client)
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{index}",
+                artifact_id=f"artifact-{index}",
+                filename=f"{index}.md",
+                text=f"Text {index}",
+                embedding=[1.0, 0.0],
+                project_ids=("project-1",),
+            )
+            for index in range(5)
+        ]
+    )
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 2)
+
+    chunks = list(store.iter_chunks_without_embeddings())
+    chunk_ids = [chunk.id for chunk in chunks]
+
+    metadata_reads: list[dict[str, object]] = []
+    original_get = store._collection.get
+
+    def recording_get(**kwargs):
+        metadata_reads.append(kwargs)
+        return original_get(**kwargs)
+
+    monkeypatch.setattr(store._collection, "get", recording_get)
+    fingerprints = store.retrieval_fingerprints()
+
+    assert len(chunk_ids) == len(set(chunk_ids)) == 5
+    assert set(chunk_ids) == {f"chunk-{index}" for index in range(5)}
+    assert all(chunk.embedding == [] for chunk in chunks)
+    assert {value.split("\x00", 1)[0] for value in fingerprints} == set(chunk_ids)
+    assert [read["offset"] for read in metadata_reads] == [0, 2, 4, 5]
+    assert all(read["limit"] == 2 for read in metadata_reads)
+    assert all(read["include"] == ["metadatas"] for read in metadata_reads)
 
 
 def test_chroma_all_ids_returns_every_chunk_id() -> None:
@@ -430,7 +590,7 @@ def test_chroma_round_trips_start_line_and_start_page() -> None:
     assert scored_pdf[0].start_page == 3
     assert scored_pdf[0].start_line is None
 
-    listed = store.all_chunks()
+    listed = store.list_chunks(limit=store.count())
     by_id = {chunk.id: chunk for chunk in listed}
     assert by_id["chunk-code"].start_line == 12
     assert by_id["chunk-pdf"].start_page == 3
@@ -703,7 +863,7 @@ def test_chroma_round_trips_project_ids() -> None:
         ]
     )
 
-    by_id = {chunk.id: chunk for chunk in store.all_chunks()}
+    by_id = {chunk.id: chunk for chunk in store.list_chunks(limit=store.count())}
     assert by_id["chunk-1"].project_ids == ("project-1", "project-2")
     assert by_id["chunk-2"].project_ids == ()
 
@@ -838,7 +998,7 @@ def test_chroma_retrieval_fingerprints_stable_for_unchanged_corpus() -> None:
     assert store.retrieval_fingerprints() == store.retrieval_fingerprints()
 
 
-def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
+def test_chroma_project_ids_for_artifact_reads_indexed_membership(monkeypatch) -> None:
     client = chromadb.EphemeralClient()
     store = ChromaVectorStore(
         collection_name="test_project_ids_for_artifact",
@@ -848,15 +1008,18 @@ def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
     store.add(
         [
             Chunk(
-                id="chunk-1",
+                id=f"chunk-{index}",
                 artifact_id="artifact-1",
                 filename="doc.md",
-                text="Text",
+                text=f"Text {index}",
                 embedding=[1.0, 0.0],
-                project_ids=("project-1", "project-2"),
-            ),
+                project_ids=(f"project-{index % 2 + 1}",),
+            )
+            for index in range(5)
+        ]
+        + [
             Chunk(
-                id="chunk-2",
+                id="chunk-other",
                 artifact_id="artifact-2",
                 filename="other.md",
                 text="Other",
@@ -866,9 +1029,26 @@ def test_chroma_project_ids_for_artifact_reads_indexed_membership() -> None:
         ]
     )
 
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 2)
+    metadata_reads: list[dict[str, object]] = []
+    original_get = store._collection.get
+
+    def recording_get(**kwargs):
+        metadata_reads.append(kwargs)
+        return original_get(**kwargs)
+
+    monkeypatch.setattr(store._collection, "get", recording_get)
+
     assert store.project_ids_for_artifact("artifact-1") == frozenset(
         {"project-1", "project-2"}
     )
+    assert [read["offset"] for read in metadata_reads] == [0, 2, 4, 5]
+    assert all(read["limit"] == 2 for read in metadata_reads)
+    assert all(read["include"] == ["metadatas"] for read in metadata_reads)
+    assert all(
+        read["where"] == {"artifact_id": "artifact-1"} for read in metadata_reads
+    )
+
     assert store.project_ids_for_artifact("artifact-2") == frozenset({"project-3"})
     assert store.project_ids_for_artifact("missing") == frozenset()
 
@@ -1193,3 +1373,52 @@ def test_remove_project_keeps_the_artifact_for_its_other_projects() -> None:
             filters=RetrievalFilters(project_id="project-b"),
         )
     ] == ["chunk-2"]
+
+
+def test_remove_project_rewrites_a_corpus_larger_than_one_page(monkeypatch) -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_purge_paged",
+        client=client,
+    )
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{index}",
+                artifact_id=f"artifact-{index}",
+                filename="doc.md",
+                text=f"Text {index}",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            )
+            for index in range(5)
+        ]
+    )
+
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 2)
+    reads: list[dict[str, object]] = []
+    original_get = store._collection.get
+
+    def recording_get(**kwargs):
+        reads.append(kwargs)
+        return original_get(**kwargs)
+
+    monkeypatch.setattr(store._collection, "get", recording_get)
+
+    assert store.remove_project("project-a") == 5
+
+    # Every read is bounded: either it names at most a page of ids, or it pages
+    # by limit. A ``get`` that only passes ``where`` would hand SQLite the whole
+    # match at once and run past its bind-variable ceiling on a real corpus.
+    for read in reads:
+        ids = read.get("ids")
+        limit = read.get("limit")
+        assert ids is not None or limit is not None
+        assert len(ids or ()) <= 2
+        assert limit in (None, 2)
+
+    for index in range(5):
+        assert store.project_ids_for_artifact(f"artifact-{index}") == frozenset(
+            {"project-b"}
+        )
+    assert store.count() == 5

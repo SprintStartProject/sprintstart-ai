@@ -96,7 +96,7 @@ def test_ingest_returns_artifact_and_chunk_metadata(
     assert artifact.status == "completed"
     assert artifact.chunk_count == body["chunk_count"]
 
-    stored = vector_store.all_chunks()
+    stored = vector_store.list_chunks(limit=vector_store.count())
     assert len(stored) == body["chunk_count"]
     assert stored[0].artifact_id == "artifact-1"
     assert stored[0].filename == "notes.txt"
@@ -132,7 +132,11 @@ def test_reingest_replaces_chunks_and_preserves_created_at(
     assert second.status_code == 200
 
     # Only the latest ingest's chunks remain in the vector store.
-    stored = [c for c in vector_store.all_chunks() if c.artifact_id == "doc-1"]
+    stored = [
+        c
+        for c in vector_store.list_chunks(limit=vector_store.count())
+        if c.artifact_id == "doc-1"
+    ]
     assert len(stored) == second.json()["chunk_count"]
 
     updated = metadata_store.get_artifact("doc-1")
@@ -170,7 +174,7 @@ def test_failed_embedding_marks_artifact_failed(
     assert artifact.error_message is not None
     assert "embedding backend unavailable" in artifact.error_message
 
-    assert vector_store.all_chunks() == []
+    assert vector_store.list_chunks(limit=vector_store.count()) == []
 
 
 def test_ingest_auto_classifies_test_filename(
@@ -187,7 +191,7 @@ def test_ingest_auto_classifies_test_filename(
     )
 
     assert response.status_code == 200
-    chunks = vector_store.all_chunks()
+    chunks = vector_store.list_chunks(limit=vector_store.count())
     assert chunks
     assert all(chunk.source_role == "test" for chunk in chunks)
 
@@ -208,7 +212,7 @@ def test_ingest_respects_explicit_source_role(
     )
 
     assert response.status_code == 200
-    chunks = vector_store.all_chunks()
+    chunks = vector_store.list_chunks(limit=vector_store.count())
     assert chunks
     assert all(chunk.source_role == "test" for chunk in chunks)
 
@@ -227,7 +231,7 @@ def test_ingest_defaults_to_primary_for_normal_files(
     )
 
     assert response.status_code == 200
-    chunks = vector_store.all_chunks()
+    chunks = vector_store.list_chunks(limit=vector_store.count())
     assert chunks
     assert all(chunk.source_role == "primary" for chunk in chunks)
 

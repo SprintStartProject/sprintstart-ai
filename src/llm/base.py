@@ -16,6 +16,8 @@ class Message(TypedDict):
     tool_calls: NotRequired[list[ToolCall]]
     tool_call_id: NotRequired[str]
     name: NotRequired[str]
+    reasoning: NotRequired[str]
+    reasoning_details: NotRequired[list[dict[str, object]]]
 
 
 class ToolSpec(TypedDict):
@@ -28,6 +30,27 @@ class ToolSpec(TypedDict):
 class ChatResult:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list[ToolCall])
+    reasoning: str | None = None
+    reasoning_details: list[dict[str, object]] = field(
+        default_factory=list[dict[str, object]]
+    )
+
+
+@dataclass(frozen=True)
+class TextDelta:
+    """A streamed fragment of the user-visible answer."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ReasoningDelta:
+    """A streamed reasoning fragment, kept separate from answer text."""
+
+    text: str
+
+
+type LLMStreamEvent = TextDelta | ReasoningDelta
 
 
 class LLMClient(Protocol):
@@ -39,8 +62,10 @@ class LLMClient(Protocol):
     def chat(
         self, messages: list[Message], tools: list[ToolSpec] | None = None
     ) -> ChatResult: ...
-    def generate(self, messages: list[Message]) -> str: ...
-    def stream(self, messages: list[Message]) -> Iterator[str]: ...
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str: ...
+    def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]: ...
     def embed(self, text: str) -> list[float]: ...
     def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
     def caption_image(self, image_bytes: bytes) -> str: ...

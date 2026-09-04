@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from dataclasses import dataclass
 
-from llm.base import LLMClient, Message
+from llm.base import LLMClient, Message, TextDelta
 from rag.types import Chunk
 
 _MAX_BATCH_CHARS = 10_000
@@ -69,9 +69,12 @@ class ArtifactSummaryAgent:
             previous_notes=previous_notes,
         )
         summary_parts: list[str] = []
-        for token in self._llm.stream(messages):
-            summary_parts.append(token)
-            yield token
+        for event in self._llm.stream(messages):
+            # Reasoning is live-only chat metadata. Summaries persist only the
+            # final user-visible text.
+            if isinstance(event, TextDelta):
+                summary_parts.append(event.text)
+                yield event.text
 
         citations = _citations_for_chunks(artifact_id, chunks)
 

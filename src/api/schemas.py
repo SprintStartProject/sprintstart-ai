@@ -509,6 +509,16 @@ class TokenEvent(BaseModel):
     )
 
 
+class ReasoningEvent(BaseModel):
+    type: Literal["reasoning"]
+    reasoning: str = Field(
+        description=(
+            "A live reasoning fragment. It is displayed while generating and "
+            "must not be persisted as assistant message content."
+        )
+    )
+
+
 class CitationEvent(BaseModel):
     type: Literal["citation"]
     artifact_id: str
@@ -779,6 +789,26 @@ class ArtifactRunIngestRequest(BaseModel):
         default=None,
         alias="sourceUpdatedAt",
         description="Original source update timestamp, if known.",
+    )
+
+    state: str | None = Field(
+        default=None,
+        description="Issue state at the tracker ('OPEN'/'CLOSED'); null for non-issue.",
+    )
+    has_assignee: bool | None = Field(
+        default=None,
+        alias="hasAssignee",
+        description=(
+            "Whether somebody at the source is already assigned to this issue, or "
+            "null when the connector cannot tell. Starter-work mining withholds "
+            "an issue on a definite true -- taken work is not work a hire can "
+            "pick up. Null is 'unknown', never 'nobody': GitHub issues have "
+            "assignees this system does not ingest."
+        ),
+    )
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Issue labels (e.g. 'good first issue'); empty otherwise.",
     )
 
 
@@ -1102,6 +1132,280 @@ class FaqGroupResponse(BaseModel):
             }
         }
     }
+
+
+class MineStarterWorkRequest(BaseModel):
+    active_source_ids: list[str] = Field(
+        default=[],
+        description=(
+            "Issues already in the backend's starter-work pool (proposed or "
+            "approved). Drives dedup -- never re-proposed."
+        ),
+    )
+    active_competency_keys: list[str] = Field(
+        default=[],
+        description=(
+            "The backend's live competency graph keys, used to ground each "
+            "task's competency tags. A tag outside this set is dropped, not "
+            "invented; when empty, tags are kept as proposed."
+        ),
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded from the caller's previous "
+            "mining run, if any."
+        ),
+    )
+
+
+class AssembleOrientationRequest(BaseModel):
+    task_title: str = Field(description="The task the packet orients somebody for.")
+    task_body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    touched_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Repository paths the task is expected to touch, when known. Used to "
+            "aim retrieval at the right part of the codebase, never asserted."
+        ),
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this task's packet was last "
+            "assembled, if any. Idempotency is per task: an unchanged corpus "
+            "yields `unchanged` so a cached packet can be served, and a moved "
+            "corpus regenerates rather than describing code that changed."
+        ),
+    )
+
+
+class AssembleDiagramRequest(BaseModel):
+    subject: str = Field(
+        description=(
+            "The question the diagram answers -- 'how a request reaches the "
+            "database'. This is the one part of a diagram a model chooses, and "
+            "it only aims retrieval: every part that comes back is derived from "
+            "the corpus and cited, so a subject nothing supports yields "
+            "`skipped` rather than an invention."
+        )
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this subject was last drawn, "
+            "if any. Idempotency is per subject: an unchanged corpus yields "
+            "`unchanged` so a cached diagram can be served without a generation "
+            "-- which is what keeps a card that hydrates on every board load "
+            "from costing an LLM call every time."
+        ),
+    )
+
+
+class FileDiffSchema(BaseModel):
+    """One changed file's diff, budgeted backend-side.
+
+    Reserved for the backend's wire contract.
+    """
+
+    path: str
+    additions: int = 0
+    deletions: int = 0
+    patch: str | None = Field(
+        default=None,
+        description="None when GitHub reported no patch -- binary or too large.",
+    )
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "Whether the patch was cut, so a trimmed diff is not read as small."
+        ),
+    )
+
+
+class BuddyToolCallSchema(BaseModel):
+    id: str = Field(
+        description="Provider-assigned id of this tool call; its result must echo it."
+    )
+    name: str = Field(description="Name of the tool the model wants to run.")
+    arguments: dict[str, object] = Field(
+        default_factory=dict, description="Arguments the model passed to the tool."
+    )
+
+
+class BuddyAgentMessageSchema(BaseModel):
+    role: str = Field(description="One of system | user | assistant | tool.")
+    content: str = Field(
+        default="", description="Text content; empty for a pure tool-call turn."
+    )
+    tool_calls: list[BuddyToolCallSchema] = Field(
+        default_factory=list[BuddyToolCallSchema],
+        description="Tool calls made on an assistant turn.",
+    )
+    tool_call_id: str | None = Field(
+        default=None,
+        description="On a tool-result turn, the id of the call it answers.",
+    )
+
+
+class BuddyToolSpecSchema(BaseModel):
+    name: str = Field(description="Tool name the model refers to when calling it.")
+    description: str = Field(
+        description="What the tool does, so the model knows when to use it."
+    )
+    parameters: dict[str, object] = Field(
+        default_factory=dict, description="JSON-schema of the tool's arguments."
+    )
+
+
+class BuddyCitationSchema(BaseModel):
+    artifact_id: str
+    start_line: int | None = None
+    start_page: int | None = None
+
+
+class BuddyVocabularySchema(BaseModel):
+    """What one unit of this hire's accepted work is called.
+
+    Every field defaults to the engineering wording, so a backend that sends no
+    vocabulary still gets a coherent mentor. The noun is
+    bare because it is always rendered next to the verb -- "merged change",
+    "facilitated ceremony" -- and baking the verb in yields "merged merged change".
+    """
+
+    contribution_noun: str = Field(
+        default="change",
+        description='One unit of accepted work, bare: "change", "ceremony".',
+    )
+    contribution_noun_plural: str = Field(
+        default="changes",
+        description='The plural: "changes", "ceremonies".',
+    )
+    contribution_verb_past: str = Field(
+        default="merged",
+        description='Past tense of the hire\'s own act: "merged", "facilitated".',
+    )
+
+
+class BuddyAgentRequest(BaseModel):
+    messages: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "The running conversation, oldest first. First turn: the hire's history "
+            "plus their new question. Resume turn: everything the previous response "
+            "returned, with the backend's tool-result messages appended."
+        ),
+    )
+    backend_tools: list[BuddyToolSpecSchema] = Field(
+        default_factory=list[BuddyToolSpecSchema],
+        description=(
+            "Tools only the backend can execute (e.g. get_my_metrics). The AI reasons "
+            "about them and hands their calls back rather than running them. Mounted "
+            "per hire: the mentor's persona describes exactly these and no others, so "
+            "a role that cannot produce a kind of evidence is never told about the "
+            "tool for it."
+        ),
+    )
+    vocabulary: BuddyVocabularySchema = Field(
+        default_factory=BuddyVocabularySchema,
+        description=(
+            "What one unit of this hire's accepted work is called, rendered into "
+            "fixed slots in the persona. "
+            "Omit it for the engineering wording."
+        ),
+    )
+    prior_summary: str | None = Field(
+        default=None,
+        description=(
+            "The session's running summary of everything older than `messages` — "
+            "the conversation the window no longer carries. First hop of a turn only."
+        ),
+    )
+    project_ids: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "Scopes `search_docs` to the projects this hire is on. Several is "
+            "ordinary -- a hire onboarding on two projects should find material "
+            "from both and from neither of anybody else's. An empty list scopes "
+            "to no projects (admitting no material)."
+        ),
+    )
+
+
+class BuddyAgentResponse(BaseModel):
+    final: bool = Field(
+        description=(
+            "True when `text` is the answer; false when `pending_tool_calls` run first."
+        )
+    )
+    text: str = Field(
+        default="", description="The answer to show the hire, when `final`."
+    )
+    messages: list[BuddyAgentMessageSchema] = Field(
+        description="The full running conversation to carry back verbatim on a resume."
+    )
+    pending_tool_calls: list[BuddyToolCallSchema] = Field(
+        default_factory=list[BuddyToolCallSchema],
+        description=(
+            "Backend tools to run; append each result as a `tool`, then re-call."
+        ),
+    )
+    citations: list[BuddyCitationSchema] = Field(
+        default_factory=list[BuddyCitationSchema],
+        description="Sources the grounded searches drew on.",
+    )
+
+
+class BuddyOpenRequest(BaseModel):
+    memory: str | None = Field(
+        default=None,
+        description=(
+            "The mentor's durable memory note about this hire; empty on the first "
+            "visit. Read from, never rewritten here — folding is "
+            "`/onboarding/buddy/compact`."
+        ),
+    )
+    recent: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "Messages since the memory was last updated (the previous visit), so the "
+            "greeting can be specific about it. May be empty."
+        ),
+    )
+    state: str = Field(
+        default="",
+        description=(
+            "A plain-text snapshot of the hire's current state (pull requests, tasks, "
+            "competencies) for the greeting to ground itself in."
+        ),
+    )
+
+
+class BuddyCompactRequest(BaseModel):
+    prior_summary: str | None = Field(
+        default=None,
+        description=(
+            "The mentor's durable memory note as it stands; empty before the first "
+            "fold."
+        ),
+    )
+    folded: list[BuddyAgentMessageSchema] = Field(
+        default_factory=list[BuddyAgentMessageSchema],
+        description=(
+            "The messages sliding out of the active window, oldest first. The caller "
+            "chooses how many — this side only rewrites the note."
+        ),
+    )
+
+
+class BuddyCompactResponse(BaseModel):
+    memory: str = Field(
+        description=(
+            "The rewritten memory note, covering the prior note plus `folded`. The "
+            "caller persists it and advances its cursor by exactly what it sent."
+        )
+    )
 
 
 # ── FAQ incremental classification (PM insights) ────────────────────────────

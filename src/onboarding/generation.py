@@ -115,10 +115,13 @@ def corpus_fingerprint(store: VectorStore, project_id: str) -> str:
     silently validate) project B's generated blueprints.
     """
     digest = hashlib.sha256()
-    for chunk in sorted(store.all_chunks(), key=lambda c: c.id):
-        if project_id not in chunk.project_ids:
-            continue
-        for value in _fingerprint_fields(chunk):
+    fingerprint_records = (
+        _fingerprint_fields(chunk)
+        for chunk in store.iter_chunks_without_embeddings()
+        if project_id in chunk.project_ids
+    )
+    for record in sorted(fingerprint_records, key=lambda values: values[0]):
+        for value in record:
             digest.update(value.encode("utf-8"))
             digest.update(b"\0")
     return digest.hexdigest()

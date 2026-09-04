@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import replace
 
 from ingestion.source_role import SourceRole
@@ -101,11 +102,11 @@ class StubVectorStore:
     def count_by_artifact(self, artifact_id: str) -> int:
         return sum(1 for chunk in self.chunks if chunk.artifact_id == artifact_id)
 
-    def all_chunks(self) -> list[Chunk]:
-        return list(self.chunks)
-
     def all_chunks_without_embeddings(self) -> list[Chunk]:
-        return list(self.chunks)
+        return list(self.iter_chunks_without_embeddings())
+
+    def iter_chunks_without_embeddings(self) -> Iterator[Chunk]:
+        yield from self.chunks
 
     def list_chunks_without_embeddings(
         self, limit: int, offset: int = 0

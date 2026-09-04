@@ -7,7 +7,7 @@ import httpx
 import ollama
 import pytest
 
-from llm.base import Message, ToolCall, ToolSpec
+from llm.base import Message, ReasoningDelta, TextDelta, ToolCall, ToolSpec
 from llm.errors import LLMUnavailableError
 from llm.ollama_client import OllamaBackend, OllamaClient
 from tests.conftest import vision_required
@@ -44,6 +44,7 @@ class _FakeOllamaClient:
         self,
         chat_content: str = "",
         stream_tokens: list[str] | None = None,
+        stream_thinking: list[str | None] | None = None,
         embed_vector: list[float] | None = None,
         chat_error: Exception | None = None,
         embed_error: Exception | None = None,
@@ -52,6 +53,7 @@ class _FakeOllamaClient:
     ) -> None:
         self._chat_content = chat_content
         self._stream_tokens = stream_tokens or [chat_content]
+        self._stream_thinking = stream_thinking or []
         self._embed_vector = embed_vector or []
         self._chat_error = chat_error
         self._embed_error = embed_error
@@ -62,6 +64,7 @@ class _FakeOllamaClient:
         # Wire-shape dicts, not our internal `Message`: what reaches the
         # daemon is whatever `_to_ollama_messages` produced.
         self.last_chat_messages: list[Mapping[str, Any]] | None = None
+        self.last_chat_options: Mapping[str, Any] | None = None
         self.last_embed_model: str | None = None
         self.last_embed_input: list[str] | None = None
         self.last_vision_model: str | None = None
@@ -71,9 +74,12 @@ class _FakeOllamaClient:
         self,
         model: str = "",
         messages: Sequence[Mapping[str, Any]] | None = None,
+        *,
+        options: Mapping[str, Any] | None = None,
     ) -> ollama.ChatResponse:
         self.last_chat_model = model
         self.last_chat_messages = list(messages) if messages is not None else None
+        self.last_chat_options = options
         if self._chat_error is not None:
             raise self._chat_error
         return ollama.ChatResponse(
@@ -113,9 +119,16 @@ class _FakeOllamaClient:
         self.last_chat_messages = list(messages) if messages is not None else None
         if self._chat_error is not None:
             raise self._chat_error
-        for token in self._stream_tokens:
+        for index, token in enumerate(self._stream_tokens):
+            thinking = (
+                self._stream_thinking[index]
+                if index < len(self._stream_thinking)
+                else None
+            )
             yield ollama.ChatResponse(
-                message=ollama.Message(role="assistant", content=token)
+                message=ollama.Message(
+                    role="assistant", content=token, thinking=thinking
+                )
             )
 
     def embed(
@@ -243,7 +256,7 @@ class TestStreamHappyPath:
 
         result = list(client.stream(messages))
 
-        assert result == ["Hello", " there", "!"]
+        assert result == [TextDelta("Hello"), TextDelta(" there"), TextDelta("!")]
         assert fake.last_chat_model == _TEST_MODEL
 
     def test_yields_single_token(self) -> None:
@@ -252,7 +265,18 @@ class TestStreamHappyPath:
 
         result = list(client.stream([Message(role="user", content="Hi")]))
 
-        assert result == ["Hi!"]
+        assert result == [TextDelta("Hi!")]
+
+    def test_yields_reasoning_separately_and_skips_empty_chunks(self) -> None:
+        fake = _FakeOllamaClient(
+            stream_tokens=["", "Answer."],
+            stream_thinking=["Checking evidence.", ""],
+        )
+        client = _make_client(inner_client=fake)
+
+        result = list(client.stream([Message(role="user", content="Hi")]))
+
+        assert result == [ReasoningDelta("Checking evidence."), TextDelta("Answer.")]
 
     def test_tool_messages_are_converted_to_the_ollama_schema(self) -> None:
         """Regression: the chat agent streams the post-tool conversation.
@@ -304,7 +328,7 @@ class TestStreamIntegration:
             client.stream([Message(role="user", content="Reply with one word: hello")])
         )
         assert len(tokens) > 0
-        assert all(isinstance(t, str) for t in tokens)
+        assert all(isinstance(t, (TextDelta, ReasoningDelta)) for t in tokens)
 
 
 class TestEmbedHappyPath:
