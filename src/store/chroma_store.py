@@ -1,5 +1,6 @@
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 from typing import Any, cast
 
 import chromadb
@@ -368,6 +369,66 @@ class ChromaVectorStore:
             )
             for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
         )
+
+    def set_project_ids_for_artifact(
+        self,
+        artifact_id: str,
+        project_ids: tuple[str, ...],
+    ) -> int:
+        normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        return self._rewrite_membership(
+            {"artifact_id": artifact_id},
+            lambda _chunk: normalized,
+        )
+
+    def remove_project(self, project_id: str) -> int:
+        # Selected by the boolean marker rather than the delimited string,
+        # because the marker is what retrieval filters on -- a chunk that still
+        # carries it is still reachable, whatever the string says.
+        return self._rewrite_membership(
+            {project_metadata_key(project_id): {"$eq": True}},
+            lambda chunk: tuple(pid for pid in chunk.project_ids if pid != project_id),
+        )
+
+    def _rewrite_membership(
+        self,
+        where: dict[str, Any],
+        membership: Callable[[Chunk], tuple[str, ...]],
+    ) -> int:
+        """Rewrite the project membership of every chunk matching ``where``.
+
+        Membership lives in the chunk metadata, so moving an artifact between
+        projects has to rewrite the metadata -- and Chroma's upsert *merges*
+        metadata (see ``add``), which cannot drop a stale ``project:<id>`` key.
+        Round-tripping through ``add`` reuses the delete-then-upsert there, and
+        carries the existing embeddings back unchanged: no re-embedding, no LLM
+        call, no cost.
+
+        The matching ids are collected first, through the bounded metadata-only
+        reads, and hydrated a page at a time afterwards. Reading the match in
+        one ``get`` would blow past SQLite's bind-variable ceiling on a corpus
+        of any size, and paging by offset instead would skip chunks: rewriting a
+        page can drop it out of the match -- ``remove_project`` deletes the very
+        marker it selects on -- which shifts everything still to come.
+        """
+        ids = [
+            chunk_id
+            for chunk_id, _ in self._iter_metadata_records(where=cast(Any, where))
+        ]
+
+        for start in range(0, len(ids), _MAX_GET_PAGE):
+            raw_result = self._collection.get(
+                ids=ids[start : start + _MAX_GET_PAGE],
+                include=["documents", "metadatas", "embeddings"],
+            )
+            self.add(
+                [
+                    replace(chunk, project_ids=membership(chunk))
+                    for chunk in _chunks_from_get_result(raw_result)
+                ]
+            )
+
+        return len(ids)
 
     def _iter_metadata_records(
         self,

@@ -1244,3 +1244,181 @@ def test_chroma_source_exclusion_keeps_other_sources_of_same_connector() -> None
     )
 
     assert [chunk.id for chunk in result] == ["sibling"]
+
+
+def _membership_store(name: str) -> ChromaVectorStore:
+    store = ChromaVectorStore(
+        collection_name=name,
+        client=chromadb.EphemeralClient(),
+    )
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                position=1,
+                kind="text",
+                text="Shared text",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a",),
+                connector_id="github",
+                connector_source_id="acme/repo",
+                source_system="GITHUB",
+                source_url="https://example.test/doc.md",
+            ),
+            Chunk(
+                id="chunk-2",
+                artifact_id="artifact-2",
+                filename="other.md",
+                position=1,
+                kind="text",
+                text="Other text",
+                embedding=[0.0, 1.0],
+                project_ids=("project-a", "project-b"),
+            ),
+        ]
+    )
+    return store
+
+
+def test_set_project_ids_makes_artifact_retrievable_from_the_new_project() -> None:
+    store = _membership_store("test_chunks_link")
+
+    updated = store.set_project_ids_for_artifact(
+        "artifact-1",
+        ("project-a", "project-b"),
+    )
+
+    assert updated == 1
+    assert store.project_ids_for_artifact("artifact-1") == frozenset(
+        {"project-a", "project-b"}
+    )
+
+    found = store.query(
+        embedding=[1.0, 0.0],
+        top_k=5,
+        min_score=0.5,
+        filters=RetrievalFilters(project_id="project-b"),
+    )
+    assert [chunk.id for chunk in found] == ["chunk-1"]
+
+
+def test_set_project_ids_drops_the_marker_of_a_removed_project() -> None:
+    store = _membership_store("test_chunks_unlink")
+
+    store.set_project_ids_for_artifact("artifact-2", ("project-a",))
+
+    assert store.project_ids_for_artifact("artifact-2") == frozenset({"project-a"})
+    # The stale ``project:<id>`` marker is what retrieval filters on, so an
+    # unlink that only rewrote the delimited string would leave the chunk
+    # readable from the project it was just removed from.
+    assert (
+        store.query(
+            embedding=[0.0, 1.0],
+            top_k=5,
+            min_score=0.5,
+            filters=RetrievalFilters(project_id="project-b"),
+        )
+        == []
+    )
+
+
+def test_set_project_ids_preserves_the_rest_of_the_chunk() -> None:
+    store = _membership_store("test_chunks_preserve")
+
+    store.set_project_ids_for_artifact("artifact-1", ("project-b",))
+
+    chunk = store.list_chunks_by_artifact("artifact-1", limit=10)[0]
+    assert chunk.text == "Shared text"
+    assert chunk.embedding == [1.0, 0.0]
+    assert chunk.connector_id == "github"
+    assert chunk.connector_source_id == "acme/repo"
+    assert chunk.source_system == "GITHUB"
+    assert chunk.source_url == "https://example.test/doc.md"
+    assert chunk.position == 1
+
+
+def test_set_project_ids_on_unknown_artifact_reports_nothing_updated() -> None:
+    store = _membership_store("test_chunks_unknown")
+
+    assert store.set_project_ids_for_artifact("missing", ("project-a",)) == 0
+
+
+def test_remove_project_keeps_the_artifact_for_its_other_projects() -> None:
+    store = _membership_store("test_chunks_purge")
+
+    updated = store.remove_project("project-a")
+
+    assert updated == 2
+    assert store.project_ids_for_artifact("artifact-1") == frozenset()
+    assert store.project_ids_for_artifact("artifact-2") == frozenset({"project-b"})
+    assert store.count() == 2
+
+    assert (
+        store.query(
+            embedding=[0.0, 1.0],
+            top_k=5,
+            min_score=0.5,
+            filters=RetrievalFilters(project_id="project-a"),
+        )
+        == []
+    )
+    assert [
+        chunk.id
+        for chunk in store.query(
+            embedding=[0.0, 1.0],
+            top_k=5,
+            min_score=0.5,
+            filters=RetrievalFilters(project_id="project-b"),
+        )
+    ] == ["chunk-2"]
+
+
+def test_remove_project_rewrites_a_corpus_larger_than_one_page(monkeypatch) -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_purge_paged",
+        client=client,
+    )
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{index}",
+                artifact_id=f"artifact-{index}",
+                filename="doc.md",
+                text=f"Text {index}",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            )
+            for index in range(5)
+        ]
+    )
+
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 2)
+    reads: list[dict[str, object]] = []
+    original_get = store._collection.get
+
+    def recording_get(**kwargs):
+        reads.append(kwargs)
+        return original_get(**kwargs)
+
+    monkeypatch.setattr(store._collection, "get", recording_get)
+
+    assert store.remove_project("project-a") == 5
+
+    # Every read is bounded: either it names at most a page of ids, or it pages
+    # by limit. A ``get`` that only passes ``where`` would hand SQLite the whole
+    # match at once and run past its bind-variable ceiling on a real corpus.
+    for read in reads:
+        ids = read.get("ids")
+        limit = read.get("limit")
+        assert ids is not None or limit is not None
+        assert len(ids or ()) <= 2
+        assert limit in (None, 2)
+
+    for index in range(5):
+        assert store.project_ids_for_artifact(f"artifact-{index}") == frozenset(
+            {"project-b"}
+        )
+    assert store.count() == 5
