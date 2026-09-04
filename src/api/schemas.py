@@ -1457,3 +1457,80 @@ class FaqMergeResponse(BaseModel):
             "staying over the limit beats merging distinct topics."
         )
     )
+
+
+class SkillCatalogItem(BaseModel):
+    """An existing skill in the catalog passed as context for skill suggestion."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(description="Unique skill identifier.")
+    name: str = Field(description="Human-readable skill name.")
+    category: str | None = Field(
+        default=None, description="Optional category (e.g. 'Backend & APIs')."
+    )
+    universal: bool = Field(
+        default=False,
+        description="Whether this skill is universally applicable without grounding.",
+    )
+
+
+class SkillSuggestionRequest(ProjectScopedRequest):
+    """Request to suggest skills for a role in a project."""
+
+    role_name: str = Field(
+        alias="roleName",
+        min_length=1,
+        description="Name of the project role (e.g. 'Backend Developer').",
+    )
+    role_description: str = Field(
+        alias="roleDescription",
+        default="",
+        description="Description of the role's responsibilities.",
+    )
+    project_industry: str | None = Field(
+        alias="projectIndustry",
+        default=None,
+        description="Optional detected or user-specified project industry/domain.",
+    )
+    available_skills: list[SkillCatalogItem] = Field(
+        alias="availableSkills",
+        default_factory=list[SkillCatalogItem],
+        description="Current catalog of active skills available in the system.",
+    )
+
+
+class SkillSuggestionItem(BaseModel):
+    """A recommended skill with rationale, confidence, and grounding citations."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    name: str = Field(description="Skill name.")
+    category: str | None = Field(
+        default=None, description="Skill category if known or suggested."
+    )
+    reason: str = Field(
+        description="Why this skill is recommended for this role and project."
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence level of the recommendation."
+    )
+    is_new: bool = Field(
+        default=False,
+        description=(
+            "True if the skill was not found in catalog and should be newly created."
+        ),
+    )
+    chunk_ids: list[str] = Field(
+        default_factory=list[str],
+        description="Chunk IDs providing evidence for project-specific skills.",
+    )
+
+
+class SkillSuggestionResponse(BaseModel):
+    """Response containing suggested skills."""
+
+    suggestions: list[SkillSuggestionItem] = Field(
+        default_factory=list[SkillSuggestionItem],
+        description="List of suggested skills matching the role and project.",
+    )
