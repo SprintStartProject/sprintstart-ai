@@ -157,6 +157,41 @@ def test_evaluate_industry_excludes_test_role_chunks() -> None:
     assert result.evidence == []
 
 
+def test_evaluate_industry_empty_industry_forces_low_fallback() -> None:
+    store = StubVectorStore()
+    store.add([_chunk("c1", "Some arbitrary codebase.")])
+    llm = _llm({"industry": "   ", "confidence": "high", "evidence": ["Some snippet"]})
+
+    result = evaluate_industry(llm, store, _PROJECT_ID)
+
+    assert result.industry == ""
+    assert result.confidence == "low"
+    assert result.evidence == []
+
+
+def test_evaluate_industry_robust_evidence_coercion() -> None:
+    store = StubVectorStore()
+    store.add([_chunk("c1", "PCI-DSS banking ledger architecture.")])
+    llm = _llm(
+        {
+            "industry": "Fintech / Banking",
+            "confidence": "high",
+            "evidence": [
+                "PCI-DSS banking ledger",
+                {"file": "README.md"},  # non-string structured object should be dropped
+                None,
+                42,  # number coerced to string
+            ],
+        }
+    )
+
+    result = evaluate_industry(llm, store, _PROJECT_ID)
+
+    assert result.industry == "Fintech / Banking"
+    assert result.confidence == "high"
+    assert result.evidence == ["PCI-DSS banking ledger", "42"]
+
+
 def test_build_prompt_structure() -> None:
     chunks = [
         ScoredChunk(

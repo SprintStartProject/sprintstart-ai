@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.dependencies import get_llm, get_store
 from api.schemas import (
-    IndustryEvaluationRequest,
     IndustryEvaluationResponse,
+    ProjectId,
     ValidationErrorResponse,
 )
 from llm.base import LLMClient
@@ -36,8 +36,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
     },
 )
 def evaluate_project_industry(
-    project_id: str,
-    request: IndustryEvaluationRequest,
+    project_id: ProjectId,
     store: Annotated[VectorStore, Depends(get_store)],
     llm: Annotated[LLMClient, Depends(get_llm)],
 ) -> IndustryEvaluationResponse:

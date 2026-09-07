@@ -11,7 +11,7 @@ when no eligible evidence is found.
 
 import json
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -20,6 +20,7 @@ from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
+from rag.retriever import get_bm25_cache
 from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
@@ -33,11 +34,23 @@ _QUERY = "project industry domain overview purpose tech stack software architect
 class _Payload(BaseModel):
     industry: str = ""
     confidence: Literal["high", "medium", "low"] = "low"
-    evidence: list[str] = Field(default_factory=list)
+    evidence: list[Any] = Field(default_factory=list)
 
 
 def _fallback_response() -> IndustryEvaluationResponse:
     return IndustryEvaluationResponse(industry="", confidence="low", evidence=[])
+
+
+def _coerce_evidence(items: list[Any]) -> list[str]:
+    coerced: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                coerced.append(text)
+        elif isinstance(item, (int, float)):
+            coerced.append(str(item))
+    return coerced
 
 
 def _build_prompt(chunks: list[ScoredChunk]) -> list[Message]:
@@ -77,7 +90,7 @@ def evaluate_industry(
     if store.count() == 0:
         return _fallback_response()
 
-    cache = bm25_cache or BM25IndexCache()
+    cache = bm25_cache if bm25_cache is not None else get_bm25_cache()
     chunks = hybrid_retrieve(
         question=_QUERY,
         llm=llm,
@@ -104,8 +117,12 @@ def evaluate_industry(
         )
         return _fallback_response()
 
+    industry = payload.industry.strip()
+    if not industry:
+        return _fallback_response()
+
     return IndustryEvaluationResponse(
-        industry=payload.industry.strip(),
+        industry=industry,
         confidence=payload.confidence,
-        evidence=payload.evidence,
+        evidence=_coerce_evidence(payload.evidence),
     )

@@ -1462,17 +1462,6 @@ class FaqMergeResponse(BaseModel):
 # ── Project industry evaluation ───────────────────────────────────────────────
 
 
-class IndustryEvaluationRequest(ProjectScopedRequest):
-    """Request to evaluate a project's industry domain from its corpus."""
-
-    model_config = ConfigDict(
-        populate_by_name=True,
-        json_schema_extra={
-            "example": {"projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"}
-        },
-    )
-
-
 class IndustryEvaluationResponse(BaseModel):
     industry: str = Field(
         description=(

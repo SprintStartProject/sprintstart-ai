@@ -1,7 +1,8 @@
 import json
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api.app import app
@@ -35,14 +36,22 @@ def _llm(payload: dict[str, object] | str) -> StubLLMClient:
     return client
 
 
-def _client(llm: Any, store: StubVectorStore) -> Generator[TestClient, Any, None]:
-    app.dependency_overrides[get_llm] = lambda: llm
-    app.dependency_overrides[get_store] = lambda: store
-    yield TestClient(app)
+@pytest.fixture
+def client_factory() -> Generator[
+    Callable[[Any, StubVectorStore], TestClient], None, None
+]:
+    def _create(llm: Any, store: StubVectorStore) -> TestClient:
+        app.dependency_overrides[get_llm] = lambda: llm
+        app.dependency_overrides[get_store] = lambda: store
+        return TestClient(app)
+
+    yield _create
     app.dependency_overrides.clear()
 
 
-def test_evaluate_industry_endpoint_success() -> None:
+def test_evaluate_industry_endpoint_success(
+    client_factory: Callable[[Any, StubVectorStore], TestClient],
+) -> None:
     store = StubVectorStore()
     store.add([_chunk("c1", "Financial ledger and accounting reconciliation system.")])
 
@@ -54,8 +63,8 @@ def test_evaluate_industry_endpoint_success() -> None:
         }
     )
 
-    client = next(_client(llm, store))
-    response = client.post(_URL, json={"projectId": _PROJECT_ID})
+    client = client_factory(llm, store)
+    response = client.post(_URL)
 
     assert response.status_code == 200, response.text
     data = response.json()
@@ -64,13 +73,15 @@ def test_evaluate_industry_endpoint_success() -> None:
     assert data["evidence"] == ["Financial ledger and accounting system"]
 
 
-def test_evaluate_industry_endpoint_degrades_on_malformed_llm() -> None:
+def test_evaluate_industry_endpoint_degrades_on_malformed_llm(
+    client_factory: Callable[[Any, StubVectorStore], TestClient],
+) -> None:
     store = StubVectorStore()
     store.add([_chunk("c1", "Robotics simulation engine.")])
     llm = _llm("invalid non-json output")
 
-    client = next(_client(llm, store))
-    response = client.post(_URL, json={"projectId": _PROJECT_ID})
+    client = client_factory(llm, store)
+    response = client.post(_URL)
 
     assert response.status_code == 200, response.text
     data = response.json()
@@ -79,7 +90,9 @@ def test_evaluate_industry_endpoint_degrades_on_malformed_llm() -> None:
     assert data["evidence"] == []
 
 
-def test_evaluate_industry_endpoint_llm_unavailable_503() -> None:
+def test_evaluate_industry_endpoint_llm_unavailable_503(
+    client_factory: Callable[[Any, StubVectorStore], TestClient],
+) -> None:
     store = StubVectorStore()
     store.add([_chunk("c1", "Robotics simulation engine.")])
 
@@ -93,33 +106,50 @@ def test_evaluate_industry_endpoint_llm_unavailable_503() -> None:
         ) -> str:
             raise LLMUnavailableError("LLM provider down")
 
-    client = next(_client(FailingLLM(), store))
-    response = client.post(_URL, json={"projectId": _PROJECT_ID})
+    client = client_factory(FailingLLM(), store)
+    response = client.post(_URL)
 
     assert response.status_code == 503, response.text
     assert "LLM provider down" in response.text
 
 
-def test_evaluate_industry_endpoint_missing_body_422() -> None:
+def test_evaluate_industry_endpoint_invalid_project_id_422(
+    client_factory: Callable[[Any, StubVectorStore], TestClient],
+) -> None:
     store = StubVectorStore()
-    client = next(_client(_llm({}), store))
+    client = client_factory(_llm({}), store)
 
-    response = client.post(_URL, json={})
+    response = client.post("/api/v1/projects/invalid|pipe|id/industry/evaluate")
     assert response.status_code == 422
 
+    response_ws = client.post("/api/v1/projects/%20/industry/evaluate")
+    assert response_ws.status_code == 422
 
-def test_evaluate_industry_endpoint_project_isolation() -> None:
+
+def test_evaluate_industry_endpoint_project_isolation(
+    client_factory: Callable[[Any, StubVectorStore], TestClient],
+) -> None:
     store = StubVectorStore()
     store.add(
         [_chunk("c1", "Biotechnology gene sequencing.", project_id="other-project")]
     )
     llm = _llm({"industry": "Biotech", "confidence": "high", "evidence": []})
 
-    client = next(_client(llm, store))
-    response = client.post(_URL, json={"projectId": _PROJECT_ID})
+    client = client_factory(llm, store)
+    response = client.post(_URL)
 
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["industry"] == ""
     assert data["confidence"] == "low"
     assert data["evidence"] == []
+
+
+def test_evaluate_industry_endpoint_cleans_up_dependency_overrides(
+    client_factory: Callable[[Any, StubVectorStore], TestClient],
+) -> None:
+    store = StubVectorStore()
+    client_factory(_llm({}), store)
+    # The fixture will clear overrides after each test; verify outside as well.
+    assert get_llm in app.dependency_overrides
+    assert get_store in app.dependency_overrides
