@@ -289,6 +289,80 @@ def test_project_isolation_filter() -> None:
     assert len(result.suggestions) == 0
 
 
+def test_catalog_match_is_ground_truth_over_llm_is_new_and_category() -> None:
+    store = _make_store_with_chunks()
+    catalog = [
+        SkillCatalogItem(
+            id="s1", name="React", category="Frontend & UI", universal=False
+        ),
+    ]
+
+    llm_payload = {
+        "suggestions": [
+            {
+                "name": "react",
+                "category": "Web Development",
+                "reason": "React components found",
+                "confidence": "high",
+                "isNew": True,  # Model incorrectly claims it's new
+                "chunkIds": ["c-react"],
+            }
+        ]
+    }
+    llm = StubLLMClient(generate_response=json.dumps(llm_payload))
+    llm.embedding = _EMBED
+
+    result = suggest_skills(
+        llm=llm,
+        store=store,
+        project_id=_PROJECT,
+        role_name="Frontend Developer",
+        available_skills=catalog,
+    )
+
+    assert len(result.suggestions) == 1
+    sugg = result.suggestions[0]
+    # Catalog is ground truth for canonical name, category, and is_new flag
+    assert sugg.name == "React"
+    assert sugg.category == "Frontend & UI"
+    assert sugg.is_new is False
+
+
+def test_universal_skill_without_catalog_passes_grounding_gate() -> None:
+    store = _make_store_with_chunks()
+    # No catalog provided at all
+    llm_payload = {
+        "suggestions": [
+            {
+                "name": "Active Listening",
+                "category": "Soft Skills",
+                "reason": "Essential communication for engineers",
+                "confidence": "high",
+                "universal": True,
+                "isNew": True,
+                "chunkIds": [],  # no chunk evidence
+            }
+        ]
+    }
+    llm = StubLLMClient(generate_response=json.dumps(llm_payload))
+    llm.embedding = _EMBED
+
+    result = suggest_skills(
+        llm=llm,
+        store=store,
+        project_id=_PROJECT,
+        role_name="Developer",
+        available_skills=[],
+    )
+
+    assert len(result.suggestions) == 1
+    sugg = result.suggestions[0]
+    assert sugg.name == "Active Listening"
+    assert sugg.category == "Soft Skills"
+    assert sugg.is_new is True
+    assert sugg.chunk_ids == []
+
+
 def test_build_prompt_structure() -> None:
     catalog = [
         SkillCatalogItem(id="s1", name="React", category="Frontend", universal=False),

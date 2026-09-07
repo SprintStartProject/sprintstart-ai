@@ -15,13 +15,30 @@ from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from rag.filters import RetrievalFilters
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
+from rag.retriever import get_bm25_cache
 from rag.types import ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
-_TOP_K = 15
+_TOP_K = 12
 _MIN_SCORE = 0.3
+_MAX_CATALOG_ITEMS = 200
+_MAX_CATALOG_CHARS = 6000
+_MAX_EVIDENCE_CHUNKS = 12
+_MAX_CHUNK_TEXT_CHARS = 1000
+
+_KNOWN_UNIVERSAL_CATEGORIES = frozenset(
+    {
+        "soft skills",
+        "processes, methods & architecture",
+        "agile",
+        "agile & processes",
+        "processes",
+        "collaboration",
+        "leadership & management",
+    }
+)
 
 
 class _Suggestion(BaseModel):
@@ -31,6 +48,7 @@ class _Suggestion(BaseModel):
     category: str | None = None
     reason: str = Field(default="")
     confidence: Literal["high", "medium", "low"] = "medium"
+    universal: bool = False
     is_new: bool = Field(alias="isNew", default=False)
     chunk_ids: list[str] = Field(alias="chunkIds", default_factory=list[str])
 
@@ -45,17 +63,27 @@ def _format_catalog(available_skills: list[SkillCatalogItem]) -> str:
     if not available_skills:
         return "(empty catalog)"
     lines: list[str] = []
-    for s in available_skills:
+    total_chars = 0
+    for s in available_skills[:_MAX_CATALOG_ITEMS]:
         cat = f" [{s.category}]" if s.category else ""
         univ = " (universal)" if s.universal else ""
-        lines.append(f"- [{s.id}] {s.name}{cat}{univ}")
+        line = f"- [{s.id}] {s.name}{cat}{univ}"
+        if total_chars + len(line) > _MAX_CATALOG_CHARS:
+            lines.append("- ... (remaining catalog truncated)")
+            break
+        lines.append(line)
+        total_chars += len(line) + 1
     return "\n".join(lines)
 
 
 def _format_chunks(chunks: list[ScoredChunk]) -> str:
     if not chunks:
         return "(no project artifacts retrieved)"
-    return "\n".join(f"[{c.id}] ({c.filename}) {c.text}" for c in chunks)
+    lines: list[str] = []
+    for c in chunks[:_MAX_EVIDENCE_CHUNKS]:
+        text = c.text[:_MAX_CHUNK_TEXT_CHARS]
+        lines.append(f"[{c.id}] ({c.filename}) {text}")
+    return "\n".join(lines)
 
 
 def _build_prompt(
@@ -75,17 +103,21 @@ def _build_prompt(
         "Task:\n"
         "Recommend skills relevant to both the role AND this project.\n"
         "Follow these two-class grounding rules strictly:\n"
-        "1. For UNIVERSAL skills (marked '(universal)' in catalog/agile/soft):\n"
+        "1. For UNIVERSAL skills (marked '(universal)' in catalog, or role-typical "
+        "soft skills / agile practices):\n"
+        "   - Set universal=true.\n"
         "   - Recommend role-typical universal skills WITHOUT requiring evidence "
         "(chunkIds can be empty).\n"
         "   - Standard practices (e.g. Code Review, Agile/Scrum, Communication).\n"
         "2. For PROJECT-SPECIFIC skills (technologies, frameworks, databases, tools):\n"
+        "   - Set universal=false.\n"
         "   - MUST cite at least one chunk_id from the evidence in chunkIds.\n"
         "   - Only suggest if project artifacts actually demonstrate their usage.\n"
         "   - If missing in catalog, suggest with isNew=true (and chunkIds).\n\n"
         "STRICT JSON only (no markdown fences, no explanatory text outside JSON):\n"
         '{"suggestions": [{"name": str, "category": str | null, "reason": str, '
-        '"confidence": "high"|"medium"|"low", "isNew": bool, "chunkIds": [str]}]}'
+        '"confidence": "high"|"medium"|"low", "universal": bool, "isNew": bool, '
+        '"chunkIds": [str]}]}'
     )
 
     user_parts = [
@@ -129,8 +161,7 @@ def suggest_skills(
         query_parts.append(project_industry)
     query = " ".join(query_parts)
 
-    if bm25_cache is None:
-        bm25_cache = BM25IndexCache()
+    cache = bm25_cache if bm25_cache is not None else get_bm25_cache()
 
     chunks: list[ScoredChunk] = []
     if store.count() > 0:
@@ -140,7 +171,7 @@ def suggest_skills(
             store=store,
             top_k=_TOP_K,
             min_score=_MIN_SCORE,
-            bm25_cache=bm25_cache,
+            bm25_cache=cache,
             exclude_roles=GROUNDING_EXCLUDED_ROLES,
             filters=RetrievalFilters(project_id=project_id),
         )
@@ -171,8 +202,8 @@ def suggest_skills(
         return SkillSuggestionResponse(suggestions=[])
 
     # Grounding gate:
-    # Universal skills (from catalog with universal=True) pass without evidence.
-    # Project-specific skills (universal=False/new) MUST have >=1 valid chunk_id.
+    # Universal skills pass without evidence citations.
+    # Project-specific skills MUST have >=1 valid retrieved chunk_id.
     validated_suggestions: list[SkillSuggestionItem] = []
     seen_names: set[str] = set()
 
@@ -182,7 +213,21 @@ def suggest_skills(
             continue
 
         catalog_entry = catalog_by_norm_name.get(norm_name)
-        is_universal = catalog_entry.universal if catalog_entry else False
+        if catalog_entry is not None:
+            is_universal = catalog_entry.universal
+            name = catalog_entry.name
+            category = catalog_entry.category or item.category
+            is_new = False
+        else:
+            is_universal = item.universal or (
+                bool(
+                    item.category
+                    and item.category.strip().lower() in _KNOWN_UNIVERSAL_CATEGORIES
+                )
+            )
+            name = item.name.strip()
+            category = item.category
+            is_new = True
 
         # Filter chunk_ids to only those actually retrieved
         valid_chunk_ids = [cid for cid in item.chunk_ids if cid in retrieved_chunk_ids]
@@ -190,10 +235,6 @@ def suggest_skills(
         if is_universal:
             # Universal skill: no chunk evidence required
             seen_names.add(norm_name)
-            name = catalog_entry.name if catalog_entry else item.name.strip()
-            category = item.category or (
-                catalog_entry.category if catalog_entry else None
-            )
             reason = item.reason or f"Recommended universal skill for {role_name}."
             validated_suggestions.append(
                 SkillSuggestionItem(
@@ -201,7 +242,7 @@ def suggest_skills(
                     category=category,
                     reason=reason,
                     confidence=item.confidence,
-                    is_new=False,
+                    is_new=is_new,
                     chunk_ids=valid_chunk_ids,
                 )
             )
@@ -216,20 +257,10 @@ def suggest_skills(
                 continue
 
             seen_names.add(norm_name)
-            is_new = item.is_new or (catalog_entry is None)
-            name = (
-                catalog_entry.name
-                if (catalog_entry and not item.is_new)
-                else item.name.strip()
-            )
-            category = item.category or (
-                catalog_entry.category if catalog_entry else None
-            )
             reason = (
                 item.reason
                 or f"Project-specific skill identified from artifacts for {role_name}."
             )
-
             validated_suggestions.append(
                 SkillSuggestionItem(
                     name=name,

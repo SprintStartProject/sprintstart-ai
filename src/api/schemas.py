@@ -1496,6 +1496,7 @@ class SkillSuggestionRequest(ProjectScopedRequest):
     available_skills: list[SkillCatalogItem] = Field(
         alias="availableSkills",
         default_factory=list[SkillCatalogItem],
+        max_length=200,
         description="Current catalog of active skills available in the system.",
     )
 
