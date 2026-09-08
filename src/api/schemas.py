@@ -247,7 +247,7 @@ class HistoryEntry(BaseModel):
     }
 
 
-SourceSystemValue = Literal["GITHUB", "JIRA", "UPLOAD"]
+SourceSystemValue = Literal["GITHUB", "JIRA", "CONFLUENCE", "UPLOAD"]
 
 
 class ProjectScopedRequest(BaseModel):
