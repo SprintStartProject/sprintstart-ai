@@ -1515,3 +1515,37 @@ class FaqMergeResponse(BaseModel):
             "staying over the limit beats merging distinct topics."
         )
     )
+
+
+# ── Project industry evaluation ───────────────────────────────────────────────
+
+
+class IndustryEvaluationResponse(BaseModel):
+    industry: str = Field(
+        description=(
+            "Detected industry or domain for the project, or empty string if "
+            "undetermined."
+        )
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence level of the industry evaluation."
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "List of artifact titles or key evidence snippets grounding the evaluation."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "industry": "Quantum Computing Platform",
+                "confidence": "high",
+                "evidence": [
+                    "README.md: Quantum circuit simulator",
+                    "docs/architecture.md",
+                ],
+            }
+        }
+    }
