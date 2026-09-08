@@ -1593,6 +1593,8 @@ class SkillSuggestionResponse(BaseModel):
         default_factory=list[SkillSuggestionItem],
         description="List of suggested skills matching the role and project.",
     )
+
+
 # ── Project industry evaluation ───────────────────────────────────────────────
 
 
