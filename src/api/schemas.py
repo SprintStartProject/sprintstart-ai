@@ -812,6 +812,64 @@ class ArtifactRunIngestRequest(BaseModel):
     )
 
 
+class ArtifactProjectsRequest(BaseModel):
+    """One artifact's project membership, as the backend now holds it.
+
+    Sent when a source is linked to or unlinked from a project. The backend owns
+    ``artifact_projects``; this carries the *resulting* set rather than a delta,
+    so the two cannot drift apart and a retried call changes nothing.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    artifact_id: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1),
+    ] = Field(description="Artifact whose membership should be rewritten.")
+    project_ids: ProjectIds = Field(
+        default_factory=list,
+        description=(
+            "Projects the artifact now belongs to. An empty list is legitimate "
+            "and makes the artifact invisible to every project until it is "
+            "linked again -- retrieval is fail-closed on membership."
+        ),
+    )
+
+
+class ArtifactProjectsSyncRequest(BaseModel):
+    """Batch membership rewrite, one entry per artifact of the affected source."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    artifacts: list[ArtifactProjectsRequest]
+
+
+class ArtifactProjectsResponse(BaseModel):
+    """Outcome of rewriting one artifact's membership.
+
+    ``chunk_count`` is 0 both for an unknown artifact and for one whose chunks
+    never made it into the index; either way the backend learns that its link
+    did not become retrievable and can re-sync the source.
+    """
+
+    artifact_id: str
+    chunk_count: int
+    status: Literal["completed", "failed"] = "completed"
+    error_message: str | None = None
+
+
+class ArtifactProjectsSyncResponse(BaseModel):
+    artifacts: list[ArtifactProjectsResponse]
+
+
+class ProjectMembershipsDeletedResponse(BaseModel):
+    """Outcome of dropping a deleted project from the whole corpus."""
+
+    project_id: str
+    chunk_count: int
+    artifact_count: int
+
+
 class RunArtifactsSyncRequest(BaseModel):
     """Batch payload sent by the backend after a GitHub ingestion run completes."""
 

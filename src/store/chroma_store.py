@@ -1,5 +1,6 @@
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 from typing import Any, cast
 
 import chromadb
@@ -25,6 +26,10 @@ _NO_POSITION: int = -1
 # ceiling. A page includes ids, documents, and metadata, so using the backend
 # ceiling itself would still be too large once Chroma hydrates those records.
 _MAX_GET_PAGE: int = 10_000
+# Used only when the client cannot report its own write ceiling. Chroma's local
+# ceiling is 5,461 (the 32,766 bind-variable budget over the six columns a write
+# fills), so staying under that is safe for any backend we run against.
+_MAX_WRITE_PAGE_FALLBACK: int = 5_000
 
 _CLIENT_CACHE: dict[str, chromadb.api.ClientAPI] = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
@@ -113,20 +118,47 @@ class ChromaVectorStore:
             metadatas.append(metadata)
 
         ids = [chunk.id for chunk in chunks]
+        documents = [chunk.text for chunk in chunks]
 
-        # Chroma's upsert *merges* metadata instead of replacing it, so a key
-        # that is no longer written would survive a re-ingest — including the
-        # ``project:<id>`` marker of a project the artifact was removed from,
-        # which would keep it retrievable from that project forever. Deleting
-        # first makes each chunk's metadata exactly what we write here.
-        self._collection.delete(ids=ids)
+        # A single write may not exceed the backend's batch ceiling, which is
+        # far below what a ``get`` can page (see ``_MAX_GET_PAGE``). Exceeding
+        # it raises *after* the delete below has already committed, which would
+        # leave the batch deleted and never rewritten, so the batching has to
+        # happen here rather than in any one caller.
+        page = self._max_write_page()
 
-        self._collection.upsert(
-            ids=ids,
-            documents=[chunk.text for chunk in chunks],
-            embeddings=cast(PyEmbeddings, embeddings),
-            metadatas=cast(list[Metadata], metadatas),
-        )
+        for start in range(0, len(ids), page):
+            stop = start + page
+            page_ids = ids[start:stop]
+
+            # Chroma's upsert *merges* metadata instead of replacing it, so a
+            # key that is no longer written would survive a re-ingest —
+            # including the ``project:<id>`` marker of a project the artifact
+            # was removed from, which would keep it retrievable from that
+            # project forever. Deleting first makes each chunk's metadata
+            # exactly what we write here.
+            self._collection.delete(ids=page_ids)
+
+            self._collection.upsert(
+                ids=page_ids,
+                documents=documents[start:stop],
+                embeddings=cast(PyEmbeddings, embeddings[start:stop]),
+                metadatas=cast(list[Metadata], metadatas[start:stop]),
+            )
+
+    def _max_write_page(self) -> int:
+        """Largest id count one ``delete``/``upsert`` pair may carry.
+
+        The client reports its own ceiling, so a remote backend with a different
+        budget is honoured too. It is still capped at ``_MAX_GET_PAGE``, because
+        the ``delete`` half of the pair spends the same bind variables a ``get``
+        does, whatever the upsert would allow.
+        """
+        try:
+            limit = int(self._client.get_max_batch_size())
+        except Exception:  # pragma: no cover - older clients / custom doubles
+            return _MAX_WRITE_PAGE_FALLBACK
+        return min(limit, _MAX_GET_PAGE) if limit > 0 else _MAX_WRITE_PAGE_FALLBACK
 
     def query(
         self,
@@ -368,6 +400,66 @@ class ChromaVectorStore:
             )
             for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
         )
+
+    def set_project_ids_for_artifact(
+        self,
+        artifact_id: str,
+        project_ids: tuple[str, ...],
+    ) -> int:
+        normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        return self._rewrite_membership(
+            {"artifact_id": artifact_id},
+            lambda _chunk: normalized,
+        )
+
+    def remove_project(self, project_id: str) -> int:
+        # Selected by the boolean marker rather than the delimited string,
+        # because the marker is what retrieval filters on -- a chunk that still
+        # carries it is still reachable, whatever the string says.
+        return self._rewrite_membership(
+            {project_metadata_key(project_id): {"$eq": True}},
+            lambda chunk: tuple(pid for pid in chunk.project_ids if pid != project_id),
+        )
+
+    def _rewrite_membership(
+        self,
+        where: dict[str, Any],
+        membership: Callable[[Chunk], tuple[str, ...]],
+    ) -> int:
+        """Rewrite the project membership of every chunk matching ``where``.
+
+        Membership lives in the chunk metadata, so moving an artifact between
+        projects has to rewrite the metadata -- and Chroma's upsert *merges*
+        metadata (see ``add``), which cannot drop a stale ``project:<id>`` key.
+        Round-tripping through ``add`` reuses the delete-then-upsert there, and
+        carries the existing embeddings back unchanged: no re-embedding, no LLM
+        call, no cost.
+
+        The matching ids are collected first, through the bounded metadata-only
+        reads, and hydrated a page at a time afterwards. Reading the match in
+        one ``get`` would blow past SQLite's bind-variable ceiling on a corpus
+        of any size, and paging by offset instead would skip chunks: rewriting a
+        page can drop it out of the match -- ``remove_project`` deletes the very
+        marker it selects on -- which shifts everything still to come.
+        """
+        ids = [
+            chunk_id
+            for chunk_id, _ in self._iter_metadata_records(where=cast(Any, where))
+        ]
+
+        for start in range(0, len(ids), _MAX_GET_PAGE):
+            raw_result = self._collection.get(
+                ids=ids[start : start + _MAX_GET_PAGE],
+                include=["documents", "metadatas", "embeddings"],
+            )
+            self.add(
+                [
+                    replace(chunk, project_ids=membership(chunk))
+                    for chunk in _chunks_from_get_result(raw_result)
+                ]
+            )
+
+        return len(ids)
 
     def _iter_metadata_records(
         self,
