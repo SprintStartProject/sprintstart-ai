@@ -206,3 +206,31 @@ def test_reopening_an_up_to_date_database_does_not_fail(tmp_path: Path) -> None:
     # The ALTER TABLE columns already exist on the second open; must not raise.
     reopened = IngestionMetadataStore(path=path)
     reopened.close()
+
+
+def test_remove_project_leaves_wildcard_lookalikes_untouched() -> None:
+    """``_`` is a ``LIKE`` wildcard, so ``ab_d`` would otherwise match ``abcd``."""
+    store = IngestionMetadataStore(":memory:")
+    store.save_completed_artifact(_record("a1", ("ab_d",)))
+    store.save_completed_artifact(_record("a2", ("abcd",)))
+
+    assert store.remove_project("ab_d", "2026-02-02T00:00:00+00:00") == 1
+
+    lookalike = store.get_artifact("a2")
+    assert lookalike is not None
+    assert lookalike.project_ids == ("abcd",)
+    assert lookalike.updated_at == _NOW
+
+
+def test_remove_project_leaves_case_variants_untouched() -> None:
+    """SQLite's ``LIKE`` is ASCII case-insensitive; project ids are not."""
+    store = IngestionMetadataStore(":memory:")
+    store.save_completed_artifact(_record("a1", ("Proj-A",)))
+    store.save_completed_artifact(_record("a2", ("proj-a",)))
+
+    assert store.remove_project("Proj-A", "2026-02-02T00:00:00+00:00") == 1
+
+    variant = store.get_artifact("a2")
+    assert variant is not None
+    assert variant.project_ids == ("proj-a",)
+    assert variant.updated_at == _NOW

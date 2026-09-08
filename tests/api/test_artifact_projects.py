@@ -191,3 +191,15 @@ def test_delete_project_memberships_of_an_unused_project_is_a_no_op(
     assert response.status_code == 200
     assert response.json()["chunk_count"] == 0
     assert store.count() == 2
+
+
+def test_delete_project_memberships_rejects_a_delimited_project_id(
+    clients: tuple[TestClient, StubVectorStore, IngestionMetadataStore],
+) -> None:
+    """``a|b`` would widen the metadata store's ``LIKE`` to artifacts in both."""
+    client, store, _ = clients
+
+    response = client.delete("/api/v1/projects/a%7Cb/memberships")
+
+    assert response.status_code == 422
+    assert store.count() == 2

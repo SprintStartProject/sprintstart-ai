@@ -260,6 +260,14 @@ class IngestionMetadataStore:
 
         Matched on the encoded form (``|id|``) rather than a bare substring, so
         an id that happens to be a prefix of another never matches.
+
+        The ``LIKE`` is only a prefilter: ``_`` and ``%`` in an id are wildcards
+        and SQLite's ``LIKE`` is ASCII case-insensitive, so it can select rows
+        that carry a *different* project (``ab_d`` matching ``abcd``). Both of
+        those widen the match and neither can narrow it, so deciding membership
+        on the decoded ids below is what makes the rewrite exact -- and counting
+        only the rows actually rewritten is what makes the returned
+        ``artifact_count`` true.
         """
         marker = encoded_project_marker(project_id)
         with self._lock:
@@ -268,20 +276,22 @@ class IngestionMetadataStore:
                 (f"%{marker}%",),
             ).fetchall()
 
+            updated = 0
             for row in rows:
-                remaining = tuple(
-                    pid
-                    for pid in decode_project_ids(row["project_ids"])
-                    if pid != project_id
-                )
+                recorded = decode_project_ids(row["project_ids"])
+                if project_id not in recorded:
+                    continue
+
+                remaining = tuple(pid for pid in recorded if pid != project_id)
                 self._connection.execute(
                     "UPDATE artifacts SET project_ids = ?, updated_at = ? WHERE id = ?",
                     (encode_project_ids(remaining), updated_at, str(row["id"])),
                 )
+                updated += 1
 
             self._connection.commit()
 
-        return len(rows)
+        return updated
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> ArtifactRecord:

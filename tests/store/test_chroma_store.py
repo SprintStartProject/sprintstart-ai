@@ -1422,3 +1422,79 @@ def test_remove_project_rewrites_a_corpus_larger_than_one_page(monkeypatch) -> N
             {"project-b"}
         )
     assert store.count() == 5
+
+
+def test_add_keeps_every_write_within_the_client_batch_ceiling(monkeypatch) -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_write_ceiling",
+        client=client,
+    )
+
+    ceiling = 3
+    monkeypatch.setattr(client, "get_max_batch_size", lambda: ceiling)
+
+    writes: list[int] = []
+    original_delete = store._collection.delete
+    original_upsert = store._collection.upsert
+
+    def recording_delete(**kwargs):
+        writes.append(len(kwargs.get("ids") or ()))
+        return original_delete(**kwargs)
+
+    def recording_upsert(**kwargs):
+        writes.append(len(kwargs.get("ids") or ()))
+        return original_upsert(**kwargs)
+
+    monkeypatch.setattr(store._collection, "delete", recording_delete)
+    monkeypatch.setattr(store._collection, "upsert", recording_upsert)
+
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{index}",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                text=f"Text {index}",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a",),
+            )
+            for index in range(8)
+        ]
+    )
+
+    # A write over the ceiling raises *after* the delete has committed, which
+    # would leave those chunks gone and never rewritten.
+    assert writes and max(writes) <= ceiling
+    assert store.count() == 8
+    assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-a"})
+
+
+def test_remove_project_rewrites_a_corpus_past_the_real_write_ceiling() -> None:
+    client = chromadb.EphemeralClient()
+    store = ChromaVectorStore(
+        collection_name="test_chunks_purge_real_ceiling",
+        client=client,
+    )
+    # One chunk more than a single write can carry, with no page size patched
+    # away: the rewrite has to survive the backend's own ceiling.
+    total = client.get_max_batch_size() + 1
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{index}",
+                artifact_id="artifact-1",
+                filename="doc.md",
+                text=f"Text {index}",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            )
+            for index in range(total)
+        ]
+    )
+    assert store.count() == total
+
+    assert store.remove_project("project-a") == total
+
+    assert store.count() == total
+    assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-b"})

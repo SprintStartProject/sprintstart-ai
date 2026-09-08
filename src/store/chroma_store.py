@@ -26,6 +26,10 @@ _NO_POSITION: int = -1
 # ceiling. A page includes ids, documents, and metadata, so using the backend
 # ceiling itself would still be too large once Chroma hydrates those records.
 _MAX_GET_PAGE: int = 10_000
+# Used only when the client cannot report its own write ceiling. Chroma's local
+# ceiling is 5,461 (the 32,766 bind-variable budget over the six columns a write
+# fills), so staying under that is safe for any backend we run against.
+_MAX_WRITE_PAGE_FALLBACK: int = 5_000
 
 _CLIENT_CACHE: dict[str, chromadb.api.ClientAPI] = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
@@ -114,20 +118,47 @@ class ChromaVectorStore:
             metadatas.append(metadata)
 
         ids = [chunk.id for chunk in chunks]
+        documents = [chunk.text for chunk in chunks]
 
-        # Chroma's upsert *merges* metadata instead of replacing it, so a key
-        # that is no longer written would survive a re-ingest — including the
-        # ``project:<id>`` marker of a project the artifact was removed from,
-        # which would keep it retrievable from that project forever. Deleting
-        # first makes each chunk's metadata exactly what we write here.
-        self._collection.delete(ids=ids)
+        # A single write may not exceed the backend's batch ceiling, which is
+        # far below what a ``get`` can page (see ``_MAX_GET_PAGE``). Exceeding
+        # it raises *after* the delete below has already committed, which would
+        # leave the batch deleted and never rewritten, so the batching has to
+        # happen here rather than in any one caller.
+        page = self._max_write_page()
 
-        self._collection.upsert(
-            ids=ids,
-            documents=[chunk.text for chunk in chunks],
-            embeddings=cast(PyEmbeddings, embeddings),
-            metadatas=cast(list[Metadata], metadatas),
-        )
+        for start in range(0, len(ids), page):
+            stop = start + page
+            page_ids = ids[start:stop]
+
+            # Chroma's upsert *merges* metadata instead of replacing it, so a
+            # key that is no longer written would survive a re-ingest —
+            # including the ``project:<id>`` marker of a project the artifact
+            # was removed from, which would keep it retrievable from that
+            # project forever. Deleting first makes each chunk's metadata
+            # exactly what we write here.
+            self._collection.delete(ids=page_ids)
+
+            self._collection.upsert(
+                ids=page_ids,
+                documents=documents[start:stop],
+                embeddings=cast(PyEmbeddings, embeddings[start:stop]),
+                metadatas=cast(list[Metadata], metadatas[start:stop]),
+            )
+
+    def _max_write_page(self) -> int:
+        """Largest id count one ``delete``/``upsert`` pair may carry.
+
+        The client reports its own ceiling, so a remote backend with a different
+        budget is honoured too. It is still capped at ``_MAX_GET_PAGE``, because
+        the ``delete`` half of the pair spends the same bind variables a ``get``
+        does, whatever the upsert would allow.
+        """
+        try:
+            limit = int(self._client.get_max_batch_size())
+        except Exception:  # pragma: no cover - older clients / custom doubles
+            return _MAX_WRITE_PAGE_FALLBACK
+        return min(limit, _MAX_GET_PAGE) if limit > 0 else _MAX_WRITE_PAGE_FALLBACK
 
     def query(
         self,

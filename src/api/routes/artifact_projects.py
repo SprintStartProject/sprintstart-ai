@@ -23,6 +23,7 @@ from api.schemas import (
     ArtifactProjectsResponse,
     ArtifactProjectsSyncRequest,
     ArtifactProjectsSyncResponse,
+    ProjectId,
     ProjectMembershipsDeletedResponse,
 )
 from ingestion.metadata_store import IngestionMetadataStore
@@ -120,7 +121,10 @@ def sync_artifact_projects(
     ),
 )
 def delete_project_memberships(
-    project_id: str,
+    # ``ProjectId`` rather than a plain ``str``: an id carrying the ``|``
+    # delimiter would decode as two memberships, and here it would widen the
+    # metadata store's ``LIKE`` to every artifact that is in *both* of them.
+    project_id: ProjectId,
     store: Annotated[VectorStore, Depends(get_store)],
     metadata_store: Annotated[
         IngestionMetadataStore,
