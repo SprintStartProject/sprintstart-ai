@@ -23,6 +23,7 @@ from api.routes import (  # noqa: E402
     knowledge_gaps,
     onboarding,
     orientation,
+    phase,
     sources,
     starter_work,
     summaries,
@@ -86,6 +87,7 @@ api_router.include_router(title.router)
 api_router.include_router(vector_db.router)
 api_router.include_router(onboarding.router)
 api_router.include_router(orientation.router)
+api_router.include_router(phase.router)
 api_router.include_router(diagram.router)
 api_router.include_router(starter_work.router)
 api_router.include_router(blueprints.router)

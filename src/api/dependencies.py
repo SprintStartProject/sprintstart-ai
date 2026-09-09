@@ -64,8 +64,12 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
         raw_reasoning_budget = (
             os.getenv("OPENAI_REASONING_MAX_TOKENS", "").strip() if not is_embed else ""
         )
+        raw_embed_dimensions = (
+            os.getenv("OPENAI_EMBED_DIMENSIONS", "").strip() if is_embed else ""
+        )
         max_tokens = int(raw_max_tokens) if raw_max_tokens else 0
         reasoning_budget = int(raw_reasoning_budget) if raw_reasoning_budget else 0
+        embed_dimensions = int(raw_embed_dimensions) if raw_embed_dimensions else 0
         base_url = (
             (os.getenv("OPENAI_EMBED_BASE_URL") if is_embed else None)
             or os.getenv("OPENAI_BASE_URL")
@@ -85,6 +89,7 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
             timeout=timeout,
             max_tokens=max_tokens if max_tokens > 0 else None,
             reasoning_max_tokens=(reasoning_budget if reasoning_budget > 0 else None),
+            embed_dimensions=(embed_dimensions if embed_dimensions > 0 else None),
         )
 
     if backend in {"anthropic", "claude"}:

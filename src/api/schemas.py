@@ -1203,6 +1203,36 @@ class AssembleDiagramRequest(BaseModel):
     )
 
 
+class AssemblePhaseRequest(BaseModel):
+    phase_title: str = Field(
+        description="The blueprint phase whose content is being filled."
+    )
+    phase_description: str = Field(default="")
+    phase_prompt: str = Field(
+        description=(
+            "The author's prompt prescribing what the phase should teach. The "
+            "assembled steps/questions must cover what it asks for, grounded in "
+            "evidence -- an instruction the corpus cannot support is left as an "
+            "honest gap, not invented content."
+        )
+    )
+    project_id: ProjectId = Field(
+        description=(
+            "Scopes retrieval to this project's corpus. Chunks without this "
+            "project's membership are invisible, so a phase can never cite "
+            "another project's material."
+        )
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this phase was last assembled, "
+            "if any. Idempotency is per phase: an unchanged corpus yields "
+            "`unchanged` so cached content can be served without regeneration."
+        ),
+    )
+
+
 class FileDiffSchema(BaseModel):
     """One changed file's diff, budgeted backend-side.
 

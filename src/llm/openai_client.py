@@ -217,6 +217,7 @@ class OpenAIClient(LLMClient):
         timeout: float | None = None,
         max_tokens: int | None = None,
         reasoning_max_tokens: int | None = None,
+        embed_dimensions: int | None = None,
     ) -> None:
         if max_tokens is not None and max_tokens <= 0:
             raise ValueError("OpenAI-compatible max_tokens must be positive")
@@ -235,6 +236,7 @@ class OpenAIClient(LLMClient):
         self.chat_model = chat_model
         self.embed_model = embed_model
         self.vision_model = vision_model
+        self.embed_dimensions = embed_dimensions
         self.max_tokens = max_tokens
         self.reasoning_max_tokens = reasoning_max_tokens
 
@@ -384,6 +386,10 @@ class OpenAIClient(LLMClient):
             response = self.client.embeddings.create(
                 model=self.embed_model,
                 input=texts,
+                # MRL-capable embedding models (e.g. Qwen3 via OpenRouter)
+                # support truncating to a fixed dimension so the vectors match
+                # the vector store collection's existing dimension.
+                dimensions=(self.embed_dimensions if self.embed_dimensions else omit),
             )
 
             by_index = sorted(response.data, key=lambda item: item.index)
