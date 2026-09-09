@@ -212,35 +212,49 @@ def _reasoning_detail_fragments(delta: ChoiceDelta) -> list[dict[str, object]]:
     return fragments
 
 
+def _continues_block(block: dict[str, object], fragment: dict[str, object]) -> bool:
+    """Whether ``fragment`` carries more of the block still open.
+
+    ``index`` on its own is not a block identity: a provider may reuse it
+    across channels (a ``reasoning.summary`` followed by a
+    ``reasoning.encrypted`` payload), and merging on the index alone would
+    overwrite ``type`` and produce one hybrid block that matches neither.
+    A fragment continues the open block only while nothing contradicts it —
+    a differing ``type``, or an ``id``/``index`` the two disagree on. Fields
+    the fragment omits contradict nothing: providers that stream the payload
+    without repeating the block header still belong to the block above.
+    """
+    for field in ("type", "id", "index"):
+        block_value = block.get(field)
+        fragment_value = fragment.get(field)
+        if (
+            block_value is not None
+            and fragment_value is not None
+            and block_value != fragment_value
+        ):
+            return False
+    return True
+
+
 def _merge_reasoning_details(
     fragments: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     """Reassemble streamed reasoning fragments into whole blocks.
 
-    A block's payload arrives across several deltas that all carry the same
-    ``index``; the buffered response contains only the assembled block, and that
-    is what the provider validates on the follow-up turn. Echoing the raw
-    fragments back would replay one signed block as a dozen partial ones.
-    Providers that omit ``index`` are grouped by block id and then by type, so a
-    single reasoning channel is not split into fragment-sized blocks either.
+    A block's payload arrives across several deltas; the buffered response
+    contains only the assembled block, and that is what the provider validates
+    on the follow-up turn. Echoing the raw fragments back would replay one
+    signed block as a dozen partial ones. Fragments are merged in arrival
+    order into the block still open, which keeps two blocks separate whenever
+    their identity differs — including when they share an ``index``.
     """
-    blocks: dict[tuple[str, str], dict[str, object]] = {}
-    order: list[tuple[str, str]] = []
+    blocks: list[dict[str, object]] = []
 
-    for position, fragment in enumerate(fragments):
-        key = next(
-            (
-                (field, str(fragment[field]))
-                for field in ("index", "id", "type")
-                if fragment.get(field) is not None
-            ),
-            ("position", str(position)),
-        )
-        block = blocks.get(key)
-        if block is None:
-            block = {}
-            blocks[key] = block
-            order.append(key)
+    for fragment in fragments:
+        block = blocks[-1] if blocks else None
+        if block is None or not _continues_block(block, fragment):
+            blocks.append(dict(fragment))
+            continue
 
         for field, value in fragment.items():
             if field in _DETAIL_PAYLOAD_FIELDS and isinstance(value, str):
@@ -249,7 +263,7 @@ def _merge_reasoning_details(
             elif value is not None:
                 block[field] = value
 
-    return [blocks[key] for key in order]
+    return blocks
 
 
 def _response_reasoning(

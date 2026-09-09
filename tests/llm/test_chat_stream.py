@@ -237,6 +237,165 @@ class TestOpenAIChatStream:
             {"type": "reasoning.encrypted", "index": 1, "data": "AAABBB"},
         ]
 
+    def test_blocks_sharing_an_index_stay_separate_when_their_types_differ(
+        self,
+    ) -> None:
+        """`index` alone is not a block identity: a provider may reuse it across
+        channels (a summary followed by an encrypted payload). Merging those on
+        the index alone would overwrite `type` and echo one hybrid block back
+        that matches neither channel, which is exactly what the provider
+        rejects on the turn after a tool call."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(
+                    [
+                        _chunk(
+                            {
+                                "reasoning_details": [
+                                    {
+                                        "type": "reasoning.summary",
+                                        "index": 0,
+                                        "summary": "Reads ",
+                                    }
+                                ]
+                            }
+                        ),
+                        _chunk(
+                            {
+                                "reasoning_details": [
+                                    {
+                                        "type": "reasoning.summary",
+                                        "index": 0,
+                                        "summary": "the retro.",
+                                    }
+                                ]
+                            }
+                        ),
+                        _chunk(
+                            {
+                                "reasoning_details": [
+                                    {
+                                        "type": "reasoning.encrypted",
+                                        "index": 0,
+                                        "data": "opaque",
+                                    }
+                                ]
+                            }
+                        ),
+                        _chunk({"content": "Answer."}),
+                    ]
+                ),
+            )
+
+        client = cast("OpenAIClient", make_openai_client(handler))
+        terminal = list(client.chat_stream(_USER, tools=[_TOOL_SPEC]))[-1]
+
+        assert isinstance(terminal, ChatResult)
+        assert terminal.reasoning_details == [
+            {"type": "reasoning.summary", "index": 0, "summary": "Reads the retro."},
+            {"type": "reasoning.encrypted", "index": 0, "data": "opaque"},
+        ]
+
+    def test_blocks_sharing_a_type_stay_separate_when_their_ids_differ(self) -> None:
+        """Two blocks of the same channel are still two blocks; an id the
+        provider carries on both is what tells them apart."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(
+                    [
+                        _chunk(
+                            {
+                                "reasoning_details": [
+                                    {
+                                        "type": "reasoning.text",
+                                        "id": "block-a",
+                                        "text": "First.",
+                                    }
+                                ]
+                            }
+                        ),
+                        _chunk(
+                            {
+                                "reasoning_details": [
+                                    {
+                                        "type": "reasoning.text",
+                                        "id": "block-b",
+                                        "text": "Second.",
+                                    }
+                                ]
+                            }
+                        ),
+                        _chunk({"content": "Answer."}),
+                    ]
+                ),
+            )
+
+        client = cast("OpenAIClient", make_openai_client(handler))
+        terminal = list(client.chat_stream(_USER, tools=[_TOOL_SPEC]))[-1]
+
+        assert isinstance(terminal, ChatResult)
+        assert terminal.reasoning_details == [
+            {"type": "reasoning.text", "id": "block-a", "text": "First."},
+            {"type": "reasoning.text", "id": "block-b", "text": "Second."},
+        ]
+
+    def test_continuation_fragments_extend_the_open_block_without_repeating_it(
+        self,
+    ) -> None:
+        """Not every provider repeats the block header on each delta: the
+        continuation can be payload alone. Those fragments belong to the block
+        still open, not to a new one — splitting a signed block there would
+        reproduce the fragment-echo the merge exists to prevent."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=_sse(
+                    [
+                        _chunk(
+                            {
+                                "reasoning_details": [
+                                    {
+                                        "type": "reasoning.text",
+                                        "index": 0,
+                                        "text": "Checking ",
+                                    }
+                                ]
+                            }
+                        ),
+                        _chunk({"reasoning_details": [{"text": "the retro."}]}),
+                        _chunk(
+                            {
+                                "reasoning_details": [
+                                    {"signature": "signed-context"},
+                                ]
+                            }
+                        ),
+                        _chunk({"content": "Answer."}),
+                    ]
+                ),
+            )
+
+        client = cast("OpenAIClient", make_openai_client(handler))
+        terminal = list(client.chat_stream(_USER, tools=[_TOOL_SPEC]))[-1]
+
+        assert isinstance(terminal, ChatResult)
+        assert terminal.reasoning_details == [
+            {
+                "type": "reasoning.text",
+                "index": 0,
+                "text": "Checking the retro.",
+                "signature": "signed-context",
+            }
+        ]
+
     def test_streamed_reasoning_details_survive_into_the_answer_request(self) -> None:
         """The streaming counterpart of
         ``test_tool_chat_preserves_reasoning_context_for_final_stream``: what the
