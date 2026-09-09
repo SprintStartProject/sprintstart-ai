@@ -30,6 +30,30 @@ def test_source_system_filter_matches_allowed_system() -> None:
     )
 
 
+def test_confluence_source_system_survives_ingest_and_filtering() -> None:
+    chunk = to_chunk(
+        ParsedChunk(
+            content="How to request VPN access",
+            kind="text",
+            metadata={"filename": "page-98765.md"},
+        ),
+        artifact_id="page-98765",
+        embedding=[1.0, 0.0],
+        artifact_type="PAGE",
+        source_system="CONFLUENCE",
+    )
+
+    assert chunk.source_system == "CONFLUENCE"
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["CONFLUENCE"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB"]),
+    )
+
+
 def test_source_timestamp_preferred_over_indexed_at() -> None:
     chunk = to_chunk(
         ParsedChunk(

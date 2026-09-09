@@ -4,7 +4,7 @@ from typing import Literal, TypeGuard
 from ingestion.source_role import SourceRole
 
 ChunkKind = Literal["text", "code", "pdf", "image"]
-SourceSystem = Literal["GITHUB", "JIRA", "UPLOAD"]
+SourceSystem = Literal["GITHUB", "JIRA", "CONFLUENCE", "UPLOAD"]
 
 
 def is_chunk_kind(value: str) -> TypeGuard[ChunkKind]:
@@ -12,7 +12,7 @@ def is_chunk_kind(value: str) -> TypeGuard[ChunkKind]:
 
 
 def is_source_system(value: str) -> TypeGuard[SourceSystem]:
-    return value in ("GITHUB", "JIRA", "UPLOAD")
+    return value in ("GITHUB", "JIRA", "CONFLUENCE", "UPLOAD")
 
 
 @dataclass(frozen=True)

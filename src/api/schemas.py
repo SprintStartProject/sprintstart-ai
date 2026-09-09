@@ -247,7 +247,7 @@ class HistoryEntry(BaseModel):
     }
 
 
-SourceSystemValue = Literal["GITHUB", "JIRA", "UPLOAD"]
+SourceSystemValue = Literal["GITHUB", "JIRA", "CONFLUENCE", "UPLOAD"]
 
 
 class ProjectScopedRequest(BaseModel):
@@ -810,6 +810,64 @@ class ArtifactRunIngestRequest(BaseModel):
         default_factory=list,
         description="Issue labels (e.g. 'good first issue'); empty otherwise.",
     )
+
+
+class ArtifactProjectsRequest(BaseModel):
+    """One artifact's project membership, as the backend now holds it.
+
+    Sent when a source is linked to or unlinked from a project. The backend owns
+    ``artifact_projects``; this carries the *resulting* set rather than a delta,
+    so the two cannot drift apart and a retried call changes nothing.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    artifact_id: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1),
+    ] = Field(description="Artifact whose membership should be rewritten.")
+    project_ids: ProjectIds = Field(
+        default_factory=list,
+        description=(
+            "Projects the artifact now belongs to. An empty list is legitimate "
+            "and makes the artifact invisible to every project until it is "
+            "linked again -- retrieval is fail-closed on membership."
+        ),
+    )
+
+
+class ArtifactProjectsSyncRequest(BaseModel):
+    """Batch membership rewrite, one entry per artifact of the affected source."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    artifacts: list[ArtifactProjectsRequest]
+
+
+class ArtifactProjectsResponse(BaseModel):
+    """Outcome of rewriting one artifact's membership.
+
+    ``chunk_count`` is 0 both for an unknown artifact and for one whose chunks
+    never made it into the index; either way the backend learns that its link
+    did not become retrievable and can re-sync the source.
+    """
+
+    artifact_id: str
+    chunk_count: int
+    status: Literal["completed", "failed"] = "completed"
+    error_message: str | None = None
+
+
+class ArtifactProjectsSyncResponse(BaseModel):
+    artifacts: list[ArtifactProjectsResponse]
+
+
+class ProjectMembershipsDeletedResponse(BaseModel):
+    """Outcome of dropping a deleted project from the whole corpus."""
+
+    project_id: str
+    chunk_count: int
+    artifact_count: int
 
 
 class RunArtifactsSyncRequest(BaseModel):
@@ -1457,3 +1515,115 @@ class FaqMergeResponse(BaseModel):
             "staying over the limit beats merging distinct topics."
         )
     )
+
+
+class SkillCatalogItem(BaseModel):
+    """An existing skill in the catalog passed as context for skill suggestion."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(description="Unique skill identifier.")
+    name: str = Field(description="Human-readable skill name.")
+    category: str | None = Field(
+        default=None, description="Optional category (e.g. 'Backend & APIs')."
+    )
+    universal: bool = Field(
+        default=False,
+        description="Whether this skill is universally applicable without grounding.",
+    )
+
+
+class SkillSuggestionRequest(ProjectScopedRequest):
+    """Request to suggest skills for a role in a project."""
+
+    role_name: str = Field(
+        alias="roleName",
+        min_length=1,
+        description="Name of the project role (e.g. 'Backend Developer').",
+    )
+    role_description: str = Field(
+        alias="roleDescription",
+        default="",
+        description="Description of the role's responsibilities.",
+    )
+    project_industry: str | None = Field(
+        alias="projectIndustry",
+        default=None,
+        description="Optional detected or user-specified project industry/domain.",
+    )
+    available_skills: list[SkillCatalogItem] = Field(
+        alias="availableSkills",
+        default_factory=list[SkillCatalogItem],
+        max_length=200,
+        description="Current catalog of active skills available in the system.",
+    )
+
+
+class SkillSuggestionItem(BaseModel):
+    """A recommended skill with rationale, confidence, and grounding citations."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    name: str = Field(description="Skill name.")
+    category: str | None = Field(
+        default=None, description="Skill category if known or suggested."
+    )
+    reason: str = Field(
+        description="Why this skill is recommended for this role and project."
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence level of the recommendation."
+    )
+    is_new: bool = Field(
+        default=False,
+        description=(
+            "True if the skill was not found in catalog and should be newly created."
+        ),
+    )
+    chunk_ids: list[str] = Field(
+        default_factory=list[str],
+        description="Chunk IDs providing evidence for project-specific skills.",
+    )
+
+
+class SkillSuggestionResponse(BaseModel):
+    """Response containing suggested skills."""
+
+    suggestions: list[SkillSuggestionItem] = Field(
+        default_factory=list[SkillSuggestionItem],
+        description="List of suggested skills matching the role and project.",
+    )
+
+
+# ── Project industry evaluation ───────────────────────────────────────────────
+
+
+class IndustryEvaluationResponse(BaseModel):
+    industry: str = Field(
+        description=(
+            "Detected industry or domain for the project, or empty string if "
+            "undetermined."
+        )
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="Confidence level of the industry evaluation."
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description=(
+            "List of artifact titles or key evidence snippets grounding the evaluation."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "industry": "Quantum Computing Platform",
+                "confidence": "high",
+                "evidence": [
+                    "README.md: Quantum circuit simulator",
+                    "docs/architecture.md",
+                ],
+            }
+        }
+    }

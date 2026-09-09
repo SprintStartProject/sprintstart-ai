@@ -50,6 +50,16 @@ def encode_project_ids(project_ids: tuple[str, ...] | list[str]) -> str:
     return _PROJECT_DELIMITER + _PROJECT_DELIMITER.join(unique) + _PROJECT_DELIMITER
 
 
+def encoded_project_marker(project_id: str) -> str:
+    """The substring an encoded membership list contains iff it holds ``project_id``.
+
+    Lets a SQL ``LIKE`` match a single membership without re-deriving the
+    encoding at the call site -- and without matching an id that merely shares
+    a prefix, because both delimiters are part of the pattern.
+    """
+    return f"{_PROJECT_DELIMITER}{project_id}{_PROJECT_DELIMITER}"
+
+
 def decode_project_ids(value: object) -> tuple[str, ...]:
     if not isinstance(value, str) or not value:
         return ()

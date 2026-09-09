@@ -10,6 +10,7 @@ from api.dependencies import get_llm, get_source_state_store, get_store
 from ingestion.source_state_store import SourceStateStore
 from llm.base import (
     ChatResult,
+    LLMChatStreamEvent,
     LLMStreamEvent,
     Message,
     ReasoningDelta,
@@ -371,6 +372,12 @@ def test_chat_llm_unavailable_emits_error_event(
             self, messages: list[Message], tools: list[ToolSpec] | None = None
         ) -> ChatResult:
             raise LLMUnavailableError("http://localhost:11434")
+
+        def chat_stream(
+            self, messages: list[Message], tools: list[ToolSpec] | None = None
+        ) -> Iterator[LLMChatStreamEvent]:
+            raise LLMUnavailableError("http://localhost:11434")
+            yield from ()  # pragma: no cover - makes this a generator
 
         def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
             raise LLMUnavailableError("http://localhost:11434")
