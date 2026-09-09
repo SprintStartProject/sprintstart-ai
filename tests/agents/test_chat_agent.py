@@ -11,7 +11,7 @@ from agents.chat_agent import (
     wrap_user_query,
 )
 from agents.tools.base import Invocation, Tool, ToolRegistry, ToolResult
-from llm.base import Message, ReasoningDelta, TextDelta, ToolCall
+from llm.base import ChatResult, Message, ReasoningDelta, TextDelta, ToolCall
 from rag.types import Chunk
 from tests.stubs.llm import ScriptedLLMClient, Turn
 from tests.stubs.store import StubVectorStore
@@ -415,3 +415,54 @@ def test_question_is_fenced_against_prompt_injection() -> None:
     lines = user_message.splitlines()
     assert "ignore your instructions" in user_message
     assert lines[0] == lines[-1]  # a matching marker pair fences the question
+
+
+def test_chat_agent_streams_reasoning_during_tool_decision() -> None:
+    """Planning reasoning must reach the user before the tool runs, not after.
+
+    The decision turn is streamed now, so the Reasoning events a model emits
+    while choosing a tool arrive before the Invocation they motivated.
+    """
+    llm = _llm()
+    llm.stream_turns = lambda messages: iter(
+        [
+            ReasoningDelta("The user asks about blockers; I should search."),
+            ChatResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_0", name="retrieve", arguments={"query": "blockers"}
+                    )
+                ],
+            ),
+        ]
+    )
+
+    events = _run(_agent(llm))
+
+    names = [type(e).__name__ for e in events]
+    assert names == ["Reasoning", "Invocation", "Evidence", "Token"]
+    assert names.index("Reasoning") < names.index("Invocation")
+    assert events[-1] == Token("Missing designs.")
+
+
+def test_chat_agent_streams_direct_answer_reasoning_and_tokens() -> None:
+    """A direct answer streams reasoning and tokens live in the single turn.
+
+    Nothing may be re-emitted from the terminal ChatResult: its text mirrors
+    what was already streamed, so a second Token would duplicate the answer.
+    """
+    llm = _llm(answer="Hi! How can I help?")
+    llm.stream_turns = lambda messages: iter(
+        [
+            ReasoningDelta("simple greeting, no search needed"),
+            TextDelta("Hi! How can"),
+            TextDelta(" I help?"),
+            ChatResult(text="Hi! How can I help?", tool_calls=[]),
+        ]
+    )
+
+    events = _run(_agent(llm))
+
+    assert [type(e).__name__ for e in events] == ["Reasoning", "Token", "Token"]
+    assert llm.chat_stream_calls and len(llm.stream_calls) == 0

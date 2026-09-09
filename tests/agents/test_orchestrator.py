@@ -3,7 +3,7 @@ from collections.abc import Iterator
 from agents.orchestrator import ChatOrchestrator
 from api.schemas import HistoryEntry
 from llm.base import (
-    ChatResult,
+    LLMChatStreamEvent,
     LLMStreamEvent,
     Message,
     ReasoningDelta,
@@ -154,10 +154,11 @@ def test_orchestrator_chats_directly_without_touching_the_knowledge_base() -> No
 
 def test_orchestrator_emits_error_event_when_llm_unavailable() -> None:
     class _FailingChat(ScriptedLLMClient):
-        def chat(
+        def chat_stream(
             self, messages: list[Message], tools: list[ToolSpec] | None = None
-        ) -> ChatResult:
+        ) -> Iterator[LLMChatStreamEvent]:
             raise LLMUnavailableError("http://localhost:11434")
+            yield from ()  # pragma: no cover - makes this a generator
 
     llm = _FailingChat([])
 

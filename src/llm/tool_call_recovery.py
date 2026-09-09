@@ -266,4 +266,100 @@ def _markup_start(buffer: str) -> int | None:
     return opening if opening != -1 else marker
 
 
-__all__ = ["guard_event_stream", "guard_stream", "recover_tool_calls"]
+class GuardedTextCollector:
+    """Accumulate a streamed tool-decision turn behind the leak guard.
+
+    ### Why the decision turn needs both guarding and recovery
+
+    A decision turn (``chat_stream``) can end two ways for a model that leaks
+    its tool calls as markup: the calls may arrive structurally in
+    ``tool_calls`` while the markup still sits in the content, or the calls may
+    exist *only* as markup. The visible answer must never show the markup
+    either way — that is what the :func:`guard_stream` machinery does — but
+    unlike the plain answer stream, a decision turn can still *act* on the
+    markup: everything seen is accumulated unguarded in full, so
+    :func:`recover_tool_calls` can lift the calls out of the complete block at
+    stream end, exactly as the buffered ``chat`` path does.
+
+    ### Emission contract
+
+    ``add_text`` returns the text that may be shown now (possibly empty — the
+    tail is withheld while it could still turn out to be markup, per
+    :func:`_unsafe_tail_len`). Reasoning is a boundary between visible runs, so
+    the caller flushes held-back text before yielding a reasoning delta via
+    :meth:`flush_visible`; ``finish`` releases whatever remains.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._full = ""
+        self._reasoning: list[str] = []
+        self._cut = False
+
+    def add_reasoning(self, text: str) -> None:
+        """Record a plain reasoning fragment for the terminal result."""
+        if text.strip():
+            self._reasoning.append(text)
+
+    def flush_visible(self) -> str:
+        """Release held-back visible text; called at reasoning boundaries."""
+        flushed, self._pending = self._pending, ""
+        return flushed
+
+    def add_text(self, text: str) -> str:
+        """Feed one content chunk; returns the text that may be emitted now.
+
+        Full content keeps accumulating even after the guard has cut the
+        visible stream — the remainder of a leaked block is exactly what
+        :func:`recover_tool_calls` needs to parse the call out of.
+        """
+        if not text:
+            return ""
+        self._full += text
+        if self._cut:
+            return ""
+
+        self._pending += text
+        cut = _markup_start(self._pending)
+        if cut is not None:
+            self._cut = True
+            head = self._pending[:cut].rstrip()
+            self._pending = ""
+            return head
+
+        keep = _unsafe_tail_len(self._pending)
+        if keep < len(self._pending):
+            emit = self._pending[: len(self._pending) - keep]
+            self._pending = self._pending[len(self._pending) - keep :]
+            return emit
+        return ""
+
+    @property
+    def full_content(self) -> str:
+        """Everything the model streamed as content, guard cuts notwithstanding.
+
+        The buffered path returns the message content unchanged when structured
+        tool calls exist (only the recovered fallback cleans the text), so the
+        terminal result needs the raw full text for that case.
+        """
+        return self._full
+
+    def finish(self) -> tuple[list[ToolCall], str, str]:
+        """End the stream; returns ``(recovered_calls, cleaned_text, reasoning)``.
+
+        ``cleaned_text`` is the full content minus any recovered markup — the
+        same string the buffered path would have returned, and (when markup was
+        cut) identical to what was actually shown. ``recovered_calls`` is empty
+        unless the model wrote its calls as markup instead of structured ones.
+        """
+        self.flush_visible()
+        calls, cleaned = recover_tool_calls(self._full)
+        return calls, cleaned, "".join(self._reasoning)
+
+
+__all__ = [
+    "GuardedTextCollector",
+    "guard_event_stream",
+    "guard_stream",
+    "recover_tool_calls",
+]
