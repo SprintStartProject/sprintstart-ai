@@ -206,6 +206,7 @@ def _eligible_artifacts(
     metadata_store: IngestionMetadataStore,
     *,
     exclude_source_ids: set[str],
+    project_ids: frozenset[str],
 ) -> list[ArtifactRecord]:
     """Every artifact that could become a starter task, in a stable order.
 
@@ -215,7 +216,9 @@ def _eligible_artifacts(
     were never reached at all.
     """
     eligible: list[ArtifactRecord] = []
-    for artifact in metadata_store.list_artifacts(status="completed"):
+    for artifact in metadata_store.list_artifacts(
+        status="completed", project_ids=list(project_ids)
+    ):
         if artifact.artifact_type != "ISSUE":
             continue
         if (artifact.state or "").upper() != "OPEN":
@@ -242,6 +245,7 @@ def _load_candidates(
     metadata_store: IngestionMetadataStore,
     *,
     exclude_source_ids: set[str],
+    project_ids: frozenset[str],
     limit: int = _MAX_CANDIDATES_PER_RUN,
 ) -> tuple[list[StarterTaskCandidate], int, int]:
     """The issues this run will judge, and how many eligible ones there were.
@@ -255,7 +259,7 @@ def _load_candidates(
     entirely.
     """
     eligible = _eligible_artifacts(
-        metadata_store, exclude_source_ids=exclude_source_ids
+        metadata_store, exclude_source_ids=exclude_source_ids, project_ids=project_ids
     )
 
     candidates: list[StarterTaskCandidate] = []
@@ -288,6 +292,8 @@ def _load_candidates(
 def _mining_fingerprint_material(
     metadata_store: IngestionMetadataStore,
     active_source_ids: list[str] | None = None,
+    *,
+    project_ids: frozenset[str],
 ) -> list[str]:
     """Derive fingerprint material from issue metadata and the active pool.
 
@@ -297,7 +303,9 @@ def _mining_fingerprint_material(
     even if the chunk texts did not change.
     """
     parts: list[str] = []
-    for artifact in metadata_store.list_artifacts(status="completed"):
+    for artifact in metadata_store.list_artifacts(
+        status="completed", project_ids=list(project_ids)
+    ):
         if artifact.artifact_type == "ISSUE":
             labels_str = ",".join(sorted(artifact.labels))
             parts.append(
@@ -316,6 +324,7 @@ def stream_starter_work_pool(
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
     *,
+    project_ids: frozenset[str],
     active_source_ids: list[str] | None = None,
     active_competency_keys: list[str] | None = None,
     last_fingerprint: str | None = None,
@@ -329,7 +338,9 @@ def stream_starter_work_pool(
     the scope-safety judgement, so nothing unsafe is ever shown, and an ``item``
     is a promise the task is in the persisted pool.
     """
-    extra_material = _mining_fingerprint_material(metadata_store, active_source_ids)
+    extra_material = _mining_fingerprint_material(
+        metadata_store, active_source_ids, project_ids=project_ids
+    )
     progress = ProgressStream("starter_work")
     fingerprint, early_events, early_outcome = fingerprint_gate(
         progress,
@@ -345,6 +356,7 @@ def stream_starter_work_pool(
         empty_warning_label="The project has no indexed material yet",
         empty_done_label="No starter tasks could be mined",
         extra_fingerprint_material=extra_material,
+        project_ids=project_ids,
     )
     if early_outcome is not None:
         yield from early_events
@@ -352,7 +364,10 @@ def stream_starter_work_pool(
 
     yield progress.stage("retrieving", "Collecting open issues from the corpus")
     candidates, eligible_total, skipped_no_chunks = _load_candidates(
-        store, metadata_store, exclude_source_ids=set(active_source_ids or [])
+        store,
+        metadata_store,
+        exclude_source_ids=set(active_source_ids or []),
+        project_ids=project_ids,
     )
     if not candidates:
         outcome = StarterWorkOutcome(
@@ -464,6 +479,7 @@ def generate_starter_work_pool(
     store: VectorStore,
     metadata_store: IngestionMetadataStore,
     *,
+    project_ids: frozenset[str],
     active_source_ids: list[str] | None = None,
     active_competency_keys: list[str] | None = None,
     last_fingerprint: str | None = None,
@@ -487,6 +503,7 @@ def generate_starter_work_pool(
             llm,
             store,
             metadata_store,
+            project_ids=project_ids,
             active_source_ids=active_source_ids,
             active_competency_keys=active_competency_keys,
             last_fingerprint=last_fingerprint,

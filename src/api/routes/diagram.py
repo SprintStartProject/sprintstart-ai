@@ -70,6 +70,7 @@ def assemble(
             llm,
             store,
             subject=subject,
+            project_ids=frozenset(request.project_ids),
             last_fingerprint=request.last_fingerprint,
         )
     except LLMUnavailableError as exc:
@@ -108,6 +109,7 @@ def assemble_stream(
         llm,
         store,
         subject=subject,
+        project_ids=frozenset(request.project_ids),
         last_fingerprint=request.last_fingerprint,
     )
     return StreamingResponse(

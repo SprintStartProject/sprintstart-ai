@@ -23,6 +23,7 @@ def _collect[T](
 
 _EMBED = [1.0] + [0.0] * 767
 _TITLE = "Fix the stale cache header on /api/v1/reports"
+_PIDS = frozenset({"p1"})
 
 
 def _llm(payload: dict[str, object]) -> StubLLMClient:
@@ -41,6 +42,7 @@ def _store(*texts: str) -> StubVectorStore:
                 filename=f"doc{i}.md",
                 text=text,
                 embedding=_EMBED,
+                project_ids=("p1",),
             )
             for i, text in enumerate(texts, start=1)
         ]
@@ -82,7 +84,7 @@ def test_assembles_a_step_segmented_packet_with_the_sources_it_drew_on() -> None
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.status == "assembled"
     packet = outcome.packet
@@ -103,7 +105,7 @@ def test_sections_are_ordered_by_step_not_by_the_model() -> None:
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.packet is not None
     assert [s.step for s in outcome.packet.sections] == ["FIND_THE_CODE", "OPEN_THE_PR"]
@@ -119,7 +121,7 @@ def test_drops_an_ungrounded_section_but_keeps_the_packet() -> None:
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.packet is not None
     assert [s.title for s in outcome.packet.sections] == ["Grounded"]
@@ -136,7 +138,7 @@ def test_no_section_kind_is_exempt_from_citing() -> None:
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.packet is not None
     assert [s.step for s in outcome.packet.sections] == ["SET_UP"]
@@ -151,7 +153,7 @@ def test_drops_a_section_of_a_step_that_does_not_exist() -> None:
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.packet is not None
     assert [s.step for s in outcome.packet.sections] == ["SET_UP"]
@@ -166,7 +168,7 @@ def test_collapses_sources_that_restate_each_other() -> None:
     )
     llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.chunks_collapsed == 1
     assert outcome.chunks_retrieved == 2
@@ -184,7 +186,7 @@ def test_collapses_two_sections_of_a_step_that_say_the_same_thing() -> None:
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.packet is not None
     assert [s.title for s in outcome.packet.sections] == ["Run it"]
@@ -196,7 +198,7 @@ def test_skips_when_every_section_is_ungrounded() -> None:
     store = _store("run make dev to start the service locally")
     llm = _llm(_payload(_section("SET_UP", "Invented", ["nope"])))
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.status == "skipped"
     assert outcome.packet is None
@@ -204,7 +206,7 @@ def test_skips_when_every_section_is_ungrounded() -> None:
 
 def test_empty_corpus_is_skipped_not_an_empty_packet() -> None:
     outcome = assemble_orientation(
-        _llm(_payload()), StubVectorStore(), task_title=_TITLE
+        _llm(_payload()), StubVectorStore(), task_title=_TITLE, project_ids=_PIDS
     )
 
     assert outcome.status == "skipped"
@@ -217,7 +219,7 @@ def test_unparseable_output_is_skipped_not_a_half_packet() -> None:
     llm = StubLLMClient(generate_response="I'm afraid I can't do that.")
     llm.embedding = _EMBED
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE)
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert outcome.status == "skipped"
     assert outcome.packet is None
@@ -227,12 +229,13 @@ def test_unchanged_corpus_serves_the_cached_packet() -> None:
     store = _store("run make dev to start the service locally")
     llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
 
-    first = assemble_orientation(llm, store, task_title=_TITLE)
+    first = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
     assert first.provenance is not None
     again = assemble_orientation(
         llm,
         store,
         task_title=_TITLE,
+        project_ids=_PIDS,
         last_fingerprint=first.provenance.corpus_fingerprint,
     )
 
@@ -244,7 +247,7 @@ def test_a_moved_corpus_regenerates_rather_than_serving_stale_guidance() -> None
     store = _store("run make dev to start the service locally")
     llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
 
-    first = assemble_orientation(llm, store, task_title=_TITLE)
+    first = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
     assert first.provenance is not None
 
     store.add(
@@ -255,6 +258,7 @@ def test_a_moved_corpus_regenerates_rather_than_serving_stale_guidance() -> None
                 filename="CONTRIBUTING.md",
                 text="the dev command is now `just dev`, make dev was removed",
                 embedding=_EMBED,
+                project_ids=("p1",),
             )
         ]
     )
@@ -262,6 +266,7 @@ def test_a_moved_corpus_regenerates_rather_than_serving_stale_guidance() -> None
         llm,
         store,
         task_title=_TITLE,
+        project_ids=_PIDS,
         last_fingerprint=first.provenance.corpus_fingerprint,
     )
 
@@ -281,7 +286,7 @@ def test_assembly_is_sampled_deterministically() -> None:
 
     llm.generate = recording  # type: ignore[method-assign]
 
-    assemble_orientation(llm, store, task_title=_TITLE)
+    assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
 
     assert temperatures == [0.0]
 
@@ -302,6 +307,7 @@ def test_the_task_and_its_paths_reach_the_prompt() -> None:
         llm,
         store,
         task_title=_TITLE,
+        project_ids=_PIDS,
         task_body="The header is computed once at boot.",
         labels=["good first issue"],
         touched_paths=["src/api/reports.py"],
@@ -336,7 +342,9 @@ def test_stream_emits_per_step_stages_grounded_items_and_a_done() -> None:
         )
     )
 
-    events, outcome = _collect(stream_orientation(llm, store, task_title=_TITLE))
+    events, outcome = _collect(
+        stream_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    )
 
     # One retrieval stage per step of the path to a PR.
     retrieving = [e for e in events if e.get("stage") == "retrieving"]
@@ -363,7 +371,9 @@ def test_stream_never_emits_an_ungrounded_section_as_an_item() -> None:
         )
     )
 
-    events, _ = _collect(stream_orientation(llm, store, task_title=_TITLE))
+    events, _ = _collect(
+        stream_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    )
 
     items = [e for e in events if e["type"] == "item"]
     assert [i["item"]["step"] for i in items] == ["SET_UP"]  # type: ignore[index]
@@ -381,9 +391,11 @@ def test_streaming_result_equals_the_non_streaming_packet() -> None:
         _section("FIND_THE_CODE", "Where it lives", ["c2"]),
     )
 
-    _, streamed = _collect(stream_orientation(_llm(payload), store, task_title=_TITLE))
+    _, streamed = _collect(
+        stream_orientation(_llm(payload), store, task_title=_TITLE, project_ids=_PIDS)
+    )
     synchronous: OrientationOutcome = assemble_orientation(
-        _llm(payload), store, task_title=_TITLE
+        _llm(payload), store, task_title=_TITLE, project_ids=_PIDS
     )
 
     assert streamed.status == synchronous.status
@@ -392,10 +404,87 @@ def test_streaming_result_equals_the_non_streaming_packet() -> None:
 
 def test_an_empty_corpus_streams_a_skipped_done_not_an_error() -> None:
     events, outcome = _collect(
-        stream_orientation(_llm(_payload()), StubVectorStore(), task_title=_TITLE)
+        stream_orientation(
+            _llm(_payload()), StubVectorStore(), task_title=_TITLE, project_ids=_PIDS
+        )
     )
 
     assert outcome.status == "skipped"
     assert events[-1]["type"] == "done"
     assert events[-1]["result"]["status"] == "skipped"  # type: ignore[index]
     assert "error" not in [e["type"] for e in events]
+
+
+def test_orientation_scopes_to_requested_projects() -> None:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="p1_doc.md",
+                text="run make dev for project 1",
+                embedding=_EMBED,
+                project_ids=("p1",),
+            ),
+            Chunk(
+                id="c2",
+                artifact_id="a2",
+                filename="p2_doc.md",
+                text="run make dev for project 2",
+                embedding=_EMBED,
+                project_ids=("p2",),
+            ),
+        ]
+    )
+    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    outcome = assemble_orientation(
+        llm, store, task_title=_TITLE, project_ids=frozenset({"p1"})
+    )
+    assert outcome.status == "assembled"
+    assert outcome.packet is not None
+    assert {s.filename for s in outcome.packet.sources} == {"p1_doc.md"}
+
+
+def test_orientation_multi_project_union() -> None:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="p1_doc.md",
+                text="run make dev for project 1",
+                embedding=_EMBED,
+                project_ids=("p1",),
+            ),
+            Chunk(
+                id="c2",
+                artifact_id="a2",
+                filename="p2_doc.md",
+                text="architecture layout for project 2",
+                embedding=_EMBED,
+                project_ids=("p2",),
+            ),
+            Chunk(
+                id="c3",
+                artifact_id="a3",
+                filename="p3_doc.md",
+                text="pull requests for project 3",
+                embedding=_EMBED,
+                project_ids=("p3",),
+            ),
+        ]
+    )
+    llm = _llm(
+        _payload(
+            _section("SET_UP", "Run it locally", ["c1"]),
+            _section("FIND_THE_CODE", "Where it lives", ["c2"]),
+        )
+    )
+    outcome = assemble_orientation(
+        llm, store, task_title=_TITLE, project_ids=frozenset({"p1", "p2"})
+    )
+    assert outcome.status == "assembled"
+    assert outcome.packet is not None
+    assert {s.filename for s in outcome.packet.sources} == {"p1_doc.md", "p2_doc.md"}
