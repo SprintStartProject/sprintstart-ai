@@ -35,6 +35,11 @@ class PhaseStep(BaseModel):
     ``expected_outcome`` states what a newcomer should be able to do afterwards;
     ``estimated_minutes`` is a rough time budget. Neither is invented: both are
     written to reflect the evidence the step cites.
+
+    ``key`` and ``blocked_by`` express optional dependency edges between the
+    assembled items: ``key`` is a short unique handle assigned by the model and
+    ``blocked_by`` lists the keys of steps/questions that must be completed
+    first. Both stay empty when there is no genuine dependency.
     """
 
     title: str
@@ -43,6 +48,8 @@ class PhaseStep(BaseModel):
     resources: list[PhaseResource] = Field(default_factory=list[PhaseResource])
     estimated_minutes: int | None = None
     expected_outcome: str = ""
+    key: str = ""
+    blocked_by: list[str] = Field(default_factory=list[str])
 
 
 class PhaseProvenance(BaseModel):

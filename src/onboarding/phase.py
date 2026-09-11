@@ -25,8 +25,9 @@ import json
 import logging
 from collections.abc import Generator
 from datetime import UTC, datetime
+from typing import cast
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
 from llm.base import LLMClient, Message
@@ -61,6 +62,7 @@ _TEMPERATURE = 0.0
 # extras, not the phase's substance.
 _MIN_STEPS = 1
 _MAX_STEPS = 8
+_MAX_GENERATION_ATTEMPTS = 2
 
 
 class _GenTask(BaseModel):
@@ -81,6 +83,29 @@ class _GenStep(BaseModel):
     estimated_minutes: int | None = None
     expected_outcome: str = ""
     chunk_ids: list[str] = Field(default_factory=list[str])
+    key: str = ""
+    blocked_by: list[str] = Field(default_factory=list[str])
+
+    @field_validator("tasks", mode="before")
+    @classmethod
+    def normalize_string_tasks(cls, value: object) -> object:
+        """Accept the compact task form models commonly emit.
+
+        The requested schema uses task objects, but some otherwise valid model
+        responses return ``tasks`` as a list of imperative strings. A string
+        already contains the task's title; preserving it with an empty
+        description is lossless and keeps a harmless shape deviation from
+        discarding the whole phase.
+        """
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+        items = cast(list[object], value)
+        return [
+            {"title": item, "description": ""} if isinstance(item, str) else item
+            for item in items
+        ]
 
 
 class _GenOption(BaseModel):
@@ -94,6 +119,13 @@ class _GenQuestion(BaseModel):
     explanation: str | None = None
     correct_answer: str | None = None
     options: list[_GenOption] = Field(default_factory=list[_GenOption])
+    key: str = ""
+    blocked_by: list[str] = Field(default_factory=list[str])
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def normalize_null_options(cls, value: object) -> object:
+        return [] if value is None else value
 
 
 class _GenPayload(BaseModel):
@@ -151,12 +183,13 @@ def _build_prompt(
         "The evidence below is the material this team actually has; produce the "
         "phase's content so a new member can complete it in this project.\n\n"
         "Return STRICT JSON only (no prose, no markdown fences):\n"
-        '{"steps": [{"title": str, "description": str, "tasks": '
+        '{"steps": [{"key": str, "title": str, "description": str, "tasks": '
         '[{"title": str, "description": str}], "resources": [{"title": str, '
         '"url": str}], "estimated_minutes": int|null, "expected_outcome": str, '
-        '"chunk_ids": [str]}], "questions": [{"type": "MULTIPLE_CHOICE"|'
-        '"SHORT_TEXT", "question": str, "explanation": str, "correct_answer": '
-        'str|null, "options": [{"label": str, "correct": bool}]}]}\n\n'
+        '"chunk_ids": [str], "blocked_by": [str]}], "questions": [{"key": str, '
+        '"type": "MULTIPLE_CHOICE"|"SHORT_TEXT", "question": str, "explanation": '
+        'str, "correct_answer": str|null, "options": [{"label": str, "correct": '
+        'bool}], "blocked_by": [str]}]}\n\n'
         "Rules:\n"
         "1. Make every step actionable and specific to this project: exact "
         "paths, exact commands, exact conventions. Generic software advice is "
@@ -176,10 +209,19 @@ def _build_prompt(
         "all correct), plausible misconceptions as distractors, and an "
         "explanation. SHORT_TEXT: ask the learner to explain a consequence, "
         "trade-off or reasoning in their own words, with a non-empty "
-        "'correct_answer' capturing the expected idea.\n"
+        "'correct_answer' capturing the expected idea and 'options' set to [].\n"
         "7. Base everything strictly on the evidence below; never invent facts "
         "it does not support. If the evidence says nothing about part of the "
         "prompt, omit that part — an honest gap beats invented content.\n"
+        "8. Dependency edges. Give every step and question a short, unique key "
+        '(e.g. "s1", "q2"). Set "blocked_by" to the keys of the items a '
+        "newcomer must finish first for this one to make sense — e.g. read the "
+        "README before running its build command, understand the domain before "
+        "reviewing its conventions, or answer a knowledge check after the step "
+        'that teaches it. Leave "blocked_by" empty only when the item is '
+        "genuinely independent and can be done at any point; never use it just "
+        "to restate the normal reading order, and only reference keys you "
+        "defined.\n"
     )
     user = (
         f"Phase: {title}{description_line}\n\n"
@@ -194,9 +236,30 @@ def _build_prompt(
 
 def _parse_payload(raw: str) -> _GenPayload:
     try:
-        return _GenPayload.model_validate_json(extract_json_object(raw))
+        payload = json.loads(extract_json_object(raw), strict=False)
+        return _GenPayload.model_validate(payload)
     except (ValidationError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid phase output: {exc}") from exc
+
+
+def _correction_prompt(
+    messages: list[Message], raw: str, error: ValueError
+) -> list[Message]:
+    """Ask once for the same answer with only its JSON/shape corrected."""
+    return [
+        *messages,
+        Message(role="assistant", content=raw),
+        Message(
+            role="user",
+            content=(
+                "That response could not be validated: "
+                f"{error}. Return the same grounded content again as one valid "
+                "JSON object matching the schema exactly. Task entries must be "
+                'objects like {"title": "...", "description": "..."}. Return '
+                "JSON only, with all quotes escaped and all commas present."
+            ),
+        ),
+    ]
 
 
 # --- resolution ----------------------------------------------------------------
@@ -258,6 +321,8 @@ def _resolve_steps(
                 resources=resources,
                 estimated_minutes=minutes,
                 expected_outcome=item.expected_outcome,
+                key=item.key.strip(),
+                blocked_by=[k for k in item.blocked_by if k.strip()],
             )
         )
 
@@ -291,6 +356,8 @@ def _validate_question(item: _GenQuestion) -> CheckQuestion | None:
                 CheckOption(position=i, label=o.label, correct=o.correct)
                 for i, o in enumerate(options)
             ],
+            key=item.key.strip(),
+            blocked_by=[k for k in item.blocked_by if k.strip()],
         )
 
     if item.type == "SHORT_TEXT":
@@ -302,6 +369,8 @@ def _validate_question(item: _GenQuestion) -> CheckQuestion | None:
             question=item.question,
             explanation=item.explanation,
             correct_answer=item.correct_answer,
+            key=item.key.strip(),
+            blocked_by=[k for k in item.blocked_by if k.strip()],
         )
 
     return None
@@ -314,6 +383,37 @@ def _resolve_questions(payload: _GenPayload) -> tuple[list[CheckQuestion], int]:
     for position, question in enumerate(questions):
         question.position = position
     return questions, dropped
+
+
+def _resolve_dependencies(
+    steps: list[PhaseStep], questions: list[CheckQuestion]
+) -> None:
+    """Rewrite each kept item's ``blocked_by`` keys against the kept items.
+
+    Steps and questions share one key space, ordered steps first then
+    questions — the order a newcomer meets them. A reference survives only when
+    it points at an item *earlier* in that order (so the assembled graph is
+    always acyclic), the referenced key is non-empty, and the target is not the
+    item itself. References to a step that grounding dropped, or to an unknown
+    key, resolve to nothing and are dropped with the edge.
+    """
+    order: list[str] = [s.key for s in steps if s.key]
+    order += [q.key for q in questions if q.key]
+    index = {key: position for position, key in enumerate(order)}
+
+    def resolve(item_key: str, blocked_by: list[str]) -> list[str]:
+        if not item_key:
+            return []
+        return [
+            key
+            for key in blocked_by
+            if key != item_key and key in index and index[key] < index[item_key]
+        ]
+
+    for step in steps:
+        step.blocked_by = resolve(step.key, step.blocked_by)
+    for question in questions:
+        question.blocked_by = resolve(question.key, question.blocked_by)
 
 
 # --- job -----------------------------------------------------------------------
@@ -384,19 +484,33 @@ def stream_phase(
     yield progress.stage(
         "generating", f"Writing the phase from {len(chunks)} source(s)"
     )
-    raw = llm.generate(
-        _build_prompt(phase_title, phase_description, phase_prompt, chunks),
-        temperature=_TEMPERATURE,
-    )
-    try:
-        payload = _parse_payload(raw)
-    except ValueError as exc:
-        logger.warning("Phase assembly failed for %r: %s", phase_title, exc)
+    messages = _build_prompt(phase_title, phase_description, phase_prompt, chunks)
+    parse_error: ValueError | None = None
+    payload: _GenPayload | None = None
+    for attempt in range(_MAX_GENERATION_ATTEMPTS):
+        raw = llm.generate(messages, temperature=_TEMPERATURE)
+        try:
+            payload = _parse_payload(raw)
+            break
+        except ValueError as exc:
+            parse_error = exc
+            logger.warning(
+                "Phase assembly attempt %d failed for %r: %s",
+                attempt + 1,
+                phase_title,
+                exc,
+            )
+            if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
+                yield progress.stage("generating", "Correcting invalid generated JSON")
+                messages = _correction_prompt(messages, raw, exc)
+
+    if payload is None:
+        assert parse_error is not None
         outcome = PhaseOutcome(
             status="skipped",
             chunks_retrieved=len(chunks),
             chunks_collapsed=collapsed,
-            notes=[str(exc)],
+            notes=[str(parse_error)],
         )
         yield progress.warning("The generated content could not be read")
         yield progress.done("No phase content could be assembled", _dump(outcome))
@@ -404,9 +518,10 @@ def stream_phase(
 
     yield progress.stage("grounding", "Checking every step cites its source")
     steps, steps_dropped = _resolve_steps(payload, chunks)
+    questions, questions_dropped = _resolve_questions(payload)
+    _resolve_dependencies(steps, questions)
     for step in steps:
         yield progress.item(step.model_dump(mode="json"), f"Step: {step.title}")
-    questions, questions_dropped = _resolve_questions(payload)
     for question in questions:
         yield progress.item(
             question.model_dump(mode="json"),

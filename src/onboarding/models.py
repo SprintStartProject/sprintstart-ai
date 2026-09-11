@@ -263,7 +263,10 @@ class CheckQuestion(BaseModel):
     """One knowledge-check question, grounded in its phase's content.
 
     ``correct_answer`` is only meaningful for ``SHORT_TEXT`` questions;
-    ``options`` is only meaningful for ``MULTIPLE_CHOICE`` ones.
+    ``options`` is only meaningful for ``MULTIPLE_CHOICE`` ones. When a phase
+    is AI-assembled, ``key`` and ``blocked_by`` carry optional dependency
+    edges: ``blocked_by`` lists the keys of earlier steps/questions this
+    question must wait for. Both stay empty for pipeline-generated checks.
     """
 
     position: int
@@ -272,6 +275,8 @@ class CheckQuestion(BaseModel):
     explanation: str | None = None
     correct_answer: str | None = None
     options: list[CheckOption] = Field(default_factory=list[CheckOption])
+    key: str = ""
+    blocked_by: list[str] = Field(default_factory=list[str])
 
 
 class PhaseCheck(BaseModel):

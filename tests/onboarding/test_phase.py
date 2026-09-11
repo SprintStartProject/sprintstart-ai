@@ -1,6 +1,7 @@
 import json
 from collections.abc import Generator
 
+from llm.base import Message
 from onboarding.phase import assemble_phase, stream_phase
 from onboarding.progress import ProgressEvent
 from rag.types import Chunk
@@ -119,6 +120,95 @@ def test_assembles_grounded_steps_and_questions() -> None:
     assert outcome.check_questions[0].question == "Explain SHORT_TEXT"
 
 
+def test_accepts_literal_control_characters_in_generated_strings() -> None:
+    """Model output with an unescaped newline remains usable phase content."""
+    payload = _payload(steps=[_step("Read the README", ["c1"])])
+    payload["steps"][0]["description"] = "Read first\nThen run the application"  # type: ignore[index]
+    raw = json.dumps(payload).replace("\\n", "\n")
+    llm = StubLLMClient(generate_response=raw, embedding=_EMBED)
+
+    outcome = assemble_phase(
+        llm,
+        _store("the README explains the project and how to run it locally"),
+        phase_title="Project Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+    )
+
+    assert outcome.status == "assembled"
+    assert outcome.steps[0].description == "Read first\nThen run the application"
+
+
+def test_treats_null_short_text_options_as_an_empty_list() -> None:
+    """A model's explicit null for inapplicable options does not skip the phase."""
+    outcome = assemble_phase(
+        _llm(
+            _payload(
+                steps=[_step("Read the README", ["c1"])],
+                questions=[_question(options=None)],
+            )
+        ),
+        _store("the README explains the project and how to run it locally"),
+        phase_title="Project Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+    )
+
+    assert outcome.status == "assembled"
+    assert len(outcome.check_questions) == 1
+    assert outcome.check_questions[0].options == []
+
+
+def test_accepts_tasks_as_plain_strings() -> None:
+    """A compact model task remains usable instead of invalidating the phase."""
+    step = _step("Review the repository", ["c1"])
+    step["tasks"] = ["Open README.md", "Search for meeting references"]
+
+    outcome = assemble_phase(
+        _llm(_payload(steps=[step])),
+        _store("the README documents the repository structure"),
+        phase_title="Architecture",
+        phase_prompt="Review the repository.",
+        project_id=_PROJECT,
+    )
+
+    assert outcome.status == "assembled"
+    assert [task.title for task in outcome.steps[0].tasks] == [
+        "Open README.md",
+        "Search for meeting references",
+    ]
+    assert all(task.description == "" for task in outcome.steps[0].tasks)
+
+
+def test_retries_once_when_generated_json_is_invalid() -> None:
+    """A transient syntax error gets one correction pass before giving up."""
+    valid = json.dumps(_payload(steps=[_step("Read the README", ["c1"])]))
+
+    class _CorrectingLLM(StubLLMClient):
+        def __init__(self) -> None:
+            super().__init__(embedding=_EMBED)
+            self.calls: list[list[Message]] = []
+
+        def generate(
+            self, messages: list[Message], *, temperature: float | None = None
+        ) -> str:
+            self.calls.append(messages)
+            return '{"steps": [' if len(self.calls) == 1 else valid
+
+    llm = _CorrectingLLM()
+    outcome = assemble_phase(
+        llm,
+        _store("the README explains the project"),
+        phase_title="Architecture",
+        phase_prompt="Review the repository.",
+        project_id=_PROJECT,
+    )
+
+    assert outcome.status == "assembled"
+    assert len(llm.calls) == 2
+    assert "could not be validated" in llm.calls[1][-1]["content"]
+
+
 def test_drops_an_ungrounded_step_but_keeps_the_phase() -> None:
     """A step with no source does not ship -- that is the phase's grounding rule."""
     store = _store("the README explains the project and how to run it locally")
@@ -142,6 +232,98 @@ def test_drops_an_ungrounded_step_but_keeps_the_phase() -> None:
     assert outcome.status == "assembled"
     assert [s.title for s in outcome.steps] == ["Read the README"]
     assert outcome.steps_dropped == 1
+
+
+def test_resolves_dependency_edges_between_grounded_items() -> None:
+    """blocked_by keys survive only when they name an earlier kept item."""
+    store = _store(
+        "the README explains the project and how to run it locally",
+        "a build requires the environment to be configured first",
+    )
+    readme = _step("Read the README", ["c1"])
+    readme["key"] = "s1"
+    setup = _step("Set up the environment", ["c2"])
+    setup["key"] = "s2"
+    setup["blocked_by"] = ["s1", "missing"]
+    ghost = _step("Ungrounded step", ["nope"])
+    ghost["key"] = "s3"
+    later = _step("Depends on a dropped step", ["c1"])
+    later["key"] = "s4"
+    later["blocked_by"] = ["s3", "s2"]
+    selfie = _step("Self-referencing step", ["c1"])
+    selfie["key"] = "s5"
+    selfie["blocked_by"] = ["s5"]
+
+    outcome = assemble_phase(
+        _llm(
+            _payload(
+                steps=[readme, setup, ghost, later, selfie],
+                questions=[_question(key="q1", blocked_by=["s1", "unknown"])],
+            )
+        ),
+        store,
+        phase_title="Project Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+    )
+
+    assert outcome.status == "assembled"
+    by_key = {s.key: s for s in outcome.steps}
+    assert by_key["s2"].blocked_by == ["s1"]
+    # Reference to an ungrounded step and a self-reference are dropped.
+    assert by_key["s4"].blocked_by == ["s2"]
+    assert by_key["s5"].blocked_by == []
+    assert outcome.check_questions[0].blocked_by == ["s1"]
+
+
+def test_dependency_edges_survive_end_to_end() -> None:
+    """A genuine ordering chain comes back as usable blocked_by edges, not [].
+
+    This is the behavior the prompt now asks for: when items have a real order
+    (read the README -> run its build -> follow the conventions), the phase
+    should expose it as dependency edges rather than dropping them all.
+    """
+    store = _store(
+        "the README explains the project and how to run it locally",
+        "the build only works once the README's environment setup is done",
+        "coding conventions live in CONTRIBUTING.md",
+    )
+    readme = _step("Read the README", ["c1"])
+    readme["key"] = "s1"
+    build = _step("Run the build", ["c2"])
+    build["key"] = "s2"
+    build["blocked_by"] = ["s1"]
+    conventions = _step("Follow the conventions", ["c3"])
+    conventions["key"] = "s3"
+    conventions["blocked_by"] = ["s2"]
+
+    outcome = assemble_phase(
+        _llm(
+            _payload(
+                steps=[readme, build, conventions],
+                questions=[
+                    _question(key="q1", blocked_by=["s1"]),
+                    _question(key="q2", blocked_by=["s3"]),
+                ],
+            )
+        ),
+        store,
+        phase_title="Project Setup",
+        phase_prompt=(
+            "Guide a new member from reading the README to following the conventions."
+        ),
+        project_id=_PROJECT,
+    )
+
+    assert outcome.status == "assembled"
+    by_key = {s.key: s for s in outcome.steps}
+    # The chain survives: build is blocked by the README, conventions by the build.
+    assert by_key["s1"].blocked_by == []
+    assert by_key["s2"].blocked_by == ["s1"]
+    assert by_key["s3"].blocked_by == ["s2"]
+    # Knowledge checks are blocked by the step that teaches them.
+    assert outcome.check_questions[0].blocked_by == ["s1"]
+    assert outcome.check_questions[1].blocked_by == ["s3"]
 
 
 def test_drops_invalid_questions_and_keeps_the_valid_ones() -> None:
