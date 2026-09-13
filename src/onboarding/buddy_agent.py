@@ -68,7 +68,28 @@ _MIN_SCORE = 0.3
 _SOURCE_CHARS = 800
 # How many internal search hops before we force a final answer, so a confused model
 # can't loop forever gathering evidence it never uses.
-_MAX_STEPS = 4
+#
+# Raised from 4 after a testing session: only *search-only* hops consume this budget (a
+# hop that asks for a backend tool returns immediately), and a model that searched four
+# times before deciding to act never got to act at all -- it hit the forced answer
+# below, which has no tools, and promised the hire a button that could not exist. Six
+# leaves room for a thorough answer and still bounds the loop.
+_MAX_STEPS = 6
+
+# What the model is told when the search budget is spent.
+#
+# It answers the hire's question with the persona still in front of it -- "offer
+# `add_path_step`", "offer to claim it" -- and without this it took those at face value
+# and told the hire to confirm something no tool call had produced. A model that knows
+# it has no tools this turn can only do the honest thing: answer with what it has and
+# leave the offer for the next turn.
+_NO_TOOLS_THIS_TURN = (
+    "You have no tools available for this reply and cannot do anything or offer "
+    "anything: no confirm button can appear. Answer with what you already have. Do not "
+    "say you have done something, do not tell the hire to confirm, click or check "
+    "anything, and do not claim anything is on their screen. If something still needs "
+    "doing, say what it is and that you can set it up when they reply."
+)
 
 
 @dataclass
@@ -285,7 +306,11 @@ def run_agent_turn(
         # Only local searches this turn -- loop and let the model reason over them.
 
     # Step budget spent: force a final answer with no tools rather than loop forever.
-    forced = llm.generate(work)
+    #
+    # The notice goes to the model, not into the returned conversation: a final turn's
+    # messages are discarded by the caller, and a transcript carrying instructions about
+    # a budget nobody can see would be a strange thing to keep.
+    forced = llm.generate([*work, Message(role="system", content=_NO_TOOLS_THIS_TURN)])
     return AgentTurnResult(
         final=True,
         text=forced,

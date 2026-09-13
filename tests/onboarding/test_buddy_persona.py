@@ -249,8 +249,8 @@ def test_a_locked_item_is_never_agreed_to() -> None:
 def test_items_are_named_by_number_and_linked() -> None:
     persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
 
-    assert "markdown link" in persona
-    assert "A bare number from them means that item" in persona
+    assert "linked, then its title" in persona
+    assert "means that item" in persona
 
 
 def test_a_refused_proposal_is_never_described_as_a_button() -> None:
@@ -271,3 +271,23 @@ def test_part_of_a_step_is_a_line_not_the_whole_step() -> None:
     # The product allows a finished step with open lines; the mentor must not invent a
     # rule the product does not have.
     assert "checklist has to be empty" in persona
+
+
+def test_offering_is_described_as_a_tool_call_not_as_a_sentence() -> None:
+    """The failure this exists for: hires were told to click a button that no tool call
+    had produced, so there was nothing on screen."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "by calling its tool" in persona
+    assert "Never describe a button instead of making one" in persona
+    # And the arguments, because a call missing one is refused and also shows no button.
+    assert "pass every argument the tool asks for" in persona
+
+
+def test_an_item_is_written_as_a_linked_number() -> None:
+    """A literal shape rather than a description of one: a small model copies a pattern
+    far more reliably than it follows an instruction about formatting."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "[#3](/onboarding/" in persona
+    assert "character for character" in persona
