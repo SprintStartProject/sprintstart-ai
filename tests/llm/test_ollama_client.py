@@ -114,9 +114,11 @@ class _FakeOllamaClient:
         self,
         model: str = "",
         messages: Sequence[Mapping[str, Any]] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]:
         self.last_chat_model = model
         self.last_chat_messages = list(messages) if messages is not None else None
+        self.last_tools = list(tools) if tools is not None else None
         if self._chat_error is not None:
             raise self._chat_error
         for index, token in enumerate(self._stream_tokens):
@@ -125,9 +127,26 @@ class _FakeOllamaClient:
                 if index < len(self._stream_thinking)
                 else None
             )
+            # Tool calls ride on the first chunk only, mirroring how the real
+            # daemon attaches them once alongside the content deltas.
+            tool_calls = (
+                [
+                    ollama.Message.ToolCall(
+                        function=ollama.Message.ToolCall.Function(
+                            name=name, arguments=args
+                        )
+                    )
+                    for name, args in self._tool_calls
+                ]
+                if index == 0
+                else None
+            )
             yield ollama.ChatResponse(
                 message=ollama.Message(
-                    role="assistant", content=token, thinking=thinking
+                    role="assistant",
+                    content=token,
+                    thinking=thinking,
+                    tool_calls=tool_calls,
                 )
             )
 

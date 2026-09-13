@@ -7,6 +7,7 @@ import ollama
 
 from llm.base import (
     ChatResult,
+    LLMChatStreamEvent,
     LLMStreamEvent,
     Message,
     ReasoningDelta,
@@ -15,7 +16,11 @@ from llm.base import (
     ToolSpec,
 )
 from llm.errors import LLMUnavailableError
-from llm.tool_call_recovery import guard_event_stream, recover_tool_calls
+from llm.tool_call_recovery import (
+    GuardedTextCollector,
+    guard_event_stream,
+    recover_tool_calls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +108,7 @@ class OllamaBackend(Protocol):
         self,
         model: str = "",
         messages: Sequence[Mapping[str, Any]] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]: ...
 
     def embed(
@@ -194,10 +200,12 @@ class _OllamaAdapter:
         self,
         model: str = "",
         messages: Sequence[Mapping[str, Any]] | None = None,
+        tools: Sequence[Mapping[str, Any]] | None = None,
     ) -> Iterator[ollama.ChatResponse]:
         stream: Iterator[ollama.ChatResponse] = self._client.chat(  # type: ignore[assignment]
             model=model,
             messages=list(messages or []),
+            tools=list(tools) if tools else None,
             stream=True,
             options=self._options,
         )
@@ -303,6 +311,79 @@ class OllamaClient:
         # eagerly, the generator body does not, so the check here is only load-bearing
         # if the value it checked is the one that reaches the call.
         return guard_event_stream(self._stream_raw(self._model, messages))
+
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        """Stream one tool-decision turn with live reasoning and answer deltas.
+
+        Mirrors the buffered tool-mode ``chat``: tool definitions ride along and
+        the leak guard still applies, because the same local models that leak
+        markup there reach this path. Tool calls arrive structurally in
+        ``message.tool_calls`` fragments and are assembled across chunks; when
+        none arrive, markup written into the content is recovered instead.
+        """
+        if self._model is None:
+            raise ValueError("No model specified")
+        return self._chat_stream_raw(self._model, messages, tools)
+
+    def _chat_stream_raw(
+        self,
+        model: str,
+        messages: list[Message],
+        tools: list[ToolSpec] | None,
+    ) -> Iterator[LLMChatStreamEvent]:
+        collector = GuardedTextCollector()
+        calls: list[ToolCall] = []
+        try:
+            for chunk in self._client.chat_stream(
+                model=model,
+                messages=_to_ollama_messages(messages),
+                tools=_to_ollama_tools(tools) if tools else None,
+            ):
+                thinking = chunk.message.thinking
+                if isinstance(thinking, str) and thinking.strip():
+                    collector.add_reasoning(thinking)
+                    yield ReasoningDelta(thinking)
+
+                content = chunk.message.content
+                if content:
+                    visible = collector.add_text(content)
+                    if visible:
+                        yield TextDelta(visible)
+
+                for call in chunk.message.tool_calls or []:
+                    calls.append(
+                        ToolCall(
+                            id=f"call_{uuid4().hex}",
+                            name=call.function.name,
+                            arguments=dict(call.function.arguments),
+                        )
+                    )
+        except (ollama.ResponseError, ConnectionError, OSError) as exc:
+            raise LLMUnavailableError(self._host, cause=exc) from exc
+
+        # Release the guarded tail before deciding the terminal shape, so a
+        # plain answer's withheld suffix still streams before the result.
+        tail = collector.flush_visible()
+        if tail:
+            yield TextDelta(tail)
+
+        if calls:
+            # Buffered parity: with structured calls the content is returned
+            # raw; markup cleanup applies only to the recovered fallback.
+            yield ChatResult(
+                text=collector.full_content,
+                tool_calls=calls,
+            )
+            return
+
+        recovered, cleaned, _ = collector.finish()
+        if recovered:
+            yield ChatResult(text=cleaned, tool_calls=recovered)
+            return
+
+        yield ChatResult(text=collector.full_content, tool_calls=[])
 
     def _stream_raw(
         self, model: str, messages: list[Message]

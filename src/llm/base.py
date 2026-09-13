@@ -52,6 +52,8 @@ class ReasoningDelta:
 
 type LLMStreamEvent = TextDelta | ReasoningDelta
 
+type LLMChatStreamEvent = TextDelta | ReasoningDelta | ChatResult
+
 
 class LLMClient(Protocol):
     @property
@@ -62,6 +64,20 @@ class LLMClient(Protocol):
     def chat(
         self, messages: list[Message], tools: list[ToolSpec] | None = None
     ) -> ChatResult: ...
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        """Stream one tool-decision turn, yielding deltas and a terminal result.
+
+        Behaves like :meth:`chat` with the same message history and tool
+        specifications, but reasoning and answer fragments are yielded as they
+        arrive instead of being buffered until the request completes. The
+        stream always ends with a single terminal :class:`ChatResult` carrying
+        the fully assembled text, tool calls, and reasoning context, so callers
+        can treat it as a drop-in replacement for ``chat()``.
+        """
+        ...
+
     def generate(
         self, messages: list[Message], *, temperature: float | None = None
     ) -> str: ...

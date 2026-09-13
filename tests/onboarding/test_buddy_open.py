@@ -27,6 +27,9 @@ class _StubLLM(LLMClient):
     def chat(self, messages, tools=None):  # pragma: no cover - unused
         raise NotImplementedError
 
+    def chat_stream(self, messages, tools=None):  # pragma: no cover - unused
+        raise NotImplementedError
+
     def stream(self, messages):  # pragma: no cover - unused
         raise NotImplementedError
 

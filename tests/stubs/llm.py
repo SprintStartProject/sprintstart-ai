@@ -2,8 +2,10 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 
 from llm.base import (
     ChatResult,
+    LLMChatStreamEvent,
     LLMStreamEvent,
     Message,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     ToolSpec,
@@ -33,6 +35,17 @@ class StubLLMClient:
         self, messages: list[Message], tools: list[ToolSpec] | None = None
     ) -> ChatResult:
         return ChatResult(text=self.generate_response, tool_calls=[])
+
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        # Buffer parity: the stub's chat result is constant, so replaying it as
+        # one terminal event keeps every inherited-by-default stub usable as a
+        # streaming client without each test overriding the method. The text
+        # delta mirrors a real provider streaming its answer during the turn;
+        # the terminal ChatResult.text repeats it by contract.
+        yield TextDelta(self.generate_response)
+        yield self.chat(messages, tools)
 
     def generate(
         self, messages: list[Message], *, temperature: float | None = None
@@ -81,6 +94,14 @@ class ScriptedLLMClient:
         self.reasoning_details = reasoning_details or []
         self.chat_calls: list[list[Message]] = []
         self.stream_calls: list[list[Message]] = []
+        self.chat_stream_calls: list[list[Message]] = []
+        # Optional hook: tests exercising the streaming decision path assign a
+        # callable returning the event sequence for a turn. When unset,
+        # chat_stream replays the scripted chat() turn as a single terminal
+        # event, so legacy scripted tests keep passing unchanged.
+        self.stream_turns: (
+            Callable[[list[Message]], Sequence[LLMChatStreamEvent]] | None
+        ) = None
 
     @property
     def model_name(self) -> str | None:
@@ -106,6 +127,35 @@ class ScriptedLLMClient:
         self, messages: list[Message], *, temperature: float | None = None
     ) -> str:
         return self.answer
+
+    def chat_stream(
+        self, messages: list[Message], tools: list[ToolSpec] | None = None
+    ) -> Iterator[LLMChatStreamEvent]:
+        # Recording parity with chat(): the agent moved its decision call onto
+        # this method, so legacy assertions on chat_calls must keep counting
+        # decision turns made via the streaming path.
+        self.chat_calls.append(messages)
+        self.chat_stream_calls.append(messages)
+        if self.stream_turns is not None:
+            yield from self.stream_turns(messages)
+            return
+        turn: Turn = self._turns.pop(0) if self._turns else []
+        calls = [
+            ToolCall(id=f"call_{i}", name=name, arguments=dict(args))
+            for i, (name, args) in enumerate(turn)
+        ]
+        if calls and self.reasoning:
+            yield ReasoningDelta(self.reasoning)
+        elif not calls:
+            # A real streaming provider emits answer deltas during the turn;
+            # the terminal ChatResult.text mirrors them, never replaces them.
+            yield TextDelta(self.answer)
+        yield ChatResult(
+            text="" if calls else self.answer,
+            tool_calls=calls,
+            reasoning=self.reasoning if calls else None,
+            reasoning_details=self.reasoning_details if calls else [],
+        )
 
     def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
         self.stream_calls.append(messages)

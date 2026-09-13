@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from agents.tools.base import Invocation, ToolRegistry, ToolResult
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
-from llm.base import LLMClient, Message, ReasoningDelta, TextDelta, ToolCall
+from llm.base import ChatResult, LLMClient, Message, ReasoningDelta, TextDelta, ToolCall
 from rag.prompt import chunk_header
 from rag.source_filter import SourceExclusions
 from rag.types import RetrievalFilters, ScoredChunk
@@ -227,18 +227,30 @@ class ChatAgent:
         specs = self._tools.specs()
 
         for step in range(_MAX_STEPS):
-            result = self._llm.chat(messages, tools=specs)
+            turn_result: ChatResult | None = None
+            for event in self._llm.chat_stream(messages, tools=specs):
+                match event:
+                    case ReasoningDelta(text=text):
+                        if text.strip():
+                            yield Reasoning(text)
+                    case TextDelta(text=text):
+                        if text:
+                            yield Token(text)
+                    case ChatResult() as res:
+                        turn_result = res
+
+            result = turn_result if turn_result is not None else ChatResult(text="")
+
             _agent_debug(
                 f"step {step}: text={result.text!r} "
                 f"tool_calls={[(c.name, c.arguments) for c in result.tool_calls]}"
             )
 
             if not result.tool_calls:
-                # The model answered instead of searching, and that answer is
-                # already generated — emitting it beats spending another
-                # round-trip to have it written a second time as a stream.
-                if result.text:
-                    yield Token(result.text)
+                # The model answered instead of searching. Its reasoning and, if
+                # the provider streamed them, its answer tokens went out live
+                # during the decision turn; the terminal ChatResult.text is the
+                # same content, so re-emitting it would duplicate the answer.
                 return
 
             assistant_message = Message(
