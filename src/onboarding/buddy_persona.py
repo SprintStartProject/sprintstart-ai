@@ -140,6 +140,71 @@ _PATH_STEP_CLAUSE = (
     "added something.\n"
 )
 
+_PATH_TASK_CLAUSE = (
+    "- A step has a checklist, and the step they are on comes with its lines. When "
+    "they say they have done part of a step, offer `complete_task` for that line "
+    "rather than `complete_step` for the whole thing -- and never tick a line off "
+    "because the two of you talked about it. A step can be finished with lines still "
+    "open, so do not tell them the checklist has to be empty first.\n"
+)
+
+# How to name a thing on the path so the hire can act on it. Both halves came out of a
+# testing session: the mentor agreed a hire could do a step their own page refuses to
+# open, and it named steps in prose the hire then had to go and find.
+_PATH_REFERENCE_CLAUSE = (
+    "- Every item on the path has a number and a link. Name it the way their page "
+    'does -- "#3" -- and make the name a markdown link to the link the tool gave '
+    "you, so they can open it from what you said instead of going to look for it. A "
+    "bare number from them means that item.\n"
+    "- An item marked LOCKED cannot be started or answered yet. Never agree that they "
+    "can do one, however directly they ask: say what it is waiting on -- the tool "
+    "names it -- and offer that instead.\n"
+)
+
+# The clause that decides which half of this product answers a question. Without it the
+# same "where am I?" landed sometimes on the path and sometimes on the work pool,
+# depending on nothing the hire could see -- which is the two-systems problem moved
+# inside one conversation rather than solved.
+_PATH_ROUTING_CLAUSE = (
+    '- Two different things can answer "where am I?" and they are not '
+    "interchangeable. The **path** is the plan a person wrote for them. Their "
+    "**metrics, pull requests, suggested work and competency ledger** are what is true "
+    "about them right now. Route deliberately:\n"
+    '  - "what should I do next", "where am I", "what is left" -> the path, '
+    "first and always.\n"
+    '  - "what should I work on", "give me something to do" -> the path first; the '
+    "suggested work only when the path has nothing open, or when the step they are on "
+    "is asking for real work anyway.\n"
+    '  - "how am I doing", "am I stuck", "what have I shown" -> the metrics and '
+    "the ledger. Those say how it is going; they never say what comes next.\n"
+    "- Never answer a question about the path out of the work pool. When both have "
+    "something to say, say which is which rather than merging them into one list.\n"
+)
+
+# Mounted whenever the hire has any action at all, because the failure it prevents is
+# not specific to one: a refusal read as an offer had the mentor telling a hire to click
+# a button that was never rendered.
+_NO_BUTTON_CLAUSE = (
+    "- Offering something shows the hire a confirm button. If the tool comes back "
+    "saying NOT PROPOSED, there is no button: never tell them to confirm, click or "
+    "check anything. Say what you still need from them, and offer it again once you "
+    "have it.\n"
+)
+
+_ACTION_TOOLS = (
+    "flag_to_pm",
+    "claim_task_zero",
+    "open_orientation",
+    "claim_goal",
+    "request_attestation",
+    "set_github_login",
+    "record_assessment",
+    "complete_step",
+    "complete_task",
+    "answer_question",
+    "add_path_step",
+)
+
 _STATE_TOOLS = (
     "get_arrival_steps",
     "get_my_metrics",
@@ -181,12 +246,21 @@ def build_persona(
     # mentions one.
     if "get_my_onboarding_path" in available:
         parts.append(_PATH_CLAUSE)
+        parts.append(_PATH_REFERENCE_CLAUSE)
+        # Only where the ambiguity exists. A hire with no path has one place an answer
+        # can come from, and a rule about choosing between two would be noise.
+        if any(name in available for name in _STATE_TOOLS):
+            parts.append(_PATH_ROUTING_CLAUSE)
     if "answer_question" in available:
         parts.append(_PATH_QUESTION_CLAUSE)
     if "complete_step" in available:
         parts.append(_PATH_COMPLETE_CLAUSE)
+    if "complete_task" in available:
+        parts.append(_PATH_TASK_CLAUSE)
     if "add_path_step" in available:
         parts.append(_PATH_STEP_CLAUSE)
+    if any(name in available for name in _ACTION_TOOLS):
+        parts.append(_NO_BUTTON_CLAUSE)
 
     state_tools = [name for name in _STATE_TOOLS if name in available]
     if state_tools:

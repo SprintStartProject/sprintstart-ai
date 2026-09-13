@@ -216,3 +216,58 @@ def test_each_path_clause_is_gated_on_its_own_tool() -> None:
     assert "`complete_step`" not in read_only
     assert "`answer_question`" not in read_only
     assert "`add_path_step`" not in read_only
+
+
+def test_a_question_about_the_path_is_never_answered_from_the_work_pool() -> None:
+    """The two-systems problem, moved inside one conversation: "where am I?" has two
+    plausible answers and only one of them is the plan."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "the path, first and always" in persona
+    # The other direction too: progress questions belong to the metrics, not the path.
+    assert "never say what comes next" in persona
+
+
+def test_no_routing_rule_where_there_is_nothing_to_route_between() -> None:
+    # A hire with a path but no state tools has one place an answer can come from, so a
+    # rule about choosing would be noise.
+    persona = build_persona(["search_docs", "get_my_onboarding_path"])
+
+    assert "onboarding path" in persona
+    assert "first and always" not in persona
+
+
+def test_a_locked_item_is_never_agreed_to() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    # It said yes to a step the hire's own page refuses to open. Told what locked means,
+    # the answer is what it is waiting on.
+    assert "LOCKED" in persona
+    assert "however directly they ask" in persona
+
+
+def test_items_are_named_by_number_and_linked() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "markdown link" in persona
+    assert "A bare number from them means that item" in persona
+
+
+def test_a_refused_proposal_is_never_described_as_a_button() -> None:
+    """It told a hire to click something that was never rendered. Mounted with any
+    action at all, because the mistake is not specific to one."""
+    for mounted in (["claim_goal"], ["add_path_step"], list(_PATH_TOOLS)):
+        persona = build_persona(mounted)
+
+        assert "NOT PROPOSED" in persona
+
+    assert "NOT PROPOSED" not in build_persona(["search_docs", "get_my_metrics"])
+
+
+def test_part_of_a_step_is_a_line_not_the_whole_step() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS, "complete_task"])
+
+    assert "`complete_task`" in persona
+    # The product allows a finished step with open lines; the mentor must not invent a
+    # rule the product does not have.
+    assert "checklist has to be empty" in persona
