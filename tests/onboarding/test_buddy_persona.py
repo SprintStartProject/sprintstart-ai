@@ -161,3 +161,58 @@ def test_the_grounding_rule_survives_every_toolset() -> None:
         # test/fixture caveat are safety rules, not capabilities.
         assert "Ground every claim" in persona
         assert "test, fixture, or sample-data files" in persona
+
+
+_PATH_TOOLS = (
+    "get_my_onboarding_path",
+    "complete_step",
+    "answer_question",
+    "add_path_step",
+)
+
+
+def test_a_hire_without_a_path_meets_a_mentor_that_never_mentions_one() -> None:
+    """The backend mounts the path tools only for a hire who has a path, so a mentor
+    without them must not describe walking one."""
+    persona = build_persona(_ALL_TOOLS)
+
+    assert "onboarding path" not in persona
+    for tool in _PATH_TOOLS:
+        assert tool not in persona
+
+
+def test_the_path_is_the_plan_and_the_blueprint_is_not_the_mentors() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    # The whole point of reading it: one plan, and it is the one a person wrote.
+    assert "the path wins" in persona
+    # The authority line. The mentor edits the hire's copy, never the curriculum.
+    assert "You never edit the blueprint" in persona
+    assert "*their copy*" in persona
+
+
+def test_the_mentor_is_a_tutor_on_a_question_and_never_a_shortcut() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    # It is not told the answer, and the clause says so rather than only forbidding
+    # it -- an honest "I do not have it" is the behaviour we want when asked.
+    assert "not told which answer is correct" in persona
+    assert "you do not have it" in persona
+
+
+def test_completing_a_step_is_asked_for_never_announced() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "Only the hire knows whether they have actually done a step" in persona
+    assert "Ask; do not announce" in persona
+
+
+def test_each_path_clause_is_gated_on_its_own_tool() -> None:
+    read_only = build_persona([*_ALL_TOOLS, "get_my_onboarding_path"])
+
+    # The read mounts the tutor framing; the actions stay unmentioned until they are
+    # mounted, so the mentor never offers a proposal it cannot make.
+    assert "onboarding path" in read_only
+    assert "`complete_step`" not in read_only
+    assert "`answer_question`" not in read_only
+    assert "`add_path_step`" not in read_only

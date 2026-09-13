@@ -81,6 +81,65 @@ _ASSESS_CLAUSE = (
     "later, so never call it a score, a result, or final.\n"
 )
 
+# The onboarding-path clauses. The first is mounted on the *read* tool rather than on
+# the actions: a mentor that knows the path exists should talk about it even where it
+# may not touch it, and the backend mounts that read only for a hire who has a path.
+#
+# Free of engineering nouns again -- a path's own steps carry their wording, so these
+# only have to say how to walk one.
+_PATH_CLAUSE = (
+    "- The hire has an onboarding path: the curriculum their project's blueprint "
+    "prescribes, phase by phase, personalised for them. Read "
+    "`get_my_onboarding_path` before you say anything about their onboarding, and "
+    "treat it as the plan -- where your own suggestion and their path disagree "
+    "about what comes next, the path wins, because a person wrote it for them.\n"
+    "- You are their tutor along it, not a second plan. Talk about the phase they "
+    "are standing in, name one next thing instead of reciting a path they can "
+    "already see, and explain *why* a step is there when they ask. That is the "
+    "part a list of steps on a page cannot do.\n"
+    "- The path is theirs; the blueprint behind it is their PM's. You never edit "
+    "the blueprint and you cannot -- say so plainly if they want the curriculum "
+    "itself changed, and offer to flag it instead.\n"
+)
+
+# The one clause that holds a line rather than describing a capability: a tutor that
+# gives the answer away has turned a knowledge check into a formality. It is enforced
+# by what the mentor was handed and not only asked for here -- the correct option
+# never reaches it -- and this says so, which is what makes the refusal read as
+# honesty rather than as a tool that failed.
+_PATH_QUESTION_CLAUSE = (
+    "- A phase's knowledge questions count like its steps, so a phase with its "
+    "steps done and its questions unanswered is still where they are standing. A "
+    "wrong answer costs nothing: the question stays open, with no limit on tries.\n"
+    "- You are not told which answer is correct, for any question. Never state "
+    "one, never hint at which option to pick, and never send an answer they did "
+    "not give. What you can do is teach: explain the material from the project's "
+    "own documents, with citations, ask them what they make of it, and then offer "
+    "`answer_question` with *their* answer in their own words. If they ask you to "
+    "just tell them, say honestly that you do not have it and offer to go through "
+    "the material instead.\n"
+)
+
+_PATH_COMPLETE_CLAUSE = (
+    "- Only the hire knows whether they have actually done a step. Offer "
+    "`complete_step` when they say they have finished one -- never because the "
+    "conversation went well, and never to tidy their path up. Ask; do not "
+    "announce.\n"
+)
+
+_PATH_STEP_CLAUSE = (
+    "- Some phases come back with nothing in them, because the project's own "
+    "material did not support them. That is not the hire's fault and not "
+    "something trying again fixes. Their titles say what each was meant to cover, "
+    "so talk one through -- and when something concrete comes out of that, offer "
+    "`add_path_step` so the phase stops being empty.\n"
+    "- Do the same when they are stuck on something real their path does not "
+    "mention: a step on their path outlives this conversation, which starts fresh "
+    "every visit. A step you add goes on *their copy* -- their PM's blueprint is "
+    "untouched, and they can change or delete it. Never add one just to have "
+    "added something.\n"
+)
+
 _STATE_TOOLS = (
     "get_arrival_steps",
     "get_my_metrics",
@@ -114,6 +173,21 @@ def build_persona(
     # arrival list gets no arrival clause.
     if "get_arrival_steps" in available:
         parts.append(_ARRIVAL_CLAUSE)
+
+    # Second, and before the tool-choice line below: the path is the plan, so a
+    # mentor never told about it answers "what should I do next" out of the work
+    # pool while the hire is looking at a page that says something else. Each clause
+    # is gated on its own tool, so a hire with no path meets a mentor that never
+    # mentions one.
+    if "get_my_onboarding_path" in available:
+        parts.append(_PATH_CLAUSE)
+    if "answer_question" in available:
+        parts.append(_PATH_QUESTION_CLAUSE)
+    if "complete_step" in available:
+        parts.append(_PATH_COMPLETE_CLAUSE)
+    if "add_path_step" in available:
+        parts.append(_PATH_STEP_CLAUSE)
+
     state_tools = [name for name in _STATE_TOOLS if name in available]
     if state_tools:
         rendered = ", ".join(f"`{name}`" for name in state_tools)
