@@ -160,9 +160,7 @@ class ChromaVectorStore:
         revoked_artifact_ids: frozenset[str],
     ) -> list[Chunk]:
         return [
-            chunk
-            for chunk in chunks
-            if chunk.artifact_id not in revoked_artifact_ids
+            chunk for chunk in chunks if chunk.artifact_id not in revoked_artifact_ids
         ]
 
     def add(self, chunks: list[Chunk]) -> None:
@@ -571,9 +569,7 @@ class ChromaVectorStore:
         # carries it is still reachable, whatever the string says.
         return self._rewrite_membership(
             {project_metadata_key(project_id): {"$eq": True}},
-            lambda project_ids: tuple(
-                pid for pid in project_ids if pid != project_id
-            ),
+            lambda project_ids: tuple(pid for pid in project_ids if pid != project_id),
         )
 
     def _rewrite_membership(
@@ -594,9 +590,7 @@ class ChromaVectorStore:
             for _, metadata in records
             if set(decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)))
             - set(
-                membership(
-                    decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
-                )
+                membership(decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)))
             )
         )
         self._revoke_artifacts(tombstones)

@@ -1623,10 +1623,13 @@ def test_failed_delete_leaves_a_durable_cross_instance_tombstone(
         assert [chunk.id for chunk in reader.iter_chunks_without_embeddings()] == [
             "visible-chunk"
         ]
-        assert reader.list_chunks_by_artifact(
-            "revoked-artifact",
-            limit=10,
-        ) == []
+        assert (
+            reader.list_chunks_by_artifact(
+                "revoked-artifact",
+                limit=10,
+            )
+            == []
+        )
         assert reader.count_by_artifact("revoked-artifact") == 0
 
         # A later confirmed retry removes the vectors and prunes the tombstone.
@@ -1689,9 +1692,7 @@ def test_failed_membership_removal_stays_tombstoned_until_retry(
         monkeypatch.setattr(store, "add", original_add)
         assert store.set_project_ids_for_artifact("artifact-1", ("project-b",)) == 1
         assert metadata.revocation_snapshot()[1] == frozenset()
-        assert store.project_ids_for_artifact("artifact-1") == frozenset(
-            {"project-b"}
-        )
+        assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-b"})
     finally:
         metadata.close()
 

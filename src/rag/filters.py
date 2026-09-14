@@ -195,9 +195,7 @@ def where_filter_for_chroma(
             )
 
     if revoked_artifact_ids:
-        conditions.append(
-            {"artifact_id": {"$nin": sorted(revoked_artifact_ids)}}
-        )
+        conditions.append({"artifact_id": {"$nin": sorted(revoked_artifact_ids)}})
 
     if exclude_roles:
         conditions.append({"source_role": {"$nin": sorted(exclude_roles)}})
