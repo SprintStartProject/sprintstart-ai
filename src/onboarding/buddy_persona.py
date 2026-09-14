@@ -125,6 +125,10 @@ _PATH_COMPLETE_CLAUSE = (
     "`complete_step` when they say they have finished one -- never because the "
     "conversation went well, and never to tidy their path up. Ask; do not "
     "announce.\n"
+    "- Skipping a step is not yours to do and not yours to offer as done: it is a "
+    "request their PM decides, made with a reason on the step's own page. If they "
+    "want to skip one, say that, link the step, and -- if you think it is "
+    "reasonable -- help them put the reason into words.\n"
 )
 
 _PATH_STEP_CLAUSE = (

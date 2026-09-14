@@ -166,6 +166,7 @@ def test_the_grounding_rule_survives_every_toolset() -> None:
 _PATH_TOOLS = (
     "get_my_onboarding_path",
     "complete_step",
+    "complete_task",
     "answer_question",
     "add_path_step",
 )
@@ -205,6 +206,15 @@ def test_completing_a_step_is_asked_for_never_announced() -> None:
 
     assert "Only the hire knows whether they have actually done a step" in persona
     assert "Ask; do not announce" in persona
+
+
+def test_a_skip_is_the_pms_decision_and_never_the_mentors() -> None:
+    """There is no skip action, and there should not be: a skip is a request the PM
+    decides. Without saying so the mentor either promised one or ignored the ask."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "Skipping a step is not yours to do" in persona
+    assert "request their PM decides" in persona
 
 
 def test_each_path_clause_is_gated_on_its_own_tool() -> None:
