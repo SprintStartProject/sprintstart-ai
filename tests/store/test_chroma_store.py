@@ -1694,3 +1694,47 @@ def test_failed_membership_removal_stays_tombstoned_until_retry(
         )
     finally:
         metadata.close()
+
+
+def test_retry_prunes_tombstone_when_failed_delete_already_removed_chunks(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_revocation_cleanup",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="secret.md",
+                text="secret",
+                embedding=[1.0, 0.0],
+            )
+        ]
+    )
+
+    original_delete = store._collection.delete
+
+    def delete_then_fail(*args: object, **kwargs: object) -> None:
+        original_delete(*args, **kwargs)
+        raise RuntimeError("response lost after delete")
+
+    monkeypatch.setattr(store._collection, "delete", delete_then_fail)
+
+    try:
+        with pytest.raises(RuntimeError, match="response lost"):
+            store.delete("artifact-1", exclude_ids=[])
+
+        assert store.count() == 0
+        assert metadata.revocation_snapshot()[1] == frozenset({"artifact-1"})
+
+        monkeypatch.setattr(store._collection, "delete", original_delete)
+        assert store.delete("artifact-1", exclude_ids=[]) == 0
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()
