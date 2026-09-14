@@ -156,7 +156,7 @@ _PATH_STEP_CLAUSE = (
     "- Put a step where it belongs, never just at the end: `waits_on` is what it "
     "opens after, `unlocks` is what should wait on it. As the next thing, it waits "
     "on what they are on and unlocks what that item opens; a refresher goes in "
-    "front of the question it is for. The path read gives you both.\n"
+    "front of the question it is for. Pass BOTH -- the path read spells them out.\n"
 )
 
 # Skipping is the PM's decision, and the mentor's part is the reason. A request that
