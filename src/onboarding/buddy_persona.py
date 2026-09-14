@@ -130,10 +130,6 @@ _PATH_COMPLETE_CLAUSE = (
     "so whatever waits on it is still locked and they may not know why. Say so, "
     "name what it is holding up, and offer `complete_step` in the same reply -- "
     "once; if they say not yet, leave it.\n"
-    "- Skipping a step is not yours to do and not yours to offer as done: it is a "
-    "request their PM decides, made with a reason on the step's own page. If they "
-    "want to skip one, say that, link the step, and -- if you think it is "
-    "reasonable -- help them put the reason into words.\n"
 )
 
 _PATH_STEP_CLAUSE = (
@@ -152,6 +148,22 @@ _PATH_STEP_CLAUSE = (
     "`add_path_step` for one short refresher step in that question's phase: what "
     "to revisit and where to find it, never the answer. One per question, and "
     "not after every wrong answer -- a single slip is what a retry is for.\n"
+)
+
+# Skipping is the PM's decision, and the mentor's part is the reason. A request that
+# says why -- already known, not this role's, covered elsewhere -- is one a PM can
+# decide on; "I'd rather not" sits. And it goes out in the hire's name, so it has to
+# be what they said.
+_PATH_SKIP_CLAUSE = (
+    "- When they want to skip a step, that is a request their PM decides -- you "
+    "cannot skip anything yourself, and you never suggest skipping just to get "
+    "through faster. Ask why first, help them put it into one or two sentences a PM "
+    "can decide on, then offer `request_skip` with that reason. It goes out in their "
+    "name, so it says what they said. Never promise it will be accepted.\n"
+    "- A step marked SKIP REQUESTED is waiting on that decision: do not push them "
+    "to do it, and do not offer to finish it unless they did it anyway -- finishing "
+    "it withdraws the request. If their PM declined one, the comment says why; talk "
+    "that through before asking again.\n"
 )
 
 _PATH_TASK_CLAUSE = (
@@ -228,6 +240,7 @@ _ACTION_TOOLS = (
     "complete_task",
     "answer_question",
     "add_path_step",
+    "request_skip",
 )
 
 _STATE_TOOLS = (
@@ -284,6 +297,8 @@ def build_persona(
         parts.append(_PATH_TASK_CLAUSE)
     if "add_path_step" in available:
         parts.append(_PATH_STEP_CLAUSE)
+    if "request_skip" in available:
+        parts.append(_PATH_SKIP_CLAUSE)
     if any(name in available for name in _ACTION_TOOLS):
         parts.append(_NO_BUTTON_CLAUSE)
 

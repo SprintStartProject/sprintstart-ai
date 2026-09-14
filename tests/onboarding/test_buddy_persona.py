@@ -169,6 +169,7 @@ _PATH_TOOLS = (
     "complete_task",
     "answer_question",
     "add_path_step",
+    "request_skip",
 )
 
 
@@ -225,13 +226,24 @@ def test_a_wrong_answer_can_become_a_refresher_step_but_never_the_answer() -> No
     assert "not after every wrong answer" in persona
 
 
-def test_a_skip_is_the_pms_decision_and_never_the_mentors() -> None:
-    """There is no skip action, and there should not be: a skip is a request the PM
-    decides. Without saying so the mentor either promised one or ignored the ask."""
+def test_a_skip_is_requested_with_the_hires_reason_and_decided_by_the_pm() -> None:
+    """The mentor files the request; it does not grant it, and it does not invent
+    the reason. Without saying so it either promised a skip or sent a request that
+    would sit."""
     persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
 
-    assert "Skipping a step is not yours to do" in persona
-    assert "request their PM decides" in persona
+    assert "a request their PM decides" in persona
+    assert "`request_skip`" in persona
+    assert "Ask why first" in persona
+    assert "Never promise it will be accepted" in persona
+    # Finishing a step drops its pending skip, which the hire would never notice.
+    assert "finishing it withdraws the request" in persona
+
+
+def test_no_skip_clause_without_the_skip_action() -> None:
+    persona = build_persona([*_ALL_TOOLS, "get_my_onboarding_path", "complete_step"])
+
+    assert "request_skip" not in persona
 
 
 def test_each_path_clause_is_gated_on_its_own_tool() -> None:
