@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import chromadb
 import chromadb.api
-from chromadb.api.types import Metadata, PyEmbeddings, Where
+from chromadb.api.types import Metadata, PyEmbeddings, QueryResult, Where
 from chromadb.config import Settings
 
 from ingestion.metadata_store import IngestionMetadataStore
@@ -267,7 +267,7 @@ class ChromaVectorStore:
         # before limiting to ``n_results``. Filtering the returned window
         # instead would let higher-ranked ineligible chunks push every eligible
         # one out of it.
-        raw_result: Any | None = None
+        raw_result: QueryResult | None = None
         revoked_artifact_ids: frozenset[str] = frozenset()
         for _attempt in range(2):
             revocation_revision, revoked_artifact_ids = self._revocation_snapshot()
