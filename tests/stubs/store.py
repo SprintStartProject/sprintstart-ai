@@ -21,10 +21,14 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 class StubVectorStore:
     def __init__(self) -> None:
         self.chunks: list[Chunk] = []
+        self._corpus_revision = 0
 
     def add(self, chunks: list[Chunk]) -> None:
+        if not chunks:
+            return
         new_ids = {c.id for c in chunks}
         self.chunks = [c for c in self.chunks if c.id not in new_ids] + chunks
+        self._corpus_revision += 1
 
     def query(
         self,
@@ -85,7 +89,10 @@ class StubVectorStore:
             for chunk in self.chunks
             if chunk.artifact_id != artifact_id or chunk.id in (exclude_ids or [])
         ]
-        return before - len(self.chunks)
+        deleted = before - len(self.chunks)
+        if deleted:
+            self._corpus_revision += 1
+        return deleted
 
     def list_chunks(self, limit: int, offset: int = 0) -> list[Chunk]:
         return list(self.chunks[offset : offset + limit])
@@ -115,6 +122,9 @@ class StubVectorStore:
 
     def all_ids(self) -> frozenset[str]:
         return frozenset(chunk.id for chunk in self.chunks)
+
+    def corpus_revision(self) -> int:
+        return self._corpus_revision
 
     def retrieval_fingerprints(self) -> frozenset[str]:
         return frozenset(
@@ -157,6 +167,8 @@ class StubVectorStore:
             updated += 1
 
         self.chunks = rewritten
+        if updated:
+            self._corpus_revision += 1
         return updated
 
     def remove_project(self, project_id: str) -> int:
@@ -178,6 +190,8 @@ class StubVectorStore:
             updated += 1
 
         self.chunks = rewritten
+        if updated:
+            self._corpus_revision += 1
         return updated
 
     def count(self) -> int:
