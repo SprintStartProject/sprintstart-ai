@@ -41,6 +41,7 @@ def _store() -> StubVectorStore:
                 text="run make dev to start the reports service locally",
                 embedding=_EMBED,
                 source_url="https://github.com/org/repo/blob/main/README.md",
+                project_ids=("p1",),
             )
         ]
     )
@@ -60,7 +61,7 @@ def client() -> Generator[TestClient, Any, None]:
 def test_assembles_a_packet_whose_provenance_survives_to_the_client(
     client: TestClient,
 ) -> None:
-    response = client.post(_URL, json={"task_title": _TITLE})
+    response = client.post(_URL, json={"task_title": _TITLE, "projectIds": ["p1"]})
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -79,7 +80,9 @@ def test_an_empty_corpus_answers_skipped_with_no_packet() -> None:
     app.dependency_overrides[get_llm] = lambda: llm
     app.dependency_overrides[get_store] = StubVectorStore
     try:
-        response = TestClient(app).post(_URL, json={"task_title": _TITLE})
+        response = TestClient(app).post(
+            _URL, json={"task_title": _TITLE, "projectIds": ["p1"]}
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -89,9 +92,20 @@ def test_an_empty_corpus_answers_skipped_with_no_packet() -> None:
 
 
 def test_a_packet_needs_a_task(client: TestClient) -> None:
-    response = client.post(_URL, json={"task_title": "   "})
+    response = client.post(_URL, json={"task_title": "   ", "projectIds": ["p1"]})
 
     assert response.status_code == 422
+
+
+def test_a_packet_needs_project_ids(client: TestClient) -> None:
+    response = client.post(_URL, json={"task_title": _TITLE})
+    assert response.status_code == 422
+
+
+def test_empty_project_ids_admits_no_material(client: TestClient) -> None:
+    response = client.post(_URL, json={"task_title": _TITLE, "projectIds": []})
+    assert response.status_code == 200
+    assert response.json()["status"] == "skipped"
 
 
 def test_an_unavailable_llm_is_a_503_not_a_fabricated_packet() -> None:
@@ -104,7 +118,9 @@ def test_an_unavailable_llm_is_a_503_not_a_fabricated_packet() -> None:
     app.dependency_overrides[get_llm] = lambda: llm
     app.dependency_overrides[get_store] = _store
     try:
-        response = TestClient(app).post(_URL, json={"task_title": _TITLE})
+        response = TestClient(app).post(
+            _URL, json={"task_title": _TITLE, "projectIds": ["p1"]}
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -114,7 +130,9 @@ def test_an_unavailable_llm_is_a_503_not_a_fabricated_packet() -> None:
 def test_stream_yields_stages_items_and_a_done_matching_the_sync_endpoint(
     client: TestClient,
 ) -> None:
-    stream = client.post(f"{_URL}/stream", json={"task_title": _TITLE})
+    stream = client.post(
+        f"{_URL}/stream", json={"task_title": _TITLE, "projectIds": ["p1"]}
+    )
     assert stream.status_code == 200, stream.text
     assert stream.headers["content-type"].startswith("text/event-stream")
 
@@ -126,13 +144,15 @@ def test_stream_yields_stages_items_and_a_done_matching_the_sync_endpoint(
 
     # The stream is a view of the same computation: its final result equals what the
     # non-streaming endpoint returns for the same request.
-    plain = client.post(_URL, json={"task_title": _TITLE}).json()
+    plain = client.post(_URL, json={"task_title": _TITLE, "projectIds": ["p1"]}).json()
     assert events[-1]["result"]["packet"] == plain["packet"]
     assert events[-1]["result"]["status"] == plain["status"] == "assembled"
 
 
 def test_stream_needs_a_task_title(client: TestClient) -> None:
-    response = client.post(f"{_URL}/stream", json={"task_title": "  "})
+    response = client.post(
+        f"{_URL}/stream", json={"task_title": "  ", "projectIds": ["p1"]}
+    )
 
     assert response.status_code == 422
 
@@ -147,7 +167,9 @@ def test_stream_turns_an_llm_outage_into_a_terminal_error_event() -> None:
     app.dependency_overrides[get_llm] = lambda: llm
     app.dependency_overrides[get_store] = _store
     try:
-        response = TestClient(app).post(f"{_URL}/stream", json={"task_title": _TITLE})
+        response = TestClient(app).post(
+            f"{_URL}/stream", json={"task_title": _TITLE, "projectIds": ["p1"]}
+        )
     finally:
         app.dependency_overrides.clear()
 

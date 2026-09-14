@@ -79,7 +79,9 @@ ingest, or an endpoint, keep that property:
 - `project_id` is required on `ChatRequest`, `OnboardingPathRequest`,
   `GenerateBlueprintsRequest`, `KnowledgeGapsRequest` and `FaqGroupRequest`
   (all inherit `ProjectScopedRequest` in `api/schemas.py`).
-- `RetrievalFilters.project_id` is enforced in **both** halves of hybrid
+  `project_ids` (plural, required) is enforced on `AssembleOrientationRequest`,
+  `AssembleDiagramRequest`, and `MineStarterWorkRequest` for multi-project scoping.
+- `RetrievalFilters.project_id` / `project_ids` is enforced in **both** halves of hybrid
   retrieval — `where_filter_for_chroma()` for the vector side and
   `matches_retrieval_filters()` for the BM25/in-memory side (`rag/filters.py`).
   Anything that scans `all_chunks_without_embeddings()` directly (the `grep`

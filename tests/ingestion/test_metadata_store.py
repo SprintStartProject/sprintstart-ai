@@ -60,6 +60,20 @@ def test_list_artifacts_filters_by_project() -> None:
     assert ids == {"a1", "a3"}
 
 
+def test_list_artifacts_filters_by_project_ids_plural() -> None:
+    store = IngestionMetadataStore(":memory:")
+    store.save_completed_artifact(_record("a1", ("project-1",)))
+    store.save_completed_artifact(_record("a2", ("project-2",)))
+    store.save_completed_artifact(_record("a3", ("project-3",)))
+    store.save_completed_artifact(_record("a4"))
+
+    ids = {r.id for r in store.list_artifacts(project_ids=["project-1", "project-2"])}
+    assert ids == {"a1", "a2"}
+
+    # Empty project_ids admits nothing (fail-closed)
+    assert store.list_artifacts(project_ids=[]) == []
+
+
 def test_list_artifacts_without_project_returns_everything() -> None:
     store = IngestionMetadataStore(":memory:")
     store.save_completed_artifact(_record("a1", ("project-1",)))
