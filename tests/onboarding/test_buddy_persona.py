@@ -226,6 +226,39 @@ def test_a_wrong_answer_can_become_a_refresher_step_but_never_the_answer() -> No
     assert "not after every wrong answer" in persona
 
 
+def test_the_path_is_described_as_a_graph_not_a_sequence() -> None:
+    """It told a hire "after #6 comes #7" about items that did not depend on each
+    other, because it read the page's numbering as an order."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "dependency graph" in persona
+    assert "not the order they come in" in persona
+
+
+def test_narrowing_the_options_is_hinting() -> None:
+    """No answer stated, and the question given away all the same: "one option
+    matches the title of #1 word for word"."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "Narrowing the options down is hinting too" in persona
+    assert "never say how close a wrong answer was" in persona
+
+
+def test_a_ready_step_is_answered_where_they_are_first_never_button_first() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "Never lead with the button" in persona
+    assert "never lecture them about being sure" in persona
+
+
+def test_an_added_step_is_placed_in_the_graph() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "never just at the end" in persona
+    assert "`waits_on`" in persona
+    assert "`unlocks`" in persona
+
+
 def test_a_skip_is_requested_with_the_hires_reason_and_decided_by_the_pm() -> None:
     """The mentor files the request; it does not grant it, and it does not invent
     the reason. Without saying so it either promised a skip or sent a request that
