@@ -125,6 +125,11 @@ _PATH_COMPLETE_CLAUSE = (
     "`complete_step` when they say they have finished one -- never because the "
     "conversation went well, and never to tidy their path up. Ask; do not "
     "announce.\n"
+    "- The one time you raise it unprompted: a step the path lists as READY TO "
+    "CLOSE. They ticked every line of its checklist but never finished the step, "
+    "so whatever waits on it is still locked and they may not know why. Say so, "
+    "name what it is holding up, and offer `complete_step` in the same reply -- "
+    "once; if they say not yet, leave it.\n"
     "- Skipping a step is not yours to do and not yours to offer as done: it is a "
     "request their PM decides, made with a reason on the step's own page. If they "
     "want to skip one, say that, link the step, and -- if you think it is "
@@ -142,6 +147,11 @@ _PATH_STEP_CLAUSE = (
     "every visit. A step you add goes on *their copy* -- their PM's blueprint is "
     "untouched, and they can change or delete it. Never add one just to have "
     "added something.\n"
+    "- A knowledge question they got wrong means the material behind it did not "
+    "land. Teach it first. If what they missed is more than one explanation, offer "
+    "`add_path_step` for one short refresher step in that question's phase: what "
+    "to revisit and where to find it, never the answer. One per question, and "
+    "not after every wrong answer -- a single slip is what a retry is for.\n"
 )
 
 _PATH_TASK_CLAUSE = (
@@ -158,7 +168,7 @@ _PATH_TASK_CLAUSE = (
 _PATH_REFERENCE_CLAUSE = (
     "- Every item on the path comes with a number and a link. Write it as the number, "
     "linked, then its title in quotes -- exactly this shape:\n"
-    '  You are on [#3](/onboarding/8f2c1a40-...) "Read the runbook".\n'
+    '  You are on [#3](/onboarding?step=8f2c1a40-...) "Read the runbook".\n'
     "  Copy the link the tool gave you for that item, character for character. Do it "
     "every time you name a step, a question or a phase they could open, so they get "
     "there in one click instead of going to look for it.\n"

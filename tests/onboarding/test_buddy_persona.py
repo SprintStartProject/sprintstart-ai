@@ -208,6 +208,23 @@ def test_completing_a_step_is_asked_for_never_announced() -> None:
     assert "Ask; do not announce" in persona
 
 
+def test_a_done_checklist_on_an_open_step_is_raised_unprompted() -> None:
+    """A hire who ticked every line but never finished the step is locked out of what
+    comes next without knowing why -- and will not ask about the step doing it."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "READY TO CLOSE" in persona
+    assert "if they say not yet, leave it" in persona
+
+
+def test_a_wrong_answer_can_become_a_refresher_step_but_never_the_answer() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "refresher step" in persona
+    assert "never the answer" in persona
+    assert "not after every wrong answer" in persona
+
+
 def test_a_skip_is_the_pms_decision_and_never_the_mentors() -> None:
     """There is no skip action, and there should not be: a skip is a request the PM
     decides. Without saying so the mentor either promised one or ignored the ask."""
@@ -299,5 +316,5 @@ def test_an_item_is_written_as_a_linked_number() -> None:
     far more reliably than it follows an instruction about formatting."""
     persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
 
-    assert "[#3](/onboarding/" in persona
+    assert "[#3](/onboarding?step=" in persona
     assert "character for character" in persona
