@@ -1502,7 +1502,6 @@ def test_remove_project_rewrites_a_corpus_past_the_real_write_ceiling() -> None:
     assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-b"})
 
 
-
 def test_bm25_cache_invalidates_across_store_instances(
     tmp_path: Path,
 ) -> None:

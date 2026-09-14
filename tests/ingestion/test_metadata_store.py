@@ -250,7 +250,6 @@ def test_remove_project_leaves_case_variants_untouched() -> None:
     assert variant.updated_at == _NOW
 
 
-
 def test_corpus_revision_is_shared_and_monotonic_across_connections(
     tmp_path: Path,
 ) -> None:
