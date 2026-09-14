@@ -122,6 +122,26 @@ class IngestionMetadataStore:
             self._connection.execute(
                 "INSERT OR IGNORE INTO corpus_state (singleton, revision) VALUES (1, 0)"
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS artifact_revocations (
+                    artifact_id TEXT PRIMARY KEY,
+                    revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS revocation_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    revision INTEGER NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                "INSERT OR IGNORE INTO revocation_state "
+                "(singleton, revision) VALUES (1, 0)"
+            )
 
             self._connection.execute("DROP TABLE IF EXISTS artifact_chunks")
             self._connection.commit()
@@ -178,6 +198,103 @@ class IngestionMetadataStore:
             raise RuntimeError("Corpus revision row is missing")
 
         return int(row["revision"])
+
+    def revocation_revision(self) -> int:
+        """Return the cheap, shared revision for the live tombstone set."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT revision FROM revocation_state WHERE singleton = 1"
+            ).fetchone()
+
+        if row is None:
+            raise RuntimeError("Revocation revision row is missing")
+
+        return int(row["revision"])
+
+    def revocation_snapshot(self) -> tuple[int, frozenset[str]]:
+        """Read one consistent revision/tombstone snapshot in a single query."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT revocation_state.revision, artifact_revocations.artifact_id
+                FROM revocation_state
+                LEFT JOIN artifact_revocations ON 1 = 1
+                WHERE revocation_state.singleton = 1
+                """
+            ).fetchall()
+
+        if not rows:
+            raise RuntimeError("Revocation revision row is missing")
+
+        return (
+            int(rows[0]["revision"]),
+            frozenset(
+                str(row["artifact_id"])
+                for row in rows
+                if row["artifact_id"] is not None
+            ),
+        )
+
+    def revoke_artifacts(self, artifact_ids: Sequence[str]) -> bool:
+        """Durably hide artifacts and atomically invalidate retrieval caches."""
+        normalized = tuple(dict.fromkeys(value for value in artifact_ids if value))
+        if not normalized:
+            return False
+
+        with self._lock:
+            try:
+                before = self._connection.total_changes
+                self._connection.executemany(
+                    "INSERT OR IGNORE INTO artifact_revocations "
+                    "(artifact_id) VALUES (?)",
+                    ((artifact_id,) for artifact_id in normalized),
+                )
+                changed = self._connection.total_changes > before
+                if changed:
+                    self._connection.execute(
+                        "UPDATE revocation_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                    self._connection.execute(
+                        "UPDATE corpus_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+        return changed
+
+    def clear_artifact_revocations(self, artifact_ids: Sequence[str]) -> bool:
+        """Remove confirmed tombstones and invalidate cached snapshots."""
+        normalized = tuple(dict.fromkeys(value for value in artifact_ids if value))
+        if not normalized:
+            return False
+
+        with self._lock:
+            try:
+                before = self._connection.total_changes
+                self._connection.executemany(
+                    "DELETE FROM artifact_revocations WHERE artifact_id = ?",
+                    ((artifact_id,) for artifact_id in normalized),
+                )
+                changed = self._connection.total_changes > before
+                if changed:
+                    self._connection.execute(
+                        "UPDATE revocation_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                    self._connection.execute(
+                        "UPDATE corpus_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+        return changed
 
     def save_artifact(self, artifact: ArtifactRecord) -> None:
         with self._lock:

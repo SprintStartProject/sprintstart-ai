@@ -268,3 +268,35 @@ def test_corpus_revision_is_shared_and_monotonic_across_connections(
     finally:
         first.close()
         second.close()
+
+
+def test_revocation_tombstones_are_shared_revisioned_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "metadata.db")
+    writer = IngestionMetadataStore(path)
+    reader = IngestionMetadataStore(path)
+
+    try:
+        corpus_before = reader.corpus_revision()
+        assert writer.revoke_artifacts(["artifact-1", "artifact-1"]) is True
+
+        revision, revoked = reader.revocation_snapshot()
+        assert revision == reader.revocation_revision() == 1
+        assert revoked == frozenset({"artifact-1"})
+        assert reader.corpus_revision() == corpus_before + 1
+
+        # An idempotent retry changes neither shared revision.
+        assert reader.revoke_artifacts(["artifact-1"]) is False
+        assert reader.revocation_revision() == revision
+        assert reader.corpus_revision() == corpus_before + 1
+
+        assert writer.clear_artifact_revocations(["artifact-1"]) is True
+        assert reader.revocation_snapshot() == (2, frozenset())
+        assert reader.corpus_revision() == corpus_before + 2
+
+        assert reader.clear_artifact_revocations(["artifact-1"]) is False
+        assert reader.revocation_snapshot() == (2, frozenset())
+    finally:
+        writer.close()
+        reader.close()
