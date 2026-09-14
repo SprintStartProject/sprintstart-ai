@@ -123,6 +123,35 @@ def test_bm25_cache_uses_datastore_revision_instead_of_fingerprint() -> None:
     assert first_index is second_index
 
 
+def test_bm25_cache_fails_closed_when_revision_never_stabilizes() -> None:
+    class ChurningStore(StubVectorStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.full_reads = 0
+
+        def corpus_revision(self) -> int:
+            self._corpus_revision += 1
+            return self._corpus_revision
+
+        def all_chunks_without_embeddings(self) -> list[Chunk]:
+            self.full_reads += 1
+            return super().all_chunks_without_embeddings()
+
+    store = ChurningStore()
+    store.add(
+        [make_chunk(chunk_id="chunk-1", text="private text", embedding=[1.0, 0.0])]
+    )
+    cache = BM25IndexCache()
+
+    first_index = cache.get(store)
+    second_index = cache.get(store)
+
+    assert first_index.chunks == []
+    assert second_index.chunks == []
+    assert first_index is not second_index
+    assert store.full_reads == hybrid_module._MAX_BM25_REBUILD_ATTEMPTS * 2
+
+
 def test_bm25_cache_invalidates_when_chunk_count_changes() -> None:
     store = StubVectorStore()
     cache = BM25IndexCache()

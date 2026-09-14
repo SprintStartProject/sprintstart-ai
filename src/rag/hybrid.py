@@ -21,6 +21,8 @@ SEMANTIC_ONLY_CHUNK_LIMIT = 10_000
 # Chroma 1.5.x can exceed SQLite's bind-variable ceiling when a widening
 # request asks it to hydrate tens of thousands of results at once.
 _MAX_QUERY_N = 10_000
+# A continually changing revision must not make retrieval rebuild forever.
+_MAX_BM25_REBUILD_ATTEMPTS = 3
 
 # First-guess over-fetch when a role, source, or attribute filter is active.
 # This is a round-trip optimisation only: both retrievers drop ineligible
@@ -238,7 +240,7 @@ class BM25IndexCache:
             if snapshot is not None and snapshot[0] == current_revision:
                 return snapshot[1]
 
-            while True:
+            for _ in range(_MAX_BM25_REBUILD_ATTEMPTS):
                 rebuild_revision = current_revision
                 index = BM25Index(store.all_chunks_without_embeddings())
                 current_revision = store.corpus_revision()
@@ -248,6 +250,12 @@ class BM25IndexCache:
                 if current_revision == rebuild_revision:
                     self._snapshot = (current_revision, index)
                     return index
+
+            # Sustained ingestion can change the revision after every hydration.
+            # Returning an uncached empty index keeps retrieval bounded and
+            # fail-closed; the semantic half remains available, and a later
+            # stable request can rebuild BM25 normally.
+            return BM25Index([])
 
 
 def hybrid_retrieve(
