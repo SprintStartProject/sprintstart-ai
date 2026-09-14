@@ -106,6 +106,23 @@ def test_bm25_cache_hit_does_not_rebuild_index() -> None:
     assert first_index is second_index
 
 
+def test_bm25_cache_uses_datastore_revision_instead_of_fingerprint() -> None:
+    class RevisionOnlyStore(StubVectorStore):
+        def retrieval_fingerprints(self) -> frozenset[str]:
+            raise AssertionError("BM25 cache must not scan corpus metadata")
+
+    store = RevisionOnlyStore()
+    cache = BM25IndexCache()
+    store.add(
+        [make_chunk(chunk_id="chunk-1", text="first chunk", embedding=[1.0, 0.0])]
+    )
+
+    first_index = cache.get(store)
+    second_index = cache.get(store)
+
+    assert first_index is second_index
+
+
 def test_bm25_cache_invalidates_when_chunk_count_changes() -> None:
     store = StubVectorStore()
     cache = BM25IndexCache()

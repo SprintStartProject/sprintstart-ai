@@ -8,6 +8,7 @@ import chromadb.api
 from chromadb.api.types import Metadata, PyEmbeddings, Where
 from chromadb.config import Settings
 
+from ingestion.metadata_store import IngestionMetadataStore
 from ingestion.source_role import SourceRole
 from rag.filters import (
     PROJECT_IDS_METADATA_KEY,
@@ -67,6 +68,7 @@ class ChromaVectorStore:
         collection_name: str = "chunks",
         client: chromadb.api.ClientAPI | None = None,
         path: str | None = None,
+        revision_store: IngestionMetadataStore | None = None,
     ) -> None:
         if client is not None:
             self._client: chromadb.api.ClientAPI = client
@@ -79,6 +81,19 @@ class ChromaVectorStore:
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
         )
+        self._revision_store = revision_store
+        self._local_revision = 0
+        self._revision_lock = threading.Lock()
+
+    def _bump_corpus_revision(self) -> None:
+        if self._revision_store is not None:
+            self._revision_store.bump_corpus_revision()
+            return
+
+        # Directly constructed ephemeral stores used by tests and local tools do
+        # not share a datastore, but they still need correct in-process caching.
+        with self._revision_lock:
+            self._local_revision += 1
 
     def add(self, chunks: list[Chunk]) -> None:
         if not chunks:
@@ -127,24 +142,32 @@ class ChromaVectorStore:
         # happen here rather than in any one caller.
         page = self._max_write_page()
 
-        for start in range(0, len(ids), page):
-            stop = start + page
-            page_ids = ids[start:stop]
+        mutated = False
+        try:
+            for start in range(0, len(ids), page):
+                stop = start + page
+                page_ids = ids[start:stop]
 
-            # Chroma's upsert *merges* metadata instead of replacing it, so a
-            # key that is no longer written would survive a re-ingest —
-            # including the ``project:<id>`` marker of a project the artifact
-            # was removed from, which would keep it retrievable from that
-            # project forever. Deleting first makes each chunk's metadata
-            # exactly what we write here.
-            self._collection.delete(ids=page_ids)
+                # Chroma's upsert *merges* metadata instead of replacing it, so a
+                # key that is no longer written would survive a re-ingest —
+                # including the ``project:<id>`` marker of a project the artifact
+                # was removed from, which would keep it retrievable from that
+                # project forever. Deleting first makes each chunk's metadata
+                # exactly what we write here.
+                mutated = True
+                self._collection.delete(ids=page_ids)
 
-            self._collection.upsert(
-                ids=page_ids,
-                documents=documents[start:stop],
-                embeddings=cast(PyEmbeddings, embeddings[start:stop]),
-                metadatas=cast(list[Metadata], metadatas[start:stop]),
-            )
+                self._collection.upsert(
+                    ids=page_ids,
+                    documents=documents[start:stop],
+                    embeddings=cast(PyEmbeddings, embeddings[start:stop]),
+                    metadatas=cast(list[Metadata], metadatas[start:stop]),
+                )
+        finally:
+            # Bump even when a later page fails: an earlier delete/upsert may
+            # already have changed retrieval-visible state.
+            if mutated:
+                self._bump_corpus_revision()
 
     def _max_write_page(self) -> int:
         """Largest id count one ``delete``/``upsert`` pair may carry.
@@ -265,7 +288,12 @@ class ChromaVectorStore:
             ids = [i for i in ids if i not in exclude_ids]
 
         if ids:
-            self._collection.delete(ids=ids)
+            try:
+                self._collection.delete(ids=ids)
+            finally:
+                # Invalidate caches even if the backend reports an error after
+                # partially applying the deletion.
+                self._bump_corpus_revision()
 
         return len(ids)
 
@@ -385,6 +413,13 @@ class ChromaVectorStore:
     def all_ids(self) -> frozenset[str]:
         raw_result = self._collection.get(include=[])
         return frozenset(str(chunk_id) for chunk_id in raw_result["ids"])
+
+    def corpus_revision(self) -> int:
+        if self._revision_store is not None:
+            return self._revision_store.corpus_revision()
+
+        with self._revision_lock:
+            return self._local_revision
 
     def retrieval_fingerprints(self) -> frozenset[str]:
         return frozenset(

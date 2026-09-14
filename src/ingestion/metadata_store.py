@@ -111,6 +111,17 @@ class IngestionMetadataStore:
                 """
             )
             self._migrate_columns()
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS corpus_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    revision INTEGER NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                "INSERT OR IGNORE INTO corpus_state (singleton, revision) VALUES (1, 0)"
+            )
 
             self._connection.execute("DROP TABLE IF EXISTS artifact_chunks")
             self._connection.commit()
@@ -139,6 +150,34 @@ class IngestionMetadataStore:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def corpus_revision(self) -> int:
+        """Return the corpus revision shared by every instance using this database."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT revision FROM corpus_state WHERE singleton = 1"
+            ).fetchone()
+
+        if row is None:
+            raise RuntimeError("Corpus revision row is missing")
+
+        return int(row["revision"])
+
+    def bump_corpus_revision(self) -> int:
+        """Atomically advance and return the shared corpus revision."""
+        with self._lock:
+            self._connection.execute(
+                "UPDATE corpus_state SET revision = revision + 1 WHERE singleton = 1"
+            )
+            row = self._connection.execute(
+                "SELECT revision FROM corpus_state WHERE singleton = 1"
+            ).fetchone()
+            self._connection.commit()
+
+        if row is None:
+            raise RuntimeError("Corpus revision row is missing")
+
+        return int(row["revision"])
 
     def save_artifact(self, artifact: ArtifactRecord) -> None:
         with self._lock:

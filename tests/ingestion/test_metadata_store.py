@@ -248,3 +248,24 @@ def test_remove_project_leaves_case_variants_untouched() -> None:
     assert variant is not None
     assert variant.project_ids == ("proj-a",)
     assert variant.updated_at == _NOW
+
+
+
+def test_corpus_revision_is_shared_and_monotonic_across_connections(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "metadata.db")
+    first = IngestionMetadataStore(path)
+    second = IngestionMetadataStore(path)
+
+    try:
+        assert first.corpus_revision() == second.corpus_revision() == 0
+
+        assert first.bump_corpus_revision() == 1
+        assert second.corpus_revision() == 1
+
+        assert second.bump_corpus_revision() == 2
+        assert first.corpus_revision() == 2
+    finally:
+        first.close()
+        second.close()
