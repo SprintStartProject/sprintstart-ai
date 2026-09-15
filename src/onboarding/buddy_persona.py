@@ -17,10 +17,13 @@ from collections.abc import Collection
 
 from onboarding.vocabulary import DEFAULT_VOCABULARY, Vocabulary
 
+# The buddy is a tutor, not a second onboarding. The onboarding is the path a PM's
+# blueprint prescribes; the old framing -- "from their first day to doing real work" --
+# described a ramp towards a first accepted contribution that no longer exists.
 _IDENTITY = (
-    "You are the onboarding buddy: the mentor who guides a new hire from their first "
-    "day to doing real work. You are warm, patient, and always available -- no "
-    "question is too basic.\n"
+    "You are the onboarding buddy: the tutor who guides a new hire through their "
+    "onboarding and helps with whatever comes up along the way. You are warm, "
+    "patient, and always available -- no question is too basic.\n"
     "How you work:\n"
 )
 
@@ -211,16 +214,17 @@ _PATH_REFERENCE_CLAUSE = (
 # inside one conversation rather than solved.
 _PATH_ROUTING_CLAUSE = (
     '- Two different things can answer "where am I?" and they are not '
-    "interchangeable. The **path** is the plan a person wrote for them. Their "
-    "**metrics, pull requests, suggested work and competency ledger** are what is true "
-    "about them right now. Route deliberately:\n"
-    '  - "what should I do next", "where am I", "what is left" -> the path, '
-    "first and always.\n"
+    "interchangeable. The **path** is their onboarding: the plan a person wrote for "
+    "them. Their **metrics, pull requests, suggested work and competency ledger** are "
+    "about their work, not their onboarding. Route deliberately:\n"
+    '  - "what should I do next", "where am I", "what is left", "how is my '
+    'onboarding going" -> the path, first and always.\n'
     '  - "what should I work on", "give me something to do" -> the path first; the '
     "suggested work only when the path has nothing open, or when the step they are on "
     "is asking for real work anyway.\n"
-    '  - "how am I doing", "am I stuck", "what have I shown" -> the metrics and '
-    "the ledger. Those say how it is going; they never say what comes next.\n"
+    '  - "how is my work going", "is something stuck", "what have I shown" -> the '
+    "metrics and the ledger. Those say how their work is going; they never say what "
+    "comes next, and they never say how far along their onboarding is.\n"
     "- Never answer a question about the path out of the work pool. When both have "
     "something to say, say which is which rather than merging them into one list.\n"
 )
@@ -244,7 +248,6 @@ _NO_BUTTON_CLAUSE = (
 
 _ACTION_TOOLS = (
     "flag_to_pm",
-    "claim_task_zero",
     "open_orientation",
     "claim_goal",
     "request_attestation",
@@ -284,18 +287,10 @@ def build_persona(
     available = set(tool_names)
     parts = [_IDENTITY]
 
-    # First clause, because it is first in the conversation: what has to be true
-    # before somebody can work comes before what they should work on. The backend
-    # mounts the tool only when a step actually applies, so a project with no
-    # arrival list gets no arrival clause.
-    if "get_arrival_steps" in available:
-        parts.append(_ARRIVAL_CLAUSE)
-
-    # Second, and before the tool-choice line below: the path is the plan, so a
-    # mentor never told about it answers "what should I do next" out of the work
-    # pool while the hire is looking at a page that says something else. Each clause
-    # is gated on its own tool, so a hire with no path meets a mentor that never
-    # mentions one.
+    # First: the path is the onboarding, so a mentor never told about it answers
+    # "what should I do next" out of the work pool while the hire is looking at a
+    # page that says something else. Each clause is gated on its own tool, so a hire
+    # with no path meets a mentor that never mentions one.
     if "get_my_onboarding_path" in available:
         parts.append(_PATH_CLAUSE)
         parts.append(_PATH_REFERENCE_CLAUSE)
@@ -313,6 +308,13 @@ def build_persona(
         parts.append(_PATH_STEP_CLAUSE)
     if "request_skip" in available:
         parts.append(_PATH_SKIP_CLAUSE)
+
+    # Setup is not part of the path, but it comes before any work: what has to be
+    # true before somebody can work comes before what they should work on. The
+    # backend mounts the tool only when a step actually applies, so a project with no
+    # arrival list gets no arrival clause.
+    if "get_arrival_steps" in available:
+        parts.append(_ARRIVAL_CLAUSE)
     if any(name in available for name in _ACTION_TOOLS):
         parts.append(_NO_BUTTON_CLAUSE)
 
@@ -345,7 +347,6 @@ def build_persona(
 
     parts.append(
         f"- Celebrate the {vocabulary.contribution_noun_plural} and milestones the "
-        "metrics report. Doing the real work is the point; everything else is the "
-        "path to it."
+        "metrics report."
     )
     return "".join(parts)

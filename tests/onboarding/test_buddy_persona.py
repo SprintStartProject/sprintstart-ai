@@ -300,6 +300,35 @@ def test_a_question_about_the_path_is_never_answered_from_the_work_pool() -> Non
     assert "never say what comes next" in persona
 
 
+def test_how_the_onboarding_is_going_is_the_paths_question() -> None:
+    """The metrics are about work. Routing "how is my onboarding going" to them
+    would make the first accepted contribution the end of onboarding again."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert 'how is my onboarding going" -> the path' in persona
+    assert "never say how far along their onboarding is" in persona
+
+
+def test_the_path_comes_before_setup_and_setup_before_work() -> None:
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert (
+        persona.index("The hire has an onboarding path")
+        < persona.index("`get_arrival_steps`")
+        < persona.index("`get_suggested_tasks`")
+    )
+
+
+def test_no_ramp_towards_a_first_contribution_is_left_in_the_persona() -> None:
+    """Task 0 and "doing real work is the point" were the old onboarding: a ramp
+    that ended at a first accepted contribution. The path replaced it."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS, "open_orientation"]).lower()
+
+    assert "task 0" not in persona
+    assert "claim_task_zero" not in persona
+    assert "the path to it" not in persona
+
+
 def test_no_routing_rule_where_there_is_nothing_to_route_between() -> None:
     # A hire with a path but no state tools has one place an answer can come from, so a
     # rule about choosing would be noise.
