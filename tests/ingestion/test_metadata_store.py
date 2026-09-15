@@ -268,3 +268,102 @@ def test_corpus_revision_is_shared_and_monotonic_across_connections(
     finally:
         first.close()
         second.close()
+
+
+def test_revocation_tombstones_are_shared_revisioned_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "metadata.db")
+    writer = IngestionMetadataStore(path)
+    reader = IngestionMetadataStore(path)
+
+    try:
+        corpus_before = reader.corpus_revision()
+        assert writer.revoke_artifacts(["artifact-1", "artifact-1"]) is True
+
+        revision, revoked = reader.revocation_snapshot()
+        assert revision == reader.revocation_revision() == 1
+        assert revoked == frozenset({"artifact-1"})
+        assert reader.corpus_revision() == corpus_before + 1
+
+        # An idempotent retry changes neither shared revision.
+        assert reader.revoke_artifacts(["artifact-1"]) is False
+        assert reader.revocation_revision() == revision
+        assert reader.corpus_revision() == corpus_before + 1
+
+        assert writer.clear_artifact_revocations(["artifact-1"]) is True
+        assert reader.revocation_snapshot() == (2, frozenset())
+        assert reader.corpus_revision() == corpus_before + 2
+
+        assert reader.clear_artifact_revocations(["artifact-1"]) is False
+        assert reader.revocation_snapshot() == (2, frozenset())
+    finally:
+        writer.close()
+        reader.close()
+
+
+def test_revocation_reasons_cannot_clear_each_other(tmp_path: Path) -> None:
+    store = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+
+    try:
+        assert store.revoke_artifacts(["artifact-1"], reason="delete") is True
+        assert store.revoke_artifacts(["artifact-1"], reason="membership") is True
+        assert store.revocation_snapshot() == (
+            2,
+            frozenset({"artifact-1"}),
+        )
+
+        assert (
+            store.clear_artifact_revocations(
+                ["artifact-1"],
+                reason="membership",
+            )
+            is True
+        )
+        assert store.revocation_snapshot() == (
+            3,
+            frozenset({"artifact-1"}),
+        )
+
+        assert (
+            store.clear_artifact_revocations(
+                ["artifact-1"],
+                reason="delete",
+            )
+            is True
+        )
+        assert store.revocation_snapshot() == (4, frozenset())
+    finally:
+        store.close()
+
+
+def test_pre_reason_tombstone_schema_is_migrated_without_losing_revocation(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "metadata.db")
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE artifact_revocations (
+            artifact_id TEXT PRIMARY KEY,
+            revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO artifact_revocations (artifact_id) VALUES (?)",
+        ("artifact-1",),
+    )
+    connection.commit()
+    connection.close()
+
+    store = IngestionMetadataStore(path)
+    try:
+        assert store.revocation_snapshot() == (
+            0,
+            frozenset({"artifact-1"}),
+        )
+        assert store.clear_artifact_revocations(["artifact-1"]) is True
+        assert store.revocation_snapshot() == (1, frozenset())
+    finally:
+        store.close()

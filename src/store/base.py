@@ -32,7 +32,14 @@ class VectorStore(Protocol):
         self,
         artifact_id: str,
         exclude_ids: list[str] | None = None,
-    ) -> int: ...
+    ) -> int:
+        """Delete chunks behind a durable, fail-closed artifact tombstone.
+
+        The tombstone must be visible to retrieval before deletion starts and
+        cleared only after the backend confirms that every targeted chunk is
+        gone. A failed call leaves the tombstone live for a later retry.
+        """
+        ...
 
     def list_chunks(self, limit: int, offset: int = 0) -> list[Chunk]: ...
 
