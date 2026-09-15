@@ -300,3 +300,70 @@ def test_revocation_tombstones_are_shared_revisioned_and_idempotent(
     finally:
         writer.close()
         reader.close()
+
+
+def test_revocation_reasons_cannot_clear_each_other(tmp_path: Path) -> None:
+    store = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+
+    try:
+        assert store.revoke_artifacts(["artifact-1"], reason="delete") is True
+        assert store.revoke_artifacts(["artifact-1"], reason="membership") is True
+        assert store.revocation_snapshot() == (
+            2,
+            frozenset({"artifact-1"}),
+        )
+
+        assert (
+            store.clear_artifact_revocations(
+                ["artifact-1"],
+                reason="membership",
+            )
+            is True
+        )
+        assert store.revocation_snapshot() == (
+            3,
+            frozenset({"artifact-1"}),
+        )
+
+        assert (
+            store.clear_artifact_revocations(
+                ["artifact-1"],
+                reason="delete",
+            )
+            is True
+        )
+        assert store.revocation_snapshot() == (4, frozenset())
+    finally:
+        store.close()
+
+
+def test_pre_reason_tombstone_schema_is_migrated_without_losing_revocation(
+    tmp_path: Path,
+) -> None:
+    path = str(tmp_path / "metadata.db")
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE artifact_revocations (
+            artifact_id TEXT PRIMARY KEY,
+            revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO artifact_revocations (artifact_id) VALUES (?)",
+        ("artifact-1",),
+    )
+    connection.commit()
+    connection.close()
+
+    store = IngestionMetadataStore(path)
+    try:
+        assert store.revocation_snapshot() == (
+            0,
+            frozenset({"artifact-1"}),
+        )
+        assert store.clear_artifact_revocations(["artifact-1"]) is True
+        assert store.revocation_snapshot() == (1, frozenset())
+    finally:
+        store.close()

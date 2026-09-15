@@ -8,7 +8,7 @@ import chromadb.api
 from chromadb.api.types import Metadata, PyEmbeddings, QueryResult, Where
 from chromadb.config import Settings
 
-from ingestion.metadata_store import IngestionMetadataStore
+from ingestion.metadata_store import IngestionMetadataStore, RevocationReason
 from ingestion.source_role import SourceRole
 from rag.filters import (
     PROJECT_IDS_METADATA_KEY,
@@ -84,7 +84,7 @@ class ChromaVectorStore:
         self._revision_store = revision_store
         self._local_revision = 0
         self._local_revocation_revision = 0
-        self._local_revocations: set[str] = set()
+        self._local_revocations: set[tuple[str, RevocationReason]] = set()
         self._cached_revocation_revision = -1
         self._cached_revocations: frozenset[str] = frozenset()
         self._revision_lock = threading.Lock()
@@ -117,39 +117,59 @@ class ChromaVectorStore:
         else:
             with self._revision_lock:
                 revision = self._local_revocation_revision
-                revoked = frozenset(self._local_revocations)
+                revoked = frozenset(
+                    artifact_id for artifact_id, _reason in self._local_revocations
+                )
 
         with self._revision_lock:
             self._cached_revocation_revision = revision
             self._cached_revocations = revoked
         return revision, revoked
 
-    def _revoke_artifacts(self, artifact_ids: frozenset[str]) -> None:
+    def _revoke_artifacts(
+        self,
+        artifact_ids: frozenset[str],
+        reason: RevocationReason,
+    ) -> None:
         if not artifact_ids:
             return
 
         if self._revision_store is not None:
-            self._revision_store.revoke_artifacts(sorted(artifact_ids))
+            self._revision_store.revoke_artifacts(
+                sorted(artifact_ids),
+                reason=reason,
+            )
             return
 
         with self._revision_lock:
             before = len(self._local_revocations)
-            self._local_revocations.update(artifact_ids)
+            self._local_revocations.update(
+                (artifact_id, reason) for artifact_id in artifact_ids
+            )
             if len(self._local_revocations) != before:
                 self._local_revocation_revision += 1
                 self._local_revision += 1
 
-    def _clear_artifact_revocations(self, artifact_ids: frozenset[str]) -> None:
+    def _clear_artifact_revocations(
+        self,
+        artifact_ids: frozenset[str],
+        reason: RevocationReason,
+    ) -> None:
         if not artifact_ids:
             return
 
         if self._revision_store is not None:
-            self._revision_store.clear_artifact_revocations(sorted(artifact_ids))
+            self._revision_store.clear_artifact_revocations(
+                sorted(artifact_ids),
+                reason=reason,
+            )
             return
 
         with self._revision_lock:
             before = len(self._local_revocations)
-            self._local_revocations.difference_update(artifact_ids)
+            self._local_revocations.difference_update(
+                (artifact_id, reason) for artifact_id in artifact_ids
+            )
             if len(self._local_revocations) != before:
                 self._local_revocation_revision += 1
                 self._local_revision += 1
@@ -372,7 +392,7 @@ class ChromaVectorStore:
         tombstone = frozenset({artifact_id})
         # Commit the revocation before the first Chroma read. If that read, the
         # delete, or the process itself fails, retrieval remains fail-closed.
-        self._revoke_artifacts(tombstone)
+        self._revoke_artifacts(tombstone, reason="delete")
 
         # Any exception before cleanup leaves the durable tombstone live for
         # the retry.
@@ -396,7 +416,7 @@ class ChromaVectorStore:
 
         # Deleting zero chunks also confirms that nothing remains to expose.
         # If cleanup fails, report failure and retain the safe over-redaction.
-        self._clear_artifact_revocations(tombstone)
+        self._clear_artifact_revocations(tombstone, reason="delete")
         return len(ids)
 
     def list_chunks(self, limit: int, offset: int = 0) -> list[Chunk]:
@@ -593,7 +613,7 @@ class ChromaVectorStore:
                 membership(decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)))
             )
         )
-        self._revoke_artifacts(tombstones)
+        self._revoke_artifacts(tombstones, reason="membership")
 
         # Any failure leaves every affected artifact tombstoned until a retry
         # repairs all of its chunks.
@@ -612,7 +632,7 @@ class ChromaVectorStore:
                 ]
             )
 
-        self._clear_artifact_revocations(tombstones)
+        self._clear_artifact_revocations(tombstones, reason="membership")
         return len(ids)
 
     def _iter_metadata_records(

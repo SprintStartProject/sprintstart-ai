@@ -1739,3 +1739,61 @@ def test_retry_prunes_tombstone_when_failed_delete_already_removed_chunks(
         assert metadata.revocation_snapshot()[1] == frozenset()
     finally:
         metadata.close()
+
+
+def test_membership_rewrite_cannot_clear_a_failed_delete_tombstone(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_cross_operation_revocation",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="secret.md",
+                text="project secret",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            )
+        ]
+    )
+
+    original_delete = store._collection.delete
+
+    def fail_delete(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("deindex failed")
+
+    monkeypatch.setattr(store._collection, "delete", fail_delete)
+
+    try:
+        with pytest.raises(RuntimeError, match="deindex failed"):
+            store.delete("artifact-1", exclude_ids=[])
+
+        monkeypatch.setattr(store._collection, "delete", original_delete)
+        assert store.set_project_ids_for_artifact("artifact-1", ("project-b",)) == 1
+
+        # The membership operation may clear only its own tombstone. The
+        # earlier failed deindex still owns a live delete tombstone.
+        assert metadata.revocation_snapshot()[1] == frozenset({"artifact-1"})
+        assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-b"})
+        assert (
+            store.query(
+                embedding=[1.0, 0.0],
+                top_k=5,
+                min_score=0.0,
+                filters=RetrievalFilters(project_id="project-b"),
+            )
+            == []
+        )
+
+        assert store.delete("artifact-1", exclude_ids=[]) == 1
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()

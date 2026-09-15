@@ -15,6 +15,7 @@ from rag.filters import (
 )
 
 IngestionStatus = Literal["processing", "completed", "failed", "deindexed"]
+RevocationReason = Literal["delete", "membership"]
 
 _COLUMNS = (
     "id",
@@ -125,11 +126,47 @@ class IngestionMetadataStore:
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS artifact_revocations (
-                    artifact_id TEXT PRIMARY KEY,
-                    revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    artifact_id TEXT NOT NULL,
+                    reason TEXT NOT NULL
+                        CHECK (reason IN ('delete', 'membership')),
+                    revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (artifact_id, reason)
                 )
                 """
             )
+            revocation_columns = {
+                str(row["name"])
+                for row in self._connection.execute(
+                    "PRAGMA table_info(artifact_revocations)"
+                ).fetchall()
+            }
+            if "reason" not in revocation_columns:
+                # Migrate databases created by the first, pre-review version
+                # of this branch without dropping a live delete tombstone.
+                self._connection.execute(
+                    "ALTER TABLE artifact_revocations "
+                    "RENAME TO artifact_revocations_legacy"
+                )
+                self._connection.execute(
+                    """
+                    CREATE TABLE artifact_revocations (
+                        artifact_id TEXT NOT NULL,
+                        reason TEXT NOT NULL
+                            CHECK (reason IN ('delete', 'membership')),
+                        revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (artifact_id, reason)
+                    )
+                    """
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO artifact_revocations
+                        (artifact_id, reason, revoked_at)
+                    SELECT artifact_id, 'delete', revoked_at
+                    FROM artifact_revocations_legacy
+                    """
+                )
+                self._connection.execute("DROP TABLE artifact_revocations_legacy")
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS revocation_state (
@@ -235,8 +272,12 @@ class IngestionMetadataStore:
             ),
         )
 
-    def revoke_artifacts(self, artifact_ids: Sequence[str]) -> bool:
-        """Durably hide artifacts and atomically invalidate retrieval caches."""
+    def revoke_artifacts(
+        self,
+        artifact_ids: Sequence[str],
+        reason: RevocationReason = "delete",
+    ) -> bool:
+        """Durably hide artifacts for one operation class."""
         normalized = tuple(dict.fromkeys(value for value in artifact_ids if value))
         if not normalized:
             return False
@@ -246,8 +287,8 @@ class IngestionMetadataStore:
                 before = self._connection.total_changes
                 self._connection.executemany(
                     "INSERT OR IGNORE INTO artifact_revocations "
-                    "(artifact_id) VALUES (?)",
-                    ((artifact_id,) for artifact_id in normalized),
+                    "(artifact_id, reason) VALUES (?, ?)",
+                    ((artifact_id, reason) for artifact_id in normalized),
                 )
                 changed = self._connection.total_changes > before
                 if changed:
@@ -266,8 +307,12 @@ class IngestionMetadataStore:
 
         return changed
 
-    def clear_artifact_revocations(self, artifact_ids: Sequence[str]) -> bool:
-        """Remove confirmed tombstones and invalidate cached snapshots."""
+    def clear_artifact_revocations(
+        self,
+        artifact_ids: Sequence[str],
+        reason: RevocationReason = "delete",
+    ) -> bool:
+        """Clear only the confirmed operation class for each artifact."""
         normalized = tuple(dict.fromkeys(value for value in artifact_ids if value))
         if not normalized:
             return False
@@ -276,8 +321,9 @@ class IngestionMetadataStore:
             try:
                 before = self._connection.total_changes
                 self._connection.executemany(
-                    "DELETE FROM artifact_revocations WHERE artifact_id = ?",
-                    ((artifact_id,) for artifact_id in normalized),
+                    "DELETE FROM artifact_revocations "
+                    "WHERE artifact_id = ? AND reason = ?",
+                    ((artifact_id, reason) for artifact_id in normalized),
                 )
                 changed = self._connection.total_changes > before
                 if changed:
