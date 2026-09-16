@@ -1887,6 +1887,37 @@ def test_authoritative_membership_retry_clears_an_older_tombstone(
         metadata.close()
 
 
+def test_authoritative_membership_sync_clears_failed_project_removal_scope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_cross_scope_membership_recovery",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add([_revocation_chunk("c1", "art-1", ("a", "b"))])
+    original_add = store.add
+
+    monkeypatch.setattr(
+        store,
+        "add",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.remove_project("a")
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.set_project_ids_for_artifact("art-1", ("b",))
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"b"})
+    finally:
+        metadata.close()
+
+
 def test_reingest_clears_membership_tombstones_that_predate_replacement(
     monkeypatch,
     tmp_path: Path,
