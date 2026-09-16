@@ -367,3 +367,45 @@ def test_pre_reason_tombstone_schema_is_migrated_without_losing_revocation(
         assert store.revocation_snapshot() == (1, frozenset())
     finally:
         store.close()
+
+
+def test_newer_revocation_operation_cannot_be_cleared_by_older_owner_token(
+    tmp_path: Path,
+) -> None:
+    store = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+
+    try:
+        first = store.begin_revocation_operations(
+            ["artifact-1"],
+            reason="membership",
+            owner="project:a",
+        )
+        second = store.begin_revocation_operations(
+            ["artifact-1"],
+            reason="membership",
+            owner="project:a",
+        )
+
+        assert first == {"artifact-1": 1}
+        assert second == {"artifact-1": 2}
+        assert (
+            store.complete_revocation_operations(
+                first,
+                reason="membership",
+                owner="project:a",
+            )
+            is False
+        )
+        assert store.revocation_snapshot()[1] == frozenset({"artifact-1"})
+
+        assert (
+            store.complete_revocation_operations(
+                second,
+                reason="membership",
+                owner="project:a",
+            )
+            is True
+        )
+        assert store.revocation_snapshot()[1] == frozenset()
+    finally:
+        store.close()
