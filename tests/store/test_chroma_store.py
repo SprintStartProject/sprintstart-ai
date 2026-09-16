@@ -7,7 +7,9 @@ from pathlib import Path
 import chromadb
 import pytest
 
+from ingestion.metadata_store import IngestionMetadataStore
 from ingestion.source_role import SourceRole
+from rag.hybrid import BM25IndexCache
 from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters
 from store import chroma_store as chroma_store_module
@@ -1498,3 +1500,57 @@ def test_remove_project_rewrites_a_corpus_past_the_real_write_ceiling() -> None:
 
     assert store.count() == total
     assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-b"})
+
+
+def test_bm25_cache_invalidates_across_store_instances(
+    tmp_path: Path,
+) -> None:
+    revision_path = str(tmp_path / "shared-metadata.db")
+    writer_revision = IngestionMetadataStore(revision_path)
+    reader_revision = IngestionMetadataStore(revision_path)
+    client = chromadb.EphemeralClient()
+    collection_name = "test_cross_instance_revision"
+    writer = ChromaVectorStore(
+        collection_name=collection_name,
+        client=client,
+        revision_store=writer_revision,
+    )
+    reader = ChromaVectorStore(
+        collection_name=collection_name,
+        client=client,
+        revision_store=reader_revision,
+    )
+    cache = BM25IndexCache()
+
+    def chunk(project_ids: tuple[str, ...]) -> Chunk:
+        return Chunk(
+            id="chunk-1",
+            artifact_id="artifact-1",
+            filename="doc.md",
+            text="deployment runbook",
+            embedding=[1.0, 0.0],
+            project_ids=project_ids,
+        )
+
+    try:
+        writer.add([chunk(("project-a",))])
+        first_index = cache.get(reader)
+        assert first_index.chunks[0].project_ids == ("project-a",)
+
+        writer.set_project_ids_for_artifact("artifact-1", ("project-b",))
+        second_index = cache.get(reader)
+
+        assert first_index is not second_index
+        assert second_index.chunks[0].project_ids == ("project-b",)
+        assert writer.corpus_revision() == reader.corpus_revision()
+
+        revision_before_delete = reader.corpus_revision()
+        assert writer.delete("artifact-1") == 1
+        assert reader.corpus_revision() > revision_before_delete
+
+        third_index = cache.get(reader)
+        assert third_index is not second_index
+        assert third_index.chunks == []
+    finally:
+        writer_revision.close()
+        reader_revision.close()
