@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
@@ -129,8 +129,10 @@ class IngestionMetadataStore:
                     artifact_id TEXT NOT NULL,
                     reason TEXT NOT NULL
                         CHECK (reason IN ('delete', 'membership')),
+                    owner TEXT NOT NULL DEFAULT '',
+                    generation INTEGER NOT NULL DEFAULT 1,
                     revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (artifact_id, reason)
+                    PRIMARY KEY (artifact_id, reason, owner)
                 )
                 """
             )
@@ -153,8 +155,10 @@ class IngestionMetadataStore:
                         artifact_id TEXT NOT NULL,
                         reason TEXT NOT NULL
                             CHECK (reason IN ('delete', 'membership')),
+                        owner TEXT NOT NULL DEFAULT '',
+                        generation INTEGER NOT NULL DEFAULT 1,
                         revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (artifact_id, reason)
+                        PRIMARY KEY (artifact_id, reason, owner)
                     )
                     """
                 )
@@ -167,6 +171,47 @@ class IngestionMetadataStore:
                     """
                 )
                 self._connection.execute("DROP TABLE artifact_revocations_legacy")
+            else:
+                revocation_columns = {
+                    str(row["name"])
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(artifact_revocations)"
+                    ).fetchall()
+                }
+                if "generation" not in revocation_columns:
+                    self._connection.execute(
+                        "ALTER TABLE artifact_revocations "
+                        "ADD COLUMN generation INTEGER NOT NULL DEFAULT 1"
+                    )
+                if "owner" not in revocation_columns:
+                    self._connection.execute(
+                        "ALTER TABLE artifact_revocations "
+                        "RENAME TO artifact_revocations_legacy_owner"
+                    )
+                    self._connection.execute(
+                        """
+                        CREATE TABLE artifact_revocations (
+                            artifact_id TEXT NOT NULL,
+                            reason TEXT NOT NULL
+                                CHECK (reason IN ('delete', 'membership')),
+                            owner TEXT NOT NULL DEFAULT '',
+                            generation INTEGER NOT NULL DEFAULT 1,
+                            revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (artifact_id, reason, owner)
+                        )
+                        """
+                    )
+                    self._connection.execute(
+                        """
+                        INSERT INTO artifact_revocations
+                            (artifact_id, reason, owner, generation, revoked_at)
+                        SELECT artifact_id, reason, '', generation, revoked_at
+                        FROM artifact_revocations_legacy_owner
+                        """
+                    )
+                    self._connection.execute(
+                        "DROP TABLE artifact_revocations_legacy_owner"
+                    )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS revocation_state (
@@ -180,7 +225,6 @@ class IngestionMetadataStore:
                 "(singleton, revision) VALUES (1, 0)"
             )
 
-            self._connection.execute("DROP TABLE IF EXISTS artifact_chunks")
             self._connection.commit()
 
     def _migrate_columns(self) -> None:
@@ -306,6 +350,141 @@ class IngestionMetadataStore:
                 raise
 
         return changed
+
+    def begin_revocation_operations(
+        self,
+        artifact_ids: Sequence[str],
+        reason: RevocationReason,
+        owner: str,
+    ) -> dict[str, int]:
+        """Start revocations and return tokens that only their owner can clear.
+
+        Retrying an operation advances the generation of an existing tombstone.
+        A completion carrying an older token therefore cannot clear protection
+        installed by a newer concurrent operation.
+        """
+        normalized = tuple(dict.fromkeys(value for value in artifact_ids if value))
+        if not normalized:
+            return {}
+
+        generations: dict[str, int] = {}
+        visible_change = False
+        with self._lock:
+            try:
+                for artifact_id in normalized:
+                    inserted = self._connection.execute(
+                        "INSERT OR IGNORE INTO artifact_revocations "
+                        "(artifact_id, reason, owner, generation) "
+                        "VALUES (?, ?, ?, 1)",
+                        (artifact_id, reason, owner),
+                    )
+                    if inserted.rowcount > 0:
+                        generation = 1
+                        visible_change = True
+                    else:
+                        self._connection.execute(
+                            "UPDATE artifact_revocations "
+                            "SET generation = generation + 1 "
+                            "WHERE artifact_id = ? AND reason = ? AND owner = ?",
+                            (artifact_id, reason, owner),
+                        )
+                        row = self._connection.execute(
+                            "SELECT generation FROM artifact_revocations "
+                            "WHERE artifact_id = ? AND reason = ? AND owner = ?",
+                            (artifact_id, reason, owner),
+                        ).fetchone()
+                        if row is None:
+                            raise RuntimeError("Revocation operation row is missing")
+                        generation = int(row["generation"])
+                    generations[artifact_id] = generation
+
+                if visible_change:
+                    self._connection.execute(
+                        "UPDATE revocation_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                    self._connection.execute(
+                        "UPDATE corpus_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+        return generations
+
+    def complete_revocation_operations(
+        self,
+        generations: Mapping[str, int],
+        reason: RevocationReason,
+        owner: str,
+    ) -> bool:
+        """Clear only tombstones still owned by the supplied operations."""
+        normalized = {
+            artifact_id: generation
+            for artifact_id, generation in generations.items()
+            if artifact_id
+        }
+        if not normalized:
+            return False
+
+        with self._lock:
+            try:
+                before = self._connection.total_changes
+                self._connection.executemany(
+                    "DELETE FROM artifact_revocations "
+                    "WHERE artifact_id = ? AND reason = ? AND owner = ? "
+                    "AND generation = ?",
+                    (
+                        (artifact_id, reason, owner, generation)
+                        for artifact_id, generation in normalized.items()
+                    ),
+                )
+                changed = self._connection.total_changes > before
+                if changed:
+                    self._connection.execute(
+                        "UPDATE revocation_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                    self._connection.execute(
+                        "UPDATE corpus_state "
+                        "SET revision = revision + 1 WHERE singleton = 1"
+                    )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+        return changed
+
+    def revocation_artifacts(
+        self,
+        reason: RevocationReason,
+        owner: str,
+    ) -> frozenset[str]:
+        """Return artifacts protected by one retryable operation scope."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT artifact_id FROM artifact_revocations "
+                "WHERE reason = ? AND owner = ?",
+                (reason, owner),
+            ).fetchall()
+        return frozenset(str(row["artifact_id"]) for row in rows)
+
+    def revocation_operations_for_artifact(
+        self,
+        artifact_id: str,
+        reason: RevocationReason,
+    ) -> dict[str, int]:
+        """Snapshot live operation owners so a later cleanup is conditional."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT owner, generation FROM artifact_revocations "
+                "WHERE artifact_id = ? AND reason = ?",
+                (artifact_id, reason),
+            ).fetchall()
+        return {str(row["owner"]): int(row["generation"]) for row in rows}
 
     def clear_artifact_revocations(
         self,
