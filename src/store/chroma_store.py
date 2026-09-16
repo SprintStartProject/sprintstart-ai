@@ -645,11 +645,16 @@ class ChromaVectorStore:
         project_ids: tuple[str, ...],
     ) -> int:
         normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        recovery_operations = self._revocation_operations_for_artifact(
+            artifact_id,
+            reason="membership",
+        )
         return self._rewrite_membership(
             {"artifact_id": artifact_id},
             lambda _chunk: normalized,
             recovery_artifact_ids=frozenset({artifact_id}),
             revocation_owner=f"artifact:{artifact_id}",
+            recovery_operations={artifact_id: recovery_operations},
         )
 
     def remove_project(self, project_id: str) -> int:
@@ -682,6 +687,7 @@ class ChromaVectorStore:
         membership: Callable[[tuple[str, ...]], tuple[str, ...]],
         recovery_artifact_ids: frozenset[str] = frozenset(),
         revocation_owner: str = "membership",
+        recovery_operations: Mapping[str, Mapping[str, int]] | None = None,
     ) -> int:
         """Rewrite membership while keeping removals fail-closed on failure.
 
@@ -727,6 +733,13 @@ class ChromaVectorStore:
             reason="membership",
             owner=revocation_owner,
         )
+        for artifact_id, owner_generations in (recovery_operations or {}).items():
+            for owner, generation in owner_generations.items():
+                self._complete_revocations(
+                    {artifact_id: generation},
+                    reason="membership",
+                    owner=owner,
+                )
         return len(ids)
 
     def _iter_metadata_records(
