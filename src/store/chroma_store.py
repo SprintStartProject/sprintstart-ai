@@ -84,7 +84,7 @@ class ChromaVectorStore:
         self._revision_store = revision_store
         self._local_revision = 0
         self._local_revocation_revision = 0
-        self._local_revocations: set[tuple[str, RevocationReason]] = set()
+        self._local_revocations: dict[tuple[str, RevocationReason, str], int] = {}
         self._cached_revocation_revision = -1
         self._cached_revocations: frozenset[str] = frozenset()
         self._revision_lock = threading.Lock()
@@ -118,7 +118,8 @@ class ChromaVectorStore:
             with self._revision_lock:
                 revision = self._local_revocation_revision
                 revoked = frozenset(
-                    artifact_id for artifact_id, _reason in self._local_revocations
+                    artifact_id
+                    for artifact_id, _reason, _owner in self._local_revocations
                 )
 
         with self._revision_lock:
@@ -126,53 +127,98 @@ class ChromaVectorStore:
             self._cached_revocations = revoked
         return revision, revoked
 
-    def _revoke_artifacts(
+    def _begin_revocations(
         self,
         artifact_ids: frozenset[str],
         reason: RevocationReason,
-    ) -> None:
+        owner: str,
+    ) -> dict[str, int]:
         if not artifact_ids:
+            return {}
+
+        if self._revision_store is not None:
+            return self._revision_store.begin_revocation_operations(
+                sorted(artifact_ids),
+                reason=reason,
+                owner=owner,
+            )
+
+        with self._revision_lock:
+            visible_change = False
+            generations: dict[str, int] = {}
+            for artifact_id in artifact_ids:
+                key = (artifact_id, reason, owner)
+                visible_change = visible_change or key not in self._local_revocations
+                generation = self._local_revocations.get(key, 0) + 1
+                self._local_revocations[key] = generation
+                generations[artifact_id] = generation
+            if visible_change:
+                self._local_revocation_revision += 1
+                self._local_revision += 1
+            return generations
+
+    def _complete_revocations(
+        self,
+        generations: Mapping[str, int],
+        reason: RevocationReason,
+        owner: str,
+    ) -> None:
+        if not generations:
             return
 
         if self._revision_store is not None:
-            self._revision_store.revoke_artifacts(
-                sorted(artifact_ids),
+            self._revision_store.complete_revocation_operations(
+                generations,
                 reason=reason,
+                owner=owner,
             )
             return
 
         with self._revision_lock:
-            before = len(self._local_revocations)
-            self._local_revocations.update(
-                (artifact_id, reason) for artifact_id in artifact_ids
-            )
-            if len(self._local_revocations) != before:
+            changed = False
+            for artifact_id, generation in generations.items():
+                key = (artifact_id, reason, owner)
+                if self._local_revocations.get(key) == generation:
+                    del self._local_revocations[key]
+                    changed = True
+            if changed:
                 self._local_revocation_revision += 1
                 self._local_revision += 1
 
-    def _clear_artifact_revocations(
+    def _revocation_artifacts(
         self,
-        artifact_ids: frozenset[str],
         reason: RevocationReason,
-    ) -> None:
-        if not artifact_ids:
-            return
-
+        owner: str,
+    ) -> frozenset[str]:
         if self._revision_store is not None:
-            self._revision_store.clear_artifact_revocations(
-                sorted(artifact_ids),
-                reason=reason,
-            )
-            return
+            return self._revision_store.revocation_artifacts(reason, owner)
 
         with self._revision_lock:
-            before = len(self._local_revocations)
-            self._local_revocations.difference_update(
-                (artifact_id, reason) for artifact_id in artifact_ids
+            return frozenset(
+                artifact_id
+                for artifact_id, stored_reason, stored_owner in self._local_revocations
+                if stored_reason == reason and stored_owner == owner
             )
-            if len(self._local_revocations) != before:
-                self._local_revocation_revision += 1
-                self._local_revision += 1
+
+    def _revocation_operations_for_artifact(
+        self,
+        artifact_id: str,
+        reason: RevocationReason,
+    ) -> dict[str, int]:
+        if self._revision_store is not None:
+            return self._revision_store.revocation_operations_for_artifact(
+                artifact_id,
+                reason,
+            )
+
+        with self._revision_lock:
+            return {
+                owner: generation
+                for (stored_id, stored_reason, owner), generation in (
+                    self._local_revocations.items()
+                )
+                if stored_id == artifact_id and stored_reason == reason
+            }
 
     @staticmethod
     def _visible_chunks(
@@ -390,9 +436,17 @@ class ChromaVectorStore:
 
     def delete(self, artifact_id: str, exclude_ids: list[str] | None = None) -> int:
         tombstone = frozenset({artifact_id})
+        membership_recoveries = self._revocation_operations_for_artifact(
+            artifact_id,
+            reason="membership",
+        )
         # Commit the revocation before the first Chroma read. If that read, the
         # delete, or the process itself fails, retrieval remains fail-closed.
-        self._revoke_artifacts(tombstone, reason="delete")
+        delete_operation = self._begin_revocations(
+            tombstone,
+            reason="delete",
+            owner="delete",
+        )
 
         # Any exception before cleanup leaves the durable tombstone live for
         # the retry.
@@ -416,7 +470,20 @@ class ChromaVectorStore:
 
         # Deleting zero chunks also confirms that nothing remains to expose.
         # If cleanup fails, report failure and retain the safe over-redaction.
-        self._clear_artifact_revocations(tombstone, reason="delete")
+        # A confirmed replacement/deletion also repairs membership rewrites
+        # that failed before it began. Each owner/generation is completed
+        # conditionally, so a newer concurrent operation stays protected.
+        for owner, generation in membership_recoveries.items():
+            self._complete_revocations(
+                {artifact_id: generation},
+                reason="membership",
+                owner=owner,
+            )
+        self._complete_revocations(
+            delete_operation,
+            reason="delete",
+            owner="delete",
+        )
         return len(ids)
 
     def list_chunks(self, limit: int, offset: int = 0) -> list[Chunk]:
@@ -581,21 +648,40 @@ class ChromaVectorStore:
         return self._rewrite_membership(
             {"artifact_id": artifact_id},
             lambda _chunk: normalized,
+            recovery_artifact_ids=frozenset({artifact_id}),
+            revocation_owner=f"artifact:{artifact_id}",
         )
 
     def remove_project(self, project_id: str) -> int:
         # Selected by the boolean marker rather than the delimited string,
         # because the marker is what retrieval filters on -- a chunk that still
         # carries it is still reachable, whatever the string says.
+        revocation_owner = f"project:{project_id}"
+        recovery_artifact_ids = self._revocation_artifacts(
+            reason="membership",
+            owner=revocation_owner,
+        )
+        if self._revision_store is not None:
+            recovery_artifact_ids |= frozenset(
+                artifact.id
+                for artifact in self._revision_store.list_artifacts(
+                    status=None,
+                    project_id=project_id,
+                )
+            )
         return self._rewrite_membership(
             {project_metadata_key(project_id): {"$eq": True}},
             lambda project_ids: tuple(pid for pid in project_ids if pid != project_id),
+            recovery_artifact_ids=recovery_artifact_ids,
+            revocation_owner=revocation_owner,
         )
 
     def _rewrite_membership(
         self,
         where: dict[str, Any],
         membership: Callable[[tuple[str, ...]], tuple[str, ...]],
+        recovery_artifact_ids: frozenset[str] = frozenset(),
+        revocation_owner: str = "membership",
     ) -> int:
         """Rewrite membership while keeping removals fail-closed on failure.
 
@@ -605,7 +691,7 @@ class ChromaVectorStore:
         """
         records = list(self._iter_metadata_records(where=cast(Any, where)))
         ids = [chunk_id for chunk_id, _ in records]
-        tombstones = frozenset(
+        tombstones = recovery_artifact_ids | frozenset(
             str(metadata["artifact_id"])
             for _, metadata in records
             if set(decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)))
@@ -613,7 +699,11 @@ class ChromaVectorStore:
                 membership(decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)))
             )
         )
-        self._revoke_artifacts(tombstones, reason="membership")
+        operations = self._begin_revocations(
+            tombstones,
+            reason="membership",
+            owner=revocation_owner,
+        )
 
         # Any failure leaves every affected artifact tombstoned until a retry
         # repairs all of its chunks.
@@ -632,7 +722,11 @@ class ChromaVectorStore:
                 ]
             )
 
-        self._clear_artifact_revocations(tombstones, reason="membership")
+        self._complete_revocations(
+            operations,
+            reason="membership",
+            owner=revocation_owner,
+        )
         return len(ids)
 
     def _iter_metadata_records(
