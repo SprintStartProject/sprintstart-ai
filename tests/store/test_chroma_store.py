@@ -1797,3 +1797,123 @@ def test_membership_rewrite_cannot_clear_a_failed_delete_tombstone(
         assert metadata.revocation_snapshot()[1] == frozenset()
     finally:
         metadata.close()
+
+
+def _revocation_chunk(
+    chunk_id: str,
+    artifact_id: str,
+    project_ids: tuple[str, ...],
+) -> Chunk:
+    return Chunk(
+        id=chunk_id,
+        artifact_id=artifact_id,
+        filename=f"{artifact_id}.md",
+        text="runbook",
+        embedding=[1.0, 0.0],
+        project_ids=project_ids,
+    )
+
+
+def test_remove_project_retry_clears_tombstones_for_already_rewritten_pages(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_remove_project_tombstone_retry",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            _revocation_chunk("c1", "art-1", ("a", "b")),
+            _revocation_chunk("c2", "art-2", ("a", "b")),
+        ]
+    )
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 1)
+    original_add = store.add
+    calls = 0
+
+    def flaky_add(chunks: list[Chunk]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("rewrite failed")
+        original_add(chunks)
+
+    monkeypatch.setattr(store, "add", flaky_add)
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.remove_project("a")
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.remove_project("a")
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"b"})
+        assert store.project_ids_for_artifact("art-2") == frozenset({"b"})
+    finally:
+        metadata.close()
+
+
+def test_authoritative_membership_retry_clears_an_older_tombstone(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_membership_readd_tombstone_retry",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add([_revocation_chunk("c1", "art-1", ("a", "b"))])
+    original_add = store.add
+
+    monkeypatch.setattr(
+        store,
+        "add",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.set_project_ids_for_artifact("art-1", ("b",))
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.set_project_ids_for_artifact("art-1", ("a", "b"))
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"a", "b"})
+    finally:
+        metadata.close()
+
+
+def test_reingest_clears_membership_tombstones_that_predate_replacement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_reingest_membership_tombstone_cleanup",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add([_revocation_chunk("c1", "art-1", ("a", "b"))])
+    original_add = store.add
+
+    monkeypatch.setattr(
+        store,
+        "add",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.set_project_ids_for_artifact("art-1", ("b",))
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.add([_revocation_chunk("c9", "art-1", ("b",))])
+        store.delete("art-1", exclude_ids=["c9"])
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"b"})
+    finally:
+        metadata.close()
