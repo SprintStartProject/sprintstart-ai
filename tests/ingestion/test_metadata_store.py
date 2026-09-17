@@ -377,3 +377,58 @@ def test_newer_revocation_operation_cannot_be_cleared_by_older_owner_token(
         assert store.revocation_snapshot()[1] == frozenset()
     finally:
         store.close()
+
+
+def test_only_failed_revocation_operations_are_recoverable(tmp_path: Path) -> None:
+    store = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+
+    try:
+        operation = store.begin_revocation_operations(
+            ["artifact-1"],
+            reason="membership",
+            owner="project:a",
+        )
+
+        assert (
+            store.revocation_operations_for_artifact(
+                "artifact-1",
+                reason="membership",
+            )
+            == {}
+        )
+        assert (
+            store.fail_revocation_operations(
+                operation,
+                reason="membership",
+                owner="project:a",
+            )
+            is True
+        )
+        assert store.revocation_operations_for_artifact(
+            "artifact-1",
+            reason="membership",
+        ) == {"project:a": 1}
+
+        retry = store.begin_revocation_operations(
+            ["artifact-1"],
+            reason="membership",
+            owner="project:a",
+        )
+        assert retry == {"artifact-1": 2}
+        assert (
+            store.revocation_operations_for_artifact(
+                "artifact-1",
+                reason="membership",
+            )
+            == {}
+        )
+        assert (
+            store.fail_revocation_operations(
+                operation,
+                reason="membership",
+                owner="project:a",
+            )
+            is False
+        )
+    finally:
+        store.close()

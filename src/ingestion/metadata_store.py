@@ -131,6 +131,8 @@ class IngestionMetadataStore:
                         CHECK (reason IN ('delete', 'membership')),
                     owner TEXT NOT NULL DEFAULT '',
                     generation INTEGER NOT NULL DEFAULT 1,
+                    state TEXT NOT NULL DEFAULT 'active'
+                        CHECK (state IN ('active', 'failed')),
                     revoked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (artifact_id, reason, owner)
                 )
@@ -298,8 +300,8 @@ class IngestionMetadataStore:
                 for artifact_id in normalized:
                     inserted = self._connection.execute(
                         "INSERT OR IGNORE INTO artifact_revocations "
-                        "(artifact_id, reason, owner, generation) "
-                        "VALUES (?, ?, ?, 1)",
+                        "(artifact_id, reason, owner, generation, state) "
+                        "VALUES (?, ?, ?, 1, 'active')",
                         (artifact_id, reason, owner),
                     )
                     if inserted.rowcount > 0:
@@ -308,7 +310,7 @@ class IngestionMetadataStore:
                     else:
                         self._connection.execute(
                             "UPDATE artifact_revocations "
-                            "SET generation = generation + 1 "
+                            "SET generation = generation + 1, state = 'active' "
                             "WHERE artifact_id = ? AND reason = ? AND owner = ?",
                             (artifact_id, reason, owner),
                         )
@@ -337,6 +339,46 @@ class IngestionMetadataStore:
                 raise
 
         return generations
+
+    def fail_revocation_operations(
+        self,
+        generations: Mapping[str, int],
+        reason: RevocationReason,
+        owner: str,
+    ) -> bool:
+        """Mark matching live operations as failed and safe for recovery.
+
+        The generation predicate prevents an older failure from changing the
+        state of a newer retry. Visibility is unchanged, so corpus and
+        revocation revisions do not need to advance.
+        """
+        normalized = {
+            artifact_id: generation
+            for artifact_id, generation in generations.items()
+            if artifact_id
+        }
+        if not normalized:
+            return False
+
+        with self._lock:
+            try:
+                before = self._connection.total_changes
+                self._connection.executemany(
+                    "UPDATE artifact_revocations SET state = 'failed' "
+                    "WHERE artifact_id = ? AND reason = ? AND owner = ? "
+                    "AND generation = ? AND state = 'active'",
+                    (
+                        (artifact_id, reason, owner, generation)
+                        for artifact_id, generation in normalized.items()
+                    ),
+                )
+                changed = self._connection.total_changes > before
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+
+        return changed
 
     def complete_revocation_operations(
         self,
@@ -401,11 +443,11 @@ class IngestionMetadataStore:
         artifact_id: str,
         reason: RevocationReason,
     ) -> dict[str, int]:
-        """Snapshot live operation owners so a later cleanup is conditional."""
+        """Snapshot failed operation owners for conditional recovery."""
         with self._lock:
             rows = self._connection.execute(
                 "SELECT owner, generation FROM artifact_revocations "
-                "WHERE artifact_id = ? AND reason = ?",
+                "WHERE artifact_id = ? AND reason = ? AND state = 'failed'",
                 (artifact_id, reason),
             ).fetchall()
         return {str(row["owner"]): int(row["generation"]) for row in rows}

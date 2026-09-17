@@ -85,6 +85,7 @@ class ChromaVectorStore:
         self._local_revision = 0
         self._local_revocation_revision = 0
         self._local_revocations: dict[tuple[str, RevocationReason, str], int] = {}
+        self._local_failed_revocations: set[tuple[str, RevocationReason, str]] = set()
         self._cached_revocation_revision = -1
         self._cached_revocations: frozenset[str] = frozenset()
         self._revision_lock = threading.Lock()
@@ -151,11 +152,35 @@ class ChromaVectorStore:
                 visible_change = visible_change or key not in self._local_revocations
                 generation = self._local_revocations.get(key, 0) + 1
                 self._local_revocations[key] = generation
+                self._local_failed_revocations.discard(key)
                 generations[artifact_id] = generation
             if visible_change:
                 self._local_revocation_revision += 1
                 self._local_revision += 1
             return generations
+
+    def _fail_revocations(
+        self,
+        generations: Mapping[str, int],
+        reason: RevocationReason,
+        owner: str,
+    ) -> None:
+        if not generations:
+            return
+
+        if self._revision_store is not None:
+            self._revision_store.fail_revocation_operations(
+                generations,
+                reason=reason,
+                owner=owner,
+            )
+            return
+
+        with self._revision_lock:
+            for artifact_id, generation in generations.items():
+                key = (artifact_id, reason, owner)
+                if self._local_revocations.get(key) == generation:
+                    self._local_failed_revocations.add(key)
 
     def _complete_revocations(
         self,
@@ -180,6 +205,7 @@ class ChromaVectorStore:
                 key = (artifact_id, reason, owner)
                 if self._local_revocations.get(key) == generation:
                     del self._local_revocations[key]
+                    self._local_failed_revocations.discard(key)
                     changed = True
             if changed:
                 self._local_revocation_revision += 1
@@ -217,7 +243,9 @@ class ChromaVectorStore:
                 for (stored_id, stored_reason, owner), generation in (
                     self._local_revocations.items()
                 )
-                if stored_id == artifact_id and stored_reason == reason
+                if stored_id == artifact_id
+                and stored_reason == reason
+                and (stored_id, stored_reason, owner) in self._local_failed_revocations
             }
 
     @staticmethod
@@ -471,8 +499,10 @@ class ChromaVectorStore:
         # Deleting zero chunks also confirms that nothing remains to expose.
         # If cleanup fails, report failure and retain the safe over-redaction.
         # A confirmed replacement/deletion also repairs membership rewrites
-        # that failed before it began. Each owner/generation is completed
-        # conditionally, so a newer concurrent operation stays protected.
+        # that have explicitly failed. Active rewrites are excluded from the
+        # recovery snapshot so a concurrent ingest cannot expose an artifact
+        # whose membership rewrite later fails. Each owner/generation is
+        # completed conditionally, so a newer retry stays protected.
         for owner, generation in membership_recoveries.items():
             self._complete_revocations(
                 {artifact_id: generation},
@@ -645,17 +675,24 @@ class ChromaVectorStore:
         project_ids: tuple[str, ...],
     ) -> int:
         normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        revocation_owner = f"artifact:{artifact_id}"
         recovery_operations = self._revocation_operations_for_artifact(
             artifact_id,
             reason="membership",
+        )
+        own_recovery = artifact_id in self._revocation_artifacts(
+            reason="membership",
+            owner=revocation_owner,
         )
         return self._rewrite_membership(
             {"artifact_id": artifact_id},
             lambda _chunk: normalized,
             recovery_artifact_ids=(
-                frozenset({artifact_id}) if recovery_operations else frozenset()
+                frozenset({artifact_id})
+                if recovery_operations or own_recovery
+                else frozenset()
             ),
-            revocation_owner=f"artifact:{artifact_id}",
+            revocation_owner=revocation_owner,
             recovery_operations={artifact_id: recovery_operations},
         )
 
@@ -713,35 +750,43 @@ class ChromaVectorStore:
             owner=revocation_owner,
         )
 
-        # Any failure leaves every affected artifact tombstoned until a retry
-        # repairs all of its chunks.
-        for start in range(0, len(ids), _MAX_GET_PAGE):
-            raw_result = self._collection.get(
-                ids=ids[start : start + _MAX_GET_PAGE],
-                include=["documents", "metadatas", "embeddings"],
-            )
-            self.add(
-                [
-                    replace(
-                        chunk,
-                        project_ids=membership(chunk.project_ids),
-                    )
-                    for chunk in _chunks_from_get_result(raw_result)
-                ]
-            )
-
-        self._complete_revocations(
-            operations,
-            reason="membership",
-            owner=revocation_owner,
-        )
-        for artifact_id, owner_generations in (recovery_operations or {}).items():
-            for owner, generation in owner_generations.items():
-                self._complete_revocations(
-                    {artifact_id: generation},
-                    reason="membership",
-                    owner=owner,
+        try:
+            # Any failure leaves every affected artifact tombstoned until a
+            # retry repairs all of its chunks.
+            for start in range(0, len(ids), _MAX_GET_PAGE):
+                raw_result = self._collection.get(
+                    ids=ids[start : start + _MAX_GET_PAGE],
+                    include=["documents", "metadatas", "embeddings"],
                 )
+                self.add(
+                    [
+                        replace(
+                            chunk,
+                            project_ids=membership(chunk.project_ids),
+                        )
+                        for chunk in _chunks_from_get_result(raw_result)
+                    ]
+                )
+
+            self._complete_revocations(
+                operations,
+                reason="membership",
+                owner=revocation_owner,
+            )
+            for artifact_id, owner_generations in (recovery_operations or {}).items():
+                for owner, generation in owner_generations.items():
+                    self._complete_revocations(
+                        {artifact_id: generation},
+                        reason="membership",
+                        owner=owner,
+                    )
+        except Exception:
+            self._fail_revocations(
+                operations,
+                reason="membership",
+                owner=revocation_owner,
+            )
+            raise
         return len(ids)
 
     def _iter_metadata_records(

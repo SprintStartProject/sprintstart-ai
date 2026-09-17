@@ -1799,6 +1799,83 @@ def test_membership_rewrite_cannot_clear_a_failed_delete_tombstone(
         metadata.close()
 
 
+def test_reingest_cannot_clear_an_active_membership_rewrite(tmp_path: Path) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_active_membership_revocation",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="art-1",
+                filename="art-1.md",
+                text="runbook",
+                embedding=[1.0, 0.0],
+                project_ids=("a", "b"),
+            )
+        ]
+    )
+    operation = metadata.begin_revocation_operations(
+        ["art-1"],
+        reason="membership",
+        owner="project:a",
+    )
+
+    try:
+        assert store.delete("art-1", exclude_ids=["c1"]) == 0
+        assert metadata.revocation_snapshot()[1] == frozenset({"art-1"})
+
+        assert (
+            metadata.fail_revocation_operations(
+                operation,
+                reason="membership",
+                owner="project:a",
+            )
+            is True
+        )
+        assert store.delete("art-1", exclude_ids=["c1"]) == 0
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()
+
+
+def test_authoritative_retry_supersedes_its_own_active_tombstone(
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_active_authoritative_retry",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="art-1",
+                filename="art-1.md",
+                text="runbook",
+                embedding=[1.0, 0.0],
+                project_ids=("b",),
+            )
+        ]
+    )
+    metadata.begin_revocation_operations(
+        ["art-1"],
+        reason="membership",
+        owner="artifact:art-1",
+    )
+
+    try:
+        assert store.set_project_ids_for_artifact("art-1", ("b",)) == 1
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()
+
+
 def _revocation_chunk(
     chunk_id: str,
     artifact_id: str,
