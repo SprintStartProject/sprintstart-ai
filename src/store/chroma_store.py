@@ -652,7 +652,9 @@ class ChromaVectorStore:
         return self._rewrite_membership(
             {"artifact_id": artifact_id},
             lambda _chunk: normalized,
-            recovery_artifact_ids=frozenset({artifact_id}),
+            recovery_artifact_ids=(
+                frozenset({artifact_id}) if recovery_operations else frozenset()
+            ),
             revocation_owner=f"artifact:{artifact_id}",
             recovery_operations={artifact_id: recovery_operations},
         )
