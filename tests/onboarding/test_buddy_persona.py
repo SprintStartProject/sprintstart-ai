@@ -161,3 +161,141 @@ def test_the_grounding_rule_survives_every_toolset() -> None:
         # test/fixture caveat are safety rules, not capabilities.
         assert "Ground every claim" in persona
         assert "test, fixture, or sample-data files" in persona
+
+
+# --- Modes -----------------------------------------------------------------
+#
+# Two flags pick which persona is assembled. The through-line above still holds
+# inside each one: what is not mounted is never mentioned. What these add is that a
+# mode is not a softening of the default -- capabilities off must not sound able to
+# act, and team mode must not sound like it is talking to the person it describes.
+
+_TEAM_TOOLS = (
+    "search_docs",
+    "get_team_attention",
+    "find_member",
+    "get_member_progress",
+    "open_area",
+)
+
+
+def test_capabilities_off_says_it_is_answering_from_the_material() -> None:
+    persona = build_persona(["search_docs"], capabilities_enabled=False)
+
+    assert "`search_docs` and nothing else" in persona
+    assert "do not offer to record, claim, flag or change anything" in persona
+
+
+def test_capabilities_off_keeps_grounding_and_the_fixture_caveat() -> None:
+    """Safety rules are not capabilities, so no mode drops them."""
+    persona = build_persona(["search_docs"], capabilities_enabled=False)
+
+    assert "Ground every claim" in persona
+    assert "test, fixture, or sample-data files" in persona
+
+
+def test_capabilities_off_never_offers_an_escalation_or_a_claim() -> None:
+    # Nothing is mounted with capabilities off, so an offer here is one the hire
+    # cannot take up -- the refusal that follows reads as a fault in the product.
+    persona = build_persona(_ALL_TOOLS, capabilities_enabled=False)
+
+    assert "flag_to_pm" not in persona
+    assert "claim_goal" not in persona
+    assert "get_arrival_steps" not in persona
+
+
+def test_team_mode_addresses_the_manager_not_a_hire() -> None:
+    persona = build_persona(_TEAM_TOOLS, team_mode=True)
+
+    assert "manager of one project" in persona
+    assert "Never greet them as a new hire" in persona
+    assert "the mentor who guides a new hire" not in persona
+
+
+def test_team_mode_drops_every_hire_directed_clause() -> None:
+    """Dropped by mode, not only by mounting: a manager must never be asked to
+    settle where *they* are starting from."""
+    persona = build_persona([*_TEAM_TOOLS, *_ALL_TOOLS], team_mode=True)
+
+    assert "get_arrival_steps" not in persona
+    assert "claim_goal" not in persona
+    assert "get_competencies_to_assess" not in persona
+    assert "record_assessment" not in persona
+    assert "hire-state tools" not in persona
+
+
+def test_team_mode_states_situations_as_facts_about_the_situation() -> None:
+    persona = build_persona(_TEAM_TOOLS, team_mode=True)
+
+    assert "never as a judgment of the person" in persona
+    assert "the reviewer's move" in persona
+    assert "never call anybody slow or behind" in persona
+
+
+def test_team_mode_never_claims_to_have_made_a_change() -> None:
+    persona = build_persona(_TEAM_TOOLS, team_mode=True)
+
+    assert "You never make a change yourself" in persona
+    assert "confirms it outside this conversation" in persona
+
+
+def test_the_proposal_rule_holds_before_any_action_is_mounted() -> None:
+    """Actions arrive only once an area is opened, and the rule that stops the model
+    announcing a change must be there on the hop before that."""
+    persona = build_persona(["search_docs", "get_team_attention"], team_mode=True)
+
+    assert "You never make a change yourself" in persona
+
+
+def test_team_mode_explains_areas_only_when_open_area_is_mounted() -> None:
+    with_areas = build_persona(_TEAM_TOOLS, team_mode=True)
+    without = build_persona(
+        [t for t in _TEAM_TOOLS if t != "open_area"], team_mode=True
+    )
+
+    assert "`open_area`" in with_areas
+    assert "available on your *next* step" in with_areas
+    assert "open_area" not in without
+
+
+def test_team_mode_lists_only_the_team_tools_that_are_mounted() -> None:
+    persona = build_persona(
+        ["search_docs", "get_team_attention"],
+        team_mode=True,
+    )
+
+    assert "`get_team_attention`" in persona
+    assert "`find_member`" not in persona
+    assert "`get_member_progress`" not in persona
+
+
+def test_team_mode_without_team_tools_describes_none_of_them() -> None:
+    persona = build_persona(["search_docs"], team_mode=True)
+
+    assert "the team tools" not in persona
+    # The identity and the safety rules are all that is left, and they are enough.
+    assert "manager of one project" in persona
+    assert "Ground every claim" in persona
+
+
+def test_team_mode_offers_no_escalation_to_a_pm() -> None:
+    """`flag_to_pm` raises a question *to* a manager; the reader here is one."""
+    persona = build_persona([*_TEAM_TOOLS, "flag_to_pm"], team_mode=True)
+
+    assert "flag_to_pm" not in persona
+
+
+def test_team_mode_with_capabilities_off_is_search_only_and_still_a_manager() -> None:
+    persona = build_persona(_TEAM_TOOLS, team_mode=True, capabilities_enabled=False)
+
+    assert "manager of one project" in persona
+    assert "`search_docs` and nothing else" in persona
+    assert "never as a judgment of the person" in persona
+    assert "get_team_attention" not in persona
+
+
+def test_the_defaults_are_todays_behaviour() -> None:
+    assert build_persona(_ALL_TOOLS) == build_persona(
+        _ALL_TOOLS, capabilities_enabled=True, team_mode=False
+    )
+    assert build_persona(_ALL_TOOLS, DEFAULT_VOCABULARY) == build_persona(_ALL_TOOLS)
