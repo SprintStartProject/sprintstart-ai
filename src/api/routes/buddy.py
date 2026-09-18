@@ -200,6 +200,9 @@ def buddy_open_stream(
     Emits ``token`` events carrying the greeting as it arrives and one terminal
     ``done`` carrying the whole greeting and any suggested action. Degrades to a plain
     welcome rather than erroring: opening the buddy must never fail the page.
+
+    With ``team_mode`` the reader is a project's manager and ``state`` is their team's
+    attention list, so both the prompt and that plain welcome address a manager.
     """
 
     def event_stream() -> Iterator[str]:
@@ -209,6 +212,7 @@ def buddy_open_stream(
                 recent=[_to_message(m) for m in body.recent],
                 state=body.state,
                 llm=llm,
+                team_mode=body.team_mode,
             ):
                 yield sse_event(event)
         except LLMUnavailableError as exc:

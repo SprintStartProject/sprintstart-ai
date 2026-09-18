@@ -180,3 +180,60 @@ def test_omitting_both_modes_is_the_hire_mentor(client: TestClient) -> None:
     persona = response.json()["messages"][0]["content"]
     assert "the mentor who guides a new hire" in persona
     assert "manager of one project" not in persona
+
+
+def test_open_stream_takes_team_mode_and_greets_a_manager() -> None:
+    """The stub echoes one fixed answer, so what the flag changes here is the prompt
+    it was asked with -- which is the part the route is responsible for threading."""
+    recorded: list[str] = []
+
+    class _RecordingLLM(StubLLMClient):
+        def stream(self, messages: list[Any]) -> Any:
+            recorded.append(str(messages[0]["content"]))
+            return super().stream(messages)
+
+    app.dependency_overrides[get_llm] = lambda: _RecordingLLM(
+        generate_response="Two people are waiting on a review."
+    )
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/onboarding/buddy/open/stream",
+            json={
+                "memory": None,
+                "recent": [],
+                "state": "Who needs attention: ...",
+                "team_mode": True,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "Two people are waiting on a review." in response.text
+    assert "project's manager" in recorded[0]
+
+
+def test_open_stream_without_team_mode_is_the_hire_greeting() -> None:
+    recorded: list[str] = []
+
+    class _RecordingLLM(StubLLMClient):
+        def stream(self, messages: list[Any]) -> Any:
+            recorded.append(str(messages[0]["content"]))
+            return super().stream(messages)
+
+    app.dependency_overrides[get_llm] = lambda: _RecordingLLM(
+        generate_response="Welcome back, Sam!"
+    )
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/onboarding/buddy/open/stream",
+            json={"memory": None, "recent": [], "state": "1 open PR"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "greeting a new hire" in recorded[0]
+    assert "project's manager" not in recorded[0]
