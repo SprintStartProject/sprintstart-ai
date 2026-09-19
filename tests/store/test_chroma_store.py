@@ -534,6 +534,38 @@ def test_chroma_scopes_pdf_positions_to_one_page() -> None:
     assert [chunk.id for chunk in chunks] == ["page-2-0", "page-2-2"]
 
 
+def test_chroma_position_read_fails_closed_if_revoked_during_read(
+    monkeypatch,
+) -> None:
+    store = ChromaVectorStore(client=chromadb.EphemeralClient())
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-a",
+                filename="secret.md",
+                text="sensitive context",
+                embedding=[1.0, 0.0],
+                position=1,
+            )
+        ]
+    )
+    original_get = store._collection.get
+
+    def revoke_after_read(*args: object, **kwargs: object) -> object:
+        result = original_get(*args, **kwargs)
+        store._begin_revocations(
+            frozenset({"artifact-a"}),
+            reason="delete",
+            owner="test",
+        )
+        return result
+
+    monkeypatch.setattr(store._collection, "get", revoke_after_read)
+
+    assert store.list_chunks_by_positions("artifact-a", frozenset({1})) == []
+
+
 def test_chroma_all_ids_returns_every_chunk_id() -> None:
     client = chromadb.EphemeralClient()
     store = ChromaVectorStore(collection_name="test_all_ids", client=client)
@@ -1687,6 +1719,13 @@ def test_failed_delete_leaves_a_durable_cross_instance_tombstone(
             reader.list_chunks_by_artifact(
                 "revoked-artifact",
                 limit=10,
+            )
+            == []
+        )
+        assert (
+            reader.list_chunks_by_positions(
+                "revoked-artifact",
+                frozenset({0}),
             )
             == []
         )

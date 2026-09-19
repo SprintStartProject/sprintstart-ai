@@ -555,6 +555,10 @@ class ChromaVectorStore:
         if not positions:
             return []
 
+        _, revoked = self._revocation_snapshot()
+        if artifact_id in revoked:
+            return []
+
         conditions: list[Where] = [
             {"artifact_id": {"$eq": artifact_id}},
             {"position": {"$in": sorted(positions)}},
@@ -569,6 +573,13 @@ class ChromaVectorStore:
             limit=_MAX_GET_PAGE,
             include=["documents", "metadatas"],
         )
+
+        # A deletion can become visible while Chroma is serving the read. Check
+        # again before publishing any content so revocation remains fail-closed.
+        _, current_revoked = self._revocation_snapshot()
+        if artifact_id in current_revoked:
+            return []
+
         return sorted(
             _chunks_without_embeddings_from_get_result(raw_result),
             key=lambda chunk: (
