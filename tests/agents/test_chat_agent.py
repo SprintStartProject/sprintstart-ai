@@ -2,6 +2,7 @@ import threading
 
 from pydantic import BaseModel
 
+import agents.chat_agent as chat_agent_module
 from agents.chat_agent import (
     ChatAgent,
     ChatEvent,
@@ -12,7 +13,7 @@ from agents.chat_agent import (
 )
 from agents.tools.base import Invocation, Tool, ToolRegistry, ToolResult
 from llm.base import ChatResult, Message, ReasoningDelta, TextDelta, ToolCall
-from rag.types import Chunk
+from rag.types import Chunk, ScoredChunk
 from tests.stubs.llm import ScriptedLLMClient, Turn
 from tests.stubs.store import StubVectorStore
 
@@ -138,6 +139,80 @@ def test_tool_result_carries_the_source_text_to_the_model() -> None:
     assert len(tool_messages) == 1
     assert _CHUNK_TEXT in tool_messages[0]
     assert "retro.md" in tool_messages[0]
+
+
+def test_neighbour_context_is_shown_but_only_the_match_is_cited() -> None:
+    llm = _llm([_RETRIEVE])
+    unrelated = [0.0, 1.0] + [0.0] * 766
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id=f"c{position}",
+                artifact_id="d1",
+                filename="auth.py",
+                text="matching blocker" if position == 1 else f"context {position}",
+                embedding=_EMBEDDING if position == 1 else unrelated,
+                position=position,
+            )
+            for position in range(3)
+        ]
+    )
+
+    events = _run(_agent(llm, store))
+
+    tool_message = _tool_messages(llm.stream_calls[0])[0]
+    assert tool_message.index("context 0") < tool_message.index("matching blocker")
+    assert tool_message.index("matching blocker") < tool_message.index("context 2")
+    assert _cited(events) == ["c1"]
+
+
+def test_dropped_context_is_not_reported_as_an_omitted_match() -> None:
+    chunks = [
+        ScoredChunk(
+            id=f"c{position}",
+            artifact_id="d1",
+            filename="auth.py",
+            text=f"chunk {position}",
+            score=1.0,
+            position=position,
+        )
+        for position in range(3)
+    ]
+    result = ToolResult(
+        summary="retrieve('blocker'): 1 chunk(s).",
+        chunks=chunks,
+        match_chunk_ids=frozenset({"c1"}),
+    )
+
+    message = chat_agent_module._format_evidence(result, chunks[:2])
+
+    assert "omitted" not in message
+
+
+def test_pdf_evidence_is_shown_in_page_then_position_order() -> None:
+    chunks = [
+        ScoredChunk(
+            id=f"page-{page}-{position}",
+            artifact_id="pdf-1",
+            filename="guide.pdf",
+            text=f"page {page}, chunk {position}",
+            score=1.0,
+            kind="pdf",
+            position=position,
+            start_page=page,
+        )
+        for page, position in ((2, 1), (1, 1), (2, 0), (1, 0))
+    ]
+
+    ordered = chat_agent_module._order_evidence_for_display(chunks)
+
+    assert [chunk.id for chunk in ordered] == [
+        "page-1-0",
+        "page-1-1",
+        "page-2-0",
+        "page-2-1",
+    ]
 
 
 def test_answer_is_streamed_from_the_same_conversation_as_the_search() -> None:

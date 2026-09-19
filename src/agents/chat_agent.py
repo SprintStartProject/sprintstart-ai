@@ -162,13 +162,44 @@ def _format_evidence(result: ToolResult, chunks: list[ScoredChunk]) -> str:
     """
     if not chunks:
         return result.summary or "No matches."
+    ordered_chunks = _order_evidence_for_display(chunks)
     body = "\n\n---\n\n".join(
-        f"{chunk_header(chunk)}\n{chunk.text[:_SOURCE_CHARS]}" for chunk in chunks
+        f"{chunk_header(chunk)}\n{chunk.text[:_SOURCE_CHARS]}"
+        for chunk in ordered_chunks
     )
-    omitted = len(result.chunks) - len(chunks)
+    omitted = result.match_count - len(result.matched_chunks(chunks))
     if omitted:
         body += f"\n\n---\n\n({omitted} further match(es) omitted.)"
     return body
+
+
+def _order_evidence_for_display(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
+    """Keep artifact relevance order while restoring source order within each file.
+
+    Budget selection receives direct hits before neighbours so context cannot
+    displace a match. The model should nevertheless read each selected file in
+    its natural order; grouping after selection gives us both properties.
+    """
+    by_artifact: dict[str, list[ScoredChunk]] = {}
+    for chunk in chunks:
+        by_artifact.setdefault(chunk.artifact_id, []).append(chunk)
+
+    ordered: list[ScoredChunk] = []
+    for artifact_chunks in by_artifact.values():
+        if all(chunk.position is None for chunk in artifact_chunks):
+            ordered.extend(artifact_chunks)
+            continue
+        ordered.extend(
+            sorted(
+                artifact_chunks,
+                key=lambda chunk: (
+                    chunk.start_page if chunk.start_page is not None else 0,
+                    chunk.position is None,
+                    chunk.position if chunk.position is not None else 0,
+                ),
+            )
+        )
+    return ordered
 
 
 class ChatAgent:
@@ -277,8 +308,9 @@ class ChatAgent:
                 result.tool_calls, self._run_tools(result.tool_calls), strict=True
             ):
                 chunks = _limit_evidence(tool_result.chunks)
-                if chunks:
-                    yield Evidence(chunks)
+                matched_chunks = tool_result.matched_chunks(chunks)
+                if matched_chunks:
+                    yield Evidence(matched_chunks)
                 else:
                     all_found = False
 

@@ -29,6 +29,27 @@ class ToolResult:
 
     summary: str
     chunks: list[ScoredChunk] = field(default_factory=list[ScoredChunk])
+    match_chunk_ids: frozenset[str] | None = None
+
+    @property
+    def match_count(self) -> int:
+        """Return the number of direct matches, excluding context-only chunks."""
+        if self.match_chunk_ids is None:
+            return len(self.chunks)
+        return len(self.match_chunk_ids)
+
+    def matched_chunks(
+        self, chunks: list[ScoredChunk] | None = None
+    ) -> list[ScoredChunk]:
+        """Return direct matches from *chunks* while preserving their order.
+
+        Tools that do not distinguish direct matches from context retain the
+        legacy behavior where every returned chunk is considered a match.
+        """
+        candidates = self.chunks if chunks is None else chunks
+        if self.match_chunk_ids is None:
+            return candidates
+        return [chunk for chunk in candidates if chunk.id in self.match_chunk_ids]
 
     @classmethod
     def empty(cls, summary: str) -> "ToolResult":

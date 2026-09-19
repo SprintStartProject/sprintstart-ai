@@ -124,6 +124,26 @@ class StubVectorStore:
         matching = [chunk for chunk in self.chunks if chunk.artifact_id == artifact_id]
         return matching[offset : offset + limit]
 
+    def list_chunks_by_positions(
+        self,
+        artifact_id: str,
+        positions: frozenset[int],
+        start_page: int | None = None,
+    ) -> list[Chunk]:
+        return sorted(
+            (
+                replace(chunk, embedding=[])
+                for chunk in self.chunks
+                if chunk.artifact_id == artifact_id
+                and chunk.position in positions
+                and (start_page is None or chunk.start_page == start_page)
+            ),
+            key=lambda chunk: (
+                chunk.start_page if chunk.start_page is not None else 0,
+                chunk.position if chunk.position is not None else -1,
+            ),
+        )
+
     def count_by_artifact(self, artifact_id: str) -> int:
         if artifact_id in self._revoked_artifact_ids:
             return 0

@@ -50,6 +50,19 @@ class VectorStore(Protocol):
         offset: int = 0,
     ) -> list[Chunk]: ...
 
+    def list_chunks_by_positions(
+        self,
+        artifact_id: str,
+        positions: frozenset[int],
+        start_page: int | None = None,
+    ) -> list[Chunk]:
+        """Return embedding-free chunks at exact positions in one artifact.
+
+        PDF positions restart on every page, so callers must pass
+        ``start_page`` when resolving neighbours for a PDF chunk.
+        """
+        ...
+
     def count_by_artifact(self, artifact_id: str) -> int: ...
 
     def all_chunks_without_embeddings(self) -> list[Chunk]: ...
