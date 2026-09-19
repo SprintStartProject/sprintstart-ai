@@ -84,6 +84,10 @@ def buddy_agent(
     Executes ``search_docs`` locally (retrieval + citations) and returns as soon as it
     either has a final answer or needs a backend-only tool run. The backend carries the
     ``messages`` list back verbatim, each pending tool's result appended as a ``tool``.
+
+    ``capabilities_enabled`` and ``team_mode`` pick the persona. Both are read on every
+    hop rather than only the first: the persona is rebuilt each time, so a resume hop
+    that omitted one would finish the turn in the other mode.
     """
     messages = [_to_message(m) for m in body.messages]
     backend_tools = [_to_toolspec(t) for t in body.backend_tools]
@@ -101,6 +105,8 @@ def buddy_agent(
                 contribution_verb_past=body.vocabulary.contribution_verb_past,
             ),
             project_ids=frozenset(body.project_ids),
+            capabilities_enabled=body.capabilities_enabled,
+            team_mode=body.team_mode,
         )
     except LLMUnavailableError as exc:
         raise HTTPException(

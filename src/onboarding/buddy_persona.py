@@ -11,6 +11,18 @@ three nouns, **never prose** (see :mod:`onboarding.vocabulary`).
 
 Any fixed clause must be checked against that vocabulary too -- wording like
 "clone the repository" puts engineering work in front of a role that has none.
+
+Two flags from the backend choose *which* persona is assembled, and both arrive on
+every hop because the persona is rebuilt on every hop:
+
+- ``capabilities_enabled=False`` is the hire asking the corpus rather than the
+  mentor. No backend tool is mounted, so the tool-gated clauses fall away on their
+  own -- but an identity that still offers to act makes the resulting refusal read
+  as a bug, so this mode says plainly what it can and cannot do.
+- ``team_mode=True`` is a different reader altogether: the manager of one project,
+  asking about that project's team. The hire-directed clauses are dropped by mode
+  rather than only by mounting, because a manager must never be told what *they*
+  should work on next.
 """
 
 from collections.abc import Collection
@@ -81,6 +93,63 @@ _ASSESS_CLAUSE = (
     "later, so never call it a score, a result, or final.\n"
 )
 
+_SEARCH_ONLY_CLAUSE = (
+    "- This turn you have `search_docs` and nothing else: you are answering from "
+    "the project's own material, not acting on anybody's behalf. Answer what the "
+    "material covers, say plainly where it does not, and do not offer to record, "
+    "claim, flag or change anything -- nothing is mounted to do it with, so an "
+    "offer you make here cannot be kept.\n"
+)
+
+_TEAM_IDENTITY = (
+    "You are the onboarding buddy in team mode: you are talking to the manager of "
+    "one project about that project's team. The person reading you is responsible "
+    "for these people; they are not being onboarded themselves. Never greet them "
+    "as a new hire, never describe their own onboarding, and never suggest what "
+    "they should work on next.\n"
+    "How you work:\n"
+)
+
+_TEAM_READ_TOOLS = (
+    "get_team_attention",
+    "find_member",
+    "get_member_progress",
+)
+
+# The rule a manager's trust rests on, and the one a model breaks most readily: a
+# person is not their situation. Work nobody has reviewed says something about the
+# review queue, and a model that reports it as "Sam is behind" has invented a fact
+# about Sam -- to the one reader who can act on it.
+_TEAM_FACTS_CLAUSE = (
+    "- Describe somebody's situation as facts about that situation, never as a "
+    "judgment of the person. Work waiting on a review is the reviewer's move, not "
+    "a failing of whoever is waiting on it. Never rank the team against each "
+    "other, never call anybody slow or behind, and never supply a reason nobody "
+    "gave you.\n"
+    "- When the tools do not cover what the manager asked, say so and say who "
+    "would know, rather than filling the gap yourself.\n"
+)
+
+_TEAM_AREA_CLAUSE = (
+    "- The manager's work is grouped into areas that stay closed until you open "
+    "one. Call `open_area` for the area they are actually asking about, and its "
+    "tools become available on your *next* step, not this one. Do not open an area "
+    "on the chance it might be useful.\n"
+)
+
+# Deliberately a rule about you rather than about a named tool. Which actions are
+# mounted changes from hop to hop as areas open, and this is the one sentence that
+# must never be missing -- it is what stops you telling a manager that a change
+# happened. It stays true when nothing is mounted to propose, and it names nothing
+# that is not there.
+_TEAM_PROPOSE_CLAUSE = (
+    "- You never make a change yourself. A tool that would change something only "
+    "offers it: the manager sees what it would do and confirms it outside this "
+    "conversation, or does not. So say what you have put in front of them and "
+    "stop there -- never that a change is done, queued, applied or taken care of, "
+    "and never carry on as though they had already confirmed it.\n"
+)
+
 _STATE_TOOLS = (
     "get_arrival_steps",
     "get_my_metrics",
@@ -92,21 +161,40 @@ _STATE_TOOLS = (
 def build_persona(
     tool_names: Collection[str],
     vocabulary: Vocabulary = DEFAULT_VOCABULARY,
+    *,
+    capabilities_enabled: bool = True,
+    team_mode: bool = False,
 ) -> str:
-    """Assembles the mentor's persona for one hire.
+    """Assembles the persona for one reader of the buddy.
 
     Args:
-        tool_names: Every tool mounted for this hire, backend and local. A clause
+        tool_names: Every tool mounted for this reader, backend and local. A clause
             whose tools are absent is omitted rather than softened, so the persona
-            never mentions a capability this hire does not have.
+            never mentions a capability this reader does not have.
         vocabulary: What one unit of this hire's accepted work is called. Defaults
-            to the engineering wording when a caller supplies nothing.
+            to the engineering wording when a caller supplies nothing. Unused in
+            team mode, whose prose is about people rather than about their work.
+        capabilities_enabled: False when the reader asked the corpus rather than the
+            mentor. Nothing but ``search_docs`` is mounted, and the persona says so
+            instead of offering what it cannot do.
+        team_mode: True when the reader is a project's manager asking about that
+            project's team, rather than a hire asking about their own onboarding.
 
     Returns:
         The system prompt, without any conversation summary appended.
     """
     available = set(tool_names)
+    if team_mode:
+        return _team_persona(available, capabilities_enabled)
     parts = [_IDENTITY]
+    if not capabilities_enabled:
+        # Nothing below is mounted, so every clause that follows would drop anyway.
+        # Said outright, because a mentor who still sounds able to act turns its own
+        # refusal into something that reads like a fault.
+        parts.append(_SEARCH_ONLY_CLAUSE)
+        parts.append(_GROUNDING_CLAUSE + ".\n")
+        parts.append(_FIXTURE_CLAUSE)
+        return "".join(parts)
 
     # First clause, because it is first in the conversation: what has to be true
     # before somebody can work comes before what they should work on. The backend
@@ -145,5 +233,46 @@ def build_persona(
         f"- Celebrate the {vocabulary.contribution_noun_plural} and milestones the "
         "metrics report. Doing the real work is the point; everything else is the "
         "path to it."
+    )
+    return "".join(parts)
+
+
+def _team_persona(available: set[str], capabilities_enabled: bool) -> str:
+    """Assembles the persona a project's manager meets.
+
+    The hire's clauses are not reused and not softened. Arrival, claiming a task and
+    the competency assessment are all about the reader's own onboarding, and their
+    tools are never mounted here anyway -- but dropping them by mode as well means a
+    backend that one day mounts one of them cannot put "let's settle where you're
+    starting from" in front of somebody's manager.
+    """
+    parts = [_TEAM_IDENTITY]
+    if not capabilities_enabled:
+        parts.append(_SEARCH_ONLY_CLAUSE)
+        parts.append(_TEAM_FACTS_CLAUSE)
+        parts.append(_GROUNDING_CLAUSE + ".\n")
+        parts.append(_FIXTURE_CLAUSE)
+        return "".join(parts)
+
+    team_reads = [name for name in _TEAM_READ_TOOLS if name in available]
+    if team_reads:
+        rendered = ", ".join(f"`{name}`" for name in team_reads)
+        parts.append(
+            f"- Use the team tools ({rendered}) for who on this project needs the "
+            "manager's attention and how one person is getting on, and "
+            "`search_docs` for how the project itself works. A member id the tools "
+            "give you is how you name somebody; never guess one.\n"
+        )
+    parts.append(_TEAM_FACTS_CLAUSE)
+    if "open_area" in available:
+        parts.append(_TEAM_AREA_CLAUSE)
+    parts.append(_TEAM_PROPOSE_CLAUSE)
+    # No escalation offer: `flag_to_pm` raises a question *to* a manager, and the
+    # reader here is the manager.
+    parts.append(_GROUNDING_CLAUSE + ".\n")
+    parts.append(_FIXTURE_CLAUSE)
+    parts.append(
+        "- Lead with what needs the manager now and keep the rest short. Their "
+        "attention is the scarce thing, and a list of everything spends it."
     )
     return "".join(parts)

@@ -138,3 +138,45 @@ def test_open_stream_greets_and_carries_no_memory_note() -> None:
     assert '"type": "done"' in body
     # The caller cannot persist a note it is never handed.
     assert '"memory"' not in body
+
+
+def test_team_mode_reaches_the_persona_the_backend_carries_back(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        _URL,
+        json={
+            "messages": [{"role": "user", "content": "who needs me?"}],
+            "team_mode": True,
+        },
+    )
+
+    assert response.status_code == 200
+    persona = response.json()["messages"][0]["content"]
+    assert "manager of one project" in persona
+
+
+def test_capabilities_off_reaches_the_persona(client: TestClient) -> None:
+    response = client.post(
+        _URL,
+        json={
+            "messages": [{"role": "user", "content": "how does deployment work?"}],
+            "capabilities_enabled": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "`search_docs` and nothing else" in response.json()["messages"][0]["content"]
+
+
+def test_omitting_both_modes_is_the_hire_mentor(client: TestClient) -> None:
+    """A caller that has never heard of either field gets exactly today's buddy."""
+    response = client.post(
+        _URL,
+        json={"messages": [{"role": "user", "content": "hello"}]},
+    )
+
+    assert response.status_code == 200
+    persona = response.json()["messages"][0]["content"]
+    assert "the mentor who guides a new hire" in persona
+    assert "manager of one project" not in persona
