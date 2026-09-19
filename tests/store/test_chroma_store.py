@@ -1554,3 +1554,512 @@ def test_bm25_cache_invalidates_across_store_instances(
     finally:
         writer_revision.close()
         reader_revision.close()
+
+
+def test_failed_delete_leaves_a_durable_cross_instance_tombstone(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata_path = str(tmp_path / "metadata.db")
+    writer_metadata = IngestionMetadataStore(metadata_path)
+    reader_metadata = IngestionMetadataStore(metadata_path)
+    client = chromadb.EphemeralClient()
+    collection_name = "test_durable_revocation"
+    writer = ChromaVectorStore(
+        collection_name=collection_name,
+        client=client,
+        revision_store=writer_metadata,
+    )
+    reader = ChromaVectorStore(
+        collection_name=collection_name,
+        client=client,
+        revision_store=reader_metadata,
+    )
+    writer.add(
+        [
+            Chunk(
+                id="revoked-chunk",
+                artifact_id="revoked-artifact",
+                filename="secret.md",
+                text="confidential deployment secret",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a",),
+            ),
+            Chunk(
+                id="visible-chunk",
+                artifact_id="visible-artifact",
+                filename="public.md",
+                text="ordinary deployment guide",
+                embedding=[0.9, 0.1],
+                project_ids=("project-a",),
+            ),
+        ]
+    )
+
+    original_delete = writer._collection.delete
+
+    def fail_delete(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("chroma unavailable")
+
+    monkeypatch.setattr(writer._collection, "delete", fail_delete)
+
+    try:
+        with pytest.raises(RuntimeError, match="chroma unavailable"):
+            writer.delete("revoked-artifact", exclude_ids=[])
+
+        assert reader_metadata.revocation_snapshot()[1] == frozenset(
+            {"revoked-artifact"}
+        )
+        assert [
+            chunk.id
+            for chunk in reader.query(
+                embedding=[1.0, 0.0],
+                top_k=1,
+                min_score=0.0,
+                filters=RetrievalFilters(project_id="project-a"),
+            )
+        ] == ["visible-chunk"]
+        assert [chunk.id for chunk in reader.iter_chunks_without_embeddings()] == [
+            "visible-chunk"
+        ]
+        assert (
+            reader.list_chunks_by_artifact(
+                "revoked-artifact",
+                limit=10,
+            )
+            == []
+        )
+        assert reader.count_by_artifact("revoked-artifact") == 0
+
+        # A later confirmed retry removes the vectors and prunes the tombstone.
+        monkeypatch.setattr(writer._collection, "delete", original_delete)
+        assert writer.delete("revoked-artifact", exclude_ids=[]) == 1
+        assert reader_metadata.revocation_snapshot()[1] == frozenset()
+        assert writer.count_by_artifact("revoked-artifact") == 0
+    finally:
+        writer_metadata.close()
+        reader_metadata.close()
+
+
+def test_failed_membership_removal_stays_tombstoned_until_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_membership_revocation",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="secret.md",
+                text="project secret",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            )
+        ]
+    )
+
+    original_add = store.add
+
+    def fail_rewrite(chunks: list[Chunk]) -> None:
+        del chunks
+        raise RuntimeError("rewrite failed")
+
+    monkeypatch.setattr(store, "add", fail_rewrite)
+
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.set_project_ids_for_artifact("artifact-1", ("project-b",))
+
+        assert metadata.revocation_snapshot()[1] == frozenset({"artifact-1"})
+        assert (
+            store.query(
+                embedding=[1.0, 0.0],
+                top_k=5,
+                min_score=0.0,
+                filters=RetrievalFilters(project_id="project-a"),
+            )
+            == []
+        )
+        assert list(store.iter_chunks_without_embeddings()) == []
+
+        monkeypatch.setattr(store, "add", original_add)
+        assert store.set_project_ids_for_artifact("artifact-1", ("project-b",)) == 1
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-b"})
+    finally:
+        metadata.close()
+
+
+def test_retry_prunes_tombstone_when_failed_delete_already_removed_chunks(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_revocation_cleanup",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="secret.md",
+                text="secret",
+                embedding=[1.0, 0.0],
+            )
+        ]
+    )
+
+    original_delete = store._collection.delete
+
+    def delete_then_fail(*args: object, **kwargs: object) -> None:
+        original_delete(*args, **kwargs)
+        raise RuntimeError("response lost after delete")
+
+    monkeypatch.setattr(store._collection, "delete", delete_then_fail)
+
+    try:
+        with pytest.raises(RuntimeError, match="response lost"):
+            store.delete("artifact-1", exclude_ids=[])
+
+        assert store.count() == 0
+        assert metadata.revocation_snapshot()[1] == frozenset({"artifact-1"})
+
+        monkeypatch.setattr(store._collection, "delete", original_delete)
+        assert store.delete("artifact-1", exclude_ids=[]) == 0
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()
+
+
+def test_membership_rewrite_cannot_clear_a_failed_delete_tombstone(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_cross_operation_revocation",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="artifact-1",
+                filename="secret.md",
+                text="project secret",
+                embedding=[1.0, 0.0],
+                project_ids=("project-a", "project-b"),
+            )
+        ]
+    )
+
+    original_delete = store._collection.delete
+
+    def fail_delete(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("deindex failed")
+
+    monkeypatch.setattr(store._collection, "delete", fail_delete)
+
+    try:
+        with pytest.raises(RuntimeError, match="deindex failed"):
+            store.delete("artifact-1", exclude_ids=[])
+
+        monkeypatch.setattr(store._collection, "delete", original_delete)
+        assert store.set_project_ids_for_artifact("artifact-1", ("project-b",)) == 1
+
+        # The membership operation may clear only its own tombstone. The
+        # earlier failed deindex still owns a live delete tombstone.
+        assert metadata.revocation_snapshot()[1] == frozenset({"artifact-1"})
+        assert store.project_ids_for_artifact("artifact-1") == frozenset({"project-b"})
+        assert (
+            store.query(
+                embedding=[1.0, 0.0],
+                top_k=5,
+                min_score=0.0,
+                filters=RetrievalFilters(project_id="project-b"),
+            )
+            == []
+        )
+
+        assert store.delete("artifact-1", exclude_ids=[]) == 1
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()
+
+
+def test_reingest_cannot_clear_an_active_membership_rewrite(tmp_path: Path) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_active_membership_revocation",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="art-1",
+                filename="art-1.md",
+                text="runbook",
+                embedding=[1.0, 0.0],
+                project_ids=("a", "b"),
+            )
+        ]
+    )
+    operation = metadata.begin_revocation_operations(
+        ["art-1"],
+        reason="membership",
+        owner="project:a",
+    )
+
+    try:
+        assert store.delete("art-1", exclude_ids=["c1"]) == 0
+        assert metadata.revocation_snapshot()[1] == frozenset({"art-1"})
+
+        assert (
+            metadata.fail_revocation_operations(
+                operation,
+                reason="membership",
+                owner="project:a",
+            )
+            is True
+        )
+        assert store.delete("art-1", exclude_ids=["c1"]) == 0
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()
+
+
+def test_authoritative_retry_supersedes_its_own_active_tombstone(
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_active_authoritative_retry",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="art-1",
+                filename="art-1.md",
+                text="runbook",
+                embedding=[1.0, 0.0],
+                project_ids=("b",),
+            )
+        ]
+    )
+    metadata.begin_revocation_operations(
+        ["art-1"],
+        reason="membership",
+        owner="artifact:art-1",
+    )
+
+    try:
+        assert store.set_project_ids_for_artifact("art-1", ("b",)) == 1
+        assert metadata.revocation_snapshot()[1] == frozenset()
+    finally:
+        metadata.close()
+
+
+def _revocation_chunk(
+    chunk_id: str,
+    artifact_id: str,
+    project_ids: tuple[str, ...],
+) -> Chunk:
+    return Chunk(
+        id=chunk_id,
+        artifact_id=artifact_id,
+        filename=f"{artifact_id}.md",
+        text="runbook",
+        embedding=[1.0, 0.0],
+        project_ids=project_ids,
+    )
+
+
+def test_remove_project_retry_clears_tombstones_for_already_rewritten_pages(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_remove_project_tombstone_retry",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add(
+        [
+            _revocation_chunk("c1", "art-1", ("a", "b")),
+            _revocation_chunk("c2", "art-2", ("a", "b")),
+        ]
+    )
+    monkeypatch.setattr(chroma_store_module, "_MAX_GET_PAGE", 1)
+    original_add = store.add
+    calls = 0
+
+    def flaky_add(chunks: list[Chunk]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("rewrite failed")
+        original_add(chunks)
+
+    monkeypatch.setattr(store, "add", flaky_add)
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.remove_project("a")
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.remove_project("a")
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"b"})
+        assert store.project_ids_for_artifact("art-2") == frozenset({"b"})
+    finally:
+        metadata.close()
+
+
+def test_authoritative_membership_retry_clears_an_older_tombstone(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_membership_readd_tombstone_retry",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add([_revocation_chunk("c1", "art-1", ("a", "b"))])
+    original_add = store.add
+
+    monkeypatch.setattr(
+        store,
+        "add",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.set_project_ids_for_artifact("art-1", ("b",))
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.set_project_ids_for_artifact("art-1", ("a", "b"))
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"a", "b"})
+    finally:
+        metadata.close()
+
+
+def test_failed_membership_add_does_not_hide_the_artifact(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_membership_add_failure",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add([_revocation_chunk("c1", "art-1", ("a",))])
+
+    monkeypatch.setattr(
+        store,
+        "add",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.set_project_ids_for_artifact("art-1", ("a", "b"))
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"a"})
+        assert (
+            len(
+                store.query(
+                    embedding=[1.0, 0.0],
+                    top_k=5,
+                    min_score=0.0,
+                    filters=RetrievalFilters(project_id="a"),
+                )
+            )
+            == 1
+        )
+    finally:
+        metadata.close()
+
+
+def test_authoritative_membership_sync_clears_failed_project_removal_scope(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_cross_scope_membership_recovery",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add([_revocation_chunk("c1", "art-1", ("a", "b"))])
+    original_add = store.add
+
+    monkeypatch.setattr(
+        store,
+        "add",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.remove_project("a")
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.set_project_ids_for_artifact("art-1", ("b",))
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"b"})
+    finally:
+        metadata.close()
+
+
+def test_reingest_clears_membership_tombstones_that_predate_replacement(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    metadata = IngestionMetadataStore(str(tmp_path / "metadata.db"))
+    store = ChromaVectorStore(
+        collection_name="test_reingest_membership_tombstone_cleanup",
+        client=chromadb.EphemeralClient(),
+        revision_store=metadata,
+    )
+    store.add([_revocation_chunk("c1", "art-1", ("a", "b"))])
+    original_add = store.add
+
+    monkeypatch.setattr(
+        store,
+        "add",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("rewrite failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="rewrite failed"):
+            store.set_project_ids_for_artifact("art-1", ("b",))
+
+        monkeypatch.setattr(store, "add", original_add)
+        store.add([_revocation_chunk("c9", "art-1", ("b",))])
+        store.delete("art-1", exclude_ids=["c9"])
+
+        assert metadata.revocation_snapshot()[1] == frozenset()
+        assert store.project_ids_for_artifact("art-1") == frozenset({"b"})
+    finally:
+        metadata.close()

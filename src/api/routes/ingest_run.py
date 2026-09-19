@@ -396,8 +396,8 @@ def ingest_run(
             if deleted_count > 0:
                 metadata_store.mark_deindexed(artifact_id, _utc_now())
         except Exception as exc:
-            # A failed deletion leaves the artifact retrievable. Report it so
-            # the backend retries instead of reading the 200 as "revoked".
+            # VectorStore.delete leaves a durable tombstone on failure, so
+            # retrieval stays fail-closed while the backend schedules a retry.
             logger.exception("Failed to deindex artifact %s", artifact_id)
             deindexed.append(
                 ArtifactDeindexResponse(
