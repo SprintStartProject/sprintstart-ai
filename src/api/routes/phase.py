@@ -73,6 +73,7 @@ def assemble(
             phase_prompt=phase_prompt,
             project_id=project_id,
             last_fingerprint=request.last_fingerprint,
+            industry=request.industry,
         )
     except LLMUnavailableError as exc:
         raise HTTPException(
@@ -117,6 +118,7 @@ def assemble_stream(
         phase_prompt=phase_prompt,
         project_id=project_id,
         last_fingerprint=request.last_fingerprint,
+        industry=request.industry,
     )
     return StreamingResponse(
         stream_progress(events, operation="phase"),

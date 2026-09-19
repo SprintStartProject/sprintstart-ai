@@ -136,8 +136,16 @@ class _GenPayload(BaseModel):
 # --- evidence ------------------------------------------------------------------
 
 
-def _phase_query(title: str, description: str, prompt: str) -> str:
-    parts = [title, description, prompt]
+def _phase_query(
+    title: str,
+    description: str,
+    prompt: str,
+    industry: str | None = None,
+) -> str:
+    parts: list[str] = []
+    if industry and industry.strip():
+        parts.append(f"Industry: {industry.strip()}")
+    parts.extend([title, description, prompt])
     return " ".join(p for p in parts if p.strip())[:_MAX_PROMPT_TEXT]
 
 
@@ -173,9 +181,15 @@ def _build_prompt(
     description: str,
     prompt: str,
     chunks: list[ScoredChunk],
+    industry: str | None = None,
 ) -> list[Message]:
     evidence = "\n".join(_evidence_line(c) for c in chunks)
     description_line = f"\nPhase description: {description}" if description else ""
+    industry_line = (
+        f"\nProject industry/domain: {industry.strip()}"
+        if industry and industry.strip()
+        else ""
+    )
     system = (
         "You are authoring one phase of a software-team onboarding path from "
         "the team's own knowledge base. The phase already has a title and an "
@@ -224,7 +238,7 @@ def _build_prompt(
         "defined.\n"
     )
     user = (
-        f"Phase: {title}{description_line}\n\n"
+        f"Phase: {title}{description_line}{industry_line}\n\n"
         f"Author's prompt:\n{prompt[:_MAX_PROMPT_TEXT] or '(none)'}\n\n"
         f"Evidence:\n{evidence}"
     )
@@ -428,6 +442,7 @@ def stream_phase(
     phase_prompt: str,
     project_id: str,
     last_fingerprint: str | None = None,
+    industry: str | None = None,
 ) -> Generator[ProgressEvent, None, PhaseOutcome]:
     """Assemble one phase's content, yielding live progress and returning the outcome.
 
@@ -461,7 +476,7 @@ def stream_phase(
     yield progress.stage("retrieving", f"Searching the project for: {phase_title}")
     bm25_cache = BM25IndexCache()
     chunks = hybrid_retrieve(
-        question=_phase_query(phase_title, phase_description, phase_prompt),
+        question=_phase_query(phase_title, phase_description, phase_prompt, industry),
         llm=llm,
         store=store,
         top_k=_TOP_K,
@@ -484,7 +499,9 @@ def stream_phase(
     yield progress.stage(
         "generating", f"Writing the phase from {len(chunks)} source(s)"
     )
-    messages = _build_prompt(phase_title, phase_description, phase_prompt, chunks)
+    messages = _build_prompt(
+        phase_title, phase_description, phase_prompt, chunks, industry
+    )
     parse_error: ValueError | None = None
     payload: _GenPayload | None = None
     for attempt in range(_MAX_GENERATION_ATTEMPTS):
@@ -590,6 +607,7 @@ def assemble_phase(
     phase_prompt: str,
     project_id: str,
     last_fingerprint: str | None = None,
+    industry: str | None = None,
 ) -> PhaseOutcome:
     """Assemble one phase's content for the non-streaming path.
 
@@ -605,5 +623,6 @@ def assemble_phase(
             phase_prompt=phase_prompt,
             project_id=project_id,
             last_fingerprint=last_fingerprint,
+            industry=industry,
         )
     )
