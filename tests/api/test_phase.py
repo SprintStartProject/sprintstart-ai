@@ -114,3 +114,13 @@ def test_a_phase_needs_a_title_and_prompt(client: TestClient) -> None:
     assert client.post(_URL, json=_request(phase_title="   ")).status_code == 422
     assert client.post(_URL, json=_request(phase_prompt="   ")).status_code == 422
     assert client.post(_URL, json=_request(project_id="   ")).status_code == 422
+
+
+def test_assembles_phase_with_industry(client: TestClient) -> None:
+    request_data = _request(industry="Fintech / Banking")
+    response = client.post(_URL, json=request_data)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "assembled"
+    assert body["steps"][0]["title"] == "Read the README"
