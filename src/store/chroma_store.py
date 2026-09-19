@@ -546,6 +546,37 @@ class ChromaVectorStore:
             return []
         return _chunks_from_get_result(raw_result)
 
+    def list_chunks_by_positions(
+        self,
+        artifact_id: str,
+        positions: frozenset[int],
+        start_page: int | None = None,
+    ) -> list[Chunk]:
+        if not positions:
+            return []
+
+        conditions: list[Where] = [
+            {"artifact_id": {"$eq": artifact_id}},
+            {"position": {"$in": sorted(positions)}},
+        ]
+        if start_page is not None:
+            conditions.append({"start_page": {"$eq": start_page}})
+
+        raw_result = self._collection.get(
+            where={"$and": conditions},
+            # Re-ingestion can temporarily leave more than one row at a logical
+            # position. Do not assume one stored row per requested position.
+            limit=_MAX_GET_PAGE,
+            include=["documents", "metadatas"],
+        )
+        return sorted(
+            _chunks_without_embeddings_from_get_result(raw_result),
+            key=lambda chunk: (
+                chunk.start_page if chunk.start_page is not None else 0,
+                chunk.position if chunk.position is not None else -1,
+            ),
+        )
+
     def count_by_artifact(self, artifact_id: str) -> int:
         _, revoked = self._revocation_snapshot()
         if artifact_id in revoked:
@@ -582,62 +613,7 @@ class ChromaVectorStore:
             limit=limit,
             offset=offset,
         )
-
-        ids = raw_result["ids"]
-        documents = raw_result["documents"] or []
-        metadatas = raw_result["metadatas"] or []
-
-        chunks: list[Chunk] = []
-
-        for chunk_id, text, metadata in zip(
-            ids,
-            documents,
-            metadatas,
-            strict=True,
-        ):
-            raw_position = metadata.get("position")
-            position = (
-                None
-                if not isinstance(raw_position, (int, float))
-                or raw_position == _NO_POSITION
-                else int(raw_position)
-            )
-
-            kind_str = str(metadata.get("kind", "text"))
-            if not is_chunk_kind(kind_str):
-                raise ValueError(f"Unknown chunk kind {kind_str!r}")
-
-            source_system = normalize_source_system(
-                _optional_str(metadata.get("source_system"))
-            )
-
-            chunks.append(
-                Chunk(
-                    id=str(chunk_id),
-                    artifact_id=str(metadata["artifact_id"]),
-                    filename=str(metadata["filename"]),
-                    position=position,
-                    kind=kind_str,
-                    text=str(text),
-                    embedding=[],  # no embeddings in text-only fetch
-                    source_role=_source_role_from_metadata(metadata),
-                    source_url=_optional_str(metadata.get("source_url")),
-                    artifact_type=_optional_str(metadata.get("artifact_type")),
-                    language=_optional_str(metadata.get("language")),
-                    connector_id=_optional_str(metadata.get("connector_id")),
-                    connector_source_id=_optional_str(
-                        metadata.get("connector_source_id")
-                    ),
-                    source_system=source_system,
-                    created_at=_optional_str(metadata.get("created_at")),
-                    start_line=_optional_int(metadata.get("start_line")),
-                    start_page=_optional_int(metadata.get("start_page")),
-                    project_ids=decode_project_ids(
-                        metadata.get(PROJECT_IDS_METADATA_KEY)
-                    ),
-                )
-            )
-
+        chunks = _chunks_without_embeddings_from_get_result(raw_result)
         _, revoked = self._revocation_snapshot()
         return self._visible_chunks(chunks, revoked)
 
@@ -892,6 +868,53 @@ def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:
                 connector_id=_optional_str(metadata.get("connector_id")),
                 connector_source_id=_optional_str(metadata.get("connector_source_id")),
                 source_system=source_system,
+                created_at=_optional_str(metadata.get("created_at")),
+                start_line=_optional_int(metadata.get("start_line")),
+                start_page=_optional_int(metadata.get("start_page")),
+                project_ids=decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)),
+            )
+        )
+
+    return chunks
+
+
+def _chunks_without_embeddings_from_get_result(raw_result: Any) -> list[Chunk]:
+    ids = cast(list[str], raw_result["ids"])
+    documents = cast(list[str], raw_result.get("documents") or [])
+    metadatas = cast(list[Mapping[str, object]], raw_result.get("metadatas") or [])
+
+    chunks: list[Chunk] = []
+    for chunk_id, text, metadata in zip(ids, documents, metadatas, strict=True):
+        raw_position = metadata.get("position")
+        position = (
+            None
+            if not isinstance(raw_position, (int, float))
+            or raw_position == _NO_POSITION
+            else int(raw_position)
+        )
+
+        kind_str = str(metadata.get("kind", "text"))
+        if not is_chunk_kind(kind_str):
+            raise ValueError(f"Unknown chunk kind {kind_str!r}")
+
+        chunks.append(
+            Chunk(
+                id=str(chunk_id),
+                artifact_id=str(metadata["artifact_id"]),
+                filename=str(metadata["filename"]),
+                position=position,
+                kind=kind_str,
+                text=str(text),
+                embedding=[],
+                source_role=_source_role_from_metadata(metadata),
+                source_url=_optional_str(metadata.get("source_url")),
+                artifact_type=_optional_str(metadata.get("artifact_type")),
+                language=_optional_str(metadata.get("language")),
+                connector_id=_optional_str(metadata.get("connector_id")),
+                connector_source_id=_optional_str(metadata.get("connector_source_id")),
+                source_system=normalize_source_system(
+                    _optional_str(metadata.get("source_system"))
+                ),
                 created_at=_optional_str(metadata.get("created_at")),
                 start_line=_optional_int(metadata.get("start_line")),
                 start_page=_optional_int(metadata.get("start_page")),
