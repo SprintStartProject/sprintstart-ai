@@ -1597,9 +1597,20 @@ class SkillCatalogItem(BaseModel):
     )
 
 
-class SkillSuggestionRequest(ProjectScopedRequest):
+class SkillSuggestionRequest(BaseModel):
     """Request to suggest skills for a role in a project."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: ProjectId | None = Field(
+        alias="projectId",
+        default=None,
+        description=(
+            "Optional project this request is scoped to. When absent, retrieval "
+            "is skipped and only universal/role-typical skills are suggested."
+        ),
+        examples=["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
+    )
     role_name: str = Field(
         alias="roleName",
         min_length=1,
