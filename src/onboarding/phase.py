@@ -456,6 +456,8 @@ def stream_phase(
     shown. ``skipped`` (empty corpus, no evidence, or nothing grounded) is an
     honest answer for the backend to persist as an empty phase.
     """
+    normalized_industry = industry.strip() if industry and industry.strip() else None
+
     progress = ProgressStream("phase")
     fingerprint, early_events, early_outcome = fingerprint_gate(
         progress,
@@ -468,6 +470,9 @@ def stream_phase(
         unchanged_label="Nothing changed — the cached phase content is current",
         empty_warning_label="The project has no indexed material yet",
         empty_done_label="No phase content could be assembled",
+        extra_fingerprint_material=(
+            [f"industry:{normalized_industry}"] if normalized_industry else None
+        ),
     )
     if early_outcome is not None:
         yield from early_events
@@ -476,7 +481,9 @@ def stream_phase(
     yield progress.stage("retrieving", f"Searching the project for: {phase_title}")
     bm25_cache = BM25IndexCache()
     chunks = hybrid_retrieve(
-        question=_phase_query(phase_title, phase_description, phase_prompt, industry),
+        question=_phase_query(
+            phase_title, phase_description, phase_prompt, normalized_industry
+        ),
         llm=llm,
         store=store,
         top_k=_TOP_K,
@@ -500,7 +507,11 @@ def stream_phase(
         "generating", f"Writing the phase from {len(chunks)} source(s)"
     )
     messages = _build_prompt(
-        phase_title, phase_description, phase_prompt, chunks, industry
+        phase_title,
+        phase_description,
+        phase_prompt,
+        chunks,
+        normalized_industry,
     )
     parse_error: ValueError | None = None
     payload: _GenPayload | None = None

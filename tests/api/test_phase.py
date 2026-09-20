@@ -124,3 +124,25 @@ def test_assembles_phase_with_industry(client: TestClient) -> None:
     body = response.json()
     assert body["status"] == "assembled"
     assert body["steps"][0]["title"] == "Read the README"
+
+
+def test_phase_idempotency_with_industry(client: TestClient) -> None:
+    first_resp = client.post(_URL, json=_request(industry="Fintech"))
+    assert first_resp.status_code == 200
+    fp = first_resp.json()["provenance"]["corpus_fingerprint"]
+    assert fp is not None
+
+    # Same industry + same last_fingerprint -> unchanged
+    same_resp = client.post(
+        _URL, json=_request(industry="Fintech", last_fingerprint=fp)
+    )
+    assert same_resp.status_code == 200
+    assert same_resp.json()["status"] == "unchanged"
+
+    # Different industry + old last_fingerprint -> reassembled
+    diff_resp = client.post(
+        _URL, json=_request(industry="Healthcare", last_fingerprint=fp)
+    )
+    assert diff_resp.status_code == 200
+    assert diff_resp.json()["status"] == "assembled"
+    assert diff_resp.json()["provenance"]["corpus_fingerprint"] != fp

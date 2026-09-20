@@ -517,3 +517,94 @@ def test_assemble_phase_with_industry() -> None:
 
     assert outcome.status == "assembled"
     assert outcome.steps[0].title == "Read the README"
+
+
+def test_fingerprint_includes_industry() -> None:
+    store = _store("the README explains the project and how to run it locally")
+    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+
+    res_none = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry=None,
+    )
+    res_blank = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="   ",
+    )
+    res_fintech = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="Fintech",
+    )
+    res_healthcare = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="Healthcare",
+    )
+
+    fp_none = res_none.provenance.corpus_fingerprint
+    fp_blank = res_blank.provenance.corpus_fingerprint
+    fp_fintech = res_fintech.provenance.corpus_fingerprint
+    fp_healthcare = res_healthcare.provenance.corpus_fingerprint
+
+    assert fp_none is not None
+    assert fp_none == fp_blank
+    assert fp_fintech != fp_none
+    assert fp_healthcare != fp_none
+    assert fp_fintech != fp_healthcare
+
+
+def test_changing_industry_invalidates_fingerprint_cache() -> None:
+    store = _store("the README explains the project and how to run it locally")
+    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+
+    first = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="Fintech",
+    )
+    assert first.status == "assembled"
+    fp_fintech = first.provenance.corpus_fingerprint
+    assert fp_fintech is not None
+
+    # Same industry + same last_fingerprint -> unchanged
+    same_industry = assemble_phase(
+        _llm(json.dumps({"steps": []})),
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        last_fingerprint=fp_fintech,
+        industry="Fintech",
+    )
+    assert same_industry.status == "unchanged"
+
+    # Changed industry + old last_fingerprint -> re-assembles (not unchanged)
+    changed_industry = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        last_fingerprint=fp_fintech,
+        industry="Healthcare",
+    )
+    assert changed_industry.status == "assembled"
+    assert changed_industry.provenance.corpus_fingerprint != fp_fintech
