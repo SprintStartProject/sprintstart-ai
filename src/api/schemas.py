@@ -1261,6 +1261,10 @@ class AssemblePhaseRequest(BaseModel):
             "`unchanged` so cached content can be served without regeneration."
         ),
     )
+    industry: str | None = Field(
+        default=None,
+        description="Optional detected or user-specified project industry/domain.",
+    )
 
 
 class FileDiffSchema(BaseModel):

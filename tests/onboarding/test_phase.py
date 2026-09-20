@@ -4,7 +4,7 @@ from collections.abc import Generator
 from llm.base import Message
 from onboarding.phase import assemble_phase, stream_phase
 from onboarding.progress import ProgressEvent
-from rag.types import Chunk
+from rag.types import Chunk, RetrievalFilters
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
@@ -440,3 +440,171 @@ def test_stream_emits_item_per_grounded_step_then_terminal_done() -> None:
     assert types[-1] == "done"
     item = next(e for e in events if e["type"] == "item")
     assert item["item"]["title"] == "Read the README"  # type: ignore[typeddict-item]
+
+
+def test_phase_query_and_prompt_with_industry() -> None:
+    from onboarding.phase import _build_prompt, _phase_query
+
+    query = _phase_query(
+        title="Architecture",
+        description="Core services",
+        prompt="Explain backend structure",
+        industry="Fintech / Banking",
+    )
+    expected_query = (
+        "Industry: Fintech / Banking Architecture Core services "
+        "Explain backend structure"
+    )
+    assert query == expected_query
+
+    store = _store("evidence text")
+    messages = _build_prompt(
+        title="Architecture",
+        description="Core services",
+        prompt="Explain backend structure",
+        chunks=store.query(
+            _EMBED,
+            top_k=1,
+            min_score=0.0,
+            filters=RetrievalFilters(project_id=_PROJECT),
+        ),
+        industry="Fintech / Banking",
+    )
+    assert len(messages) == 2
+    assert "Project industry/domain: Fintech / Banking" in messages[1]["content"]
+
+
+def test_phase_query_and_prompt_backward_compat_when_industry_none() -> None:
+    from onboarding.phase import _build_prompt, _phase_query
+
+    query = _phase_query(
+        title="Architecture",
+        description="Core services",
+        prompt="Explain backend structure",
+        industry=None,
+    )
+    assert query == "Architecture Core services Explain backend structure"
+
+    store = _store("evidence text")
+    messages = _build_prompt(
+        title="Architecture",
+        description="Core services",
+        prompt="Explain backend structure",
+        chunks=store.query(
+            _EMBED,
+            top_k=1,
+            min_score=0.0,
+            filters=RetrievalFilters(project_id=_PROJECT),
+        ),
+        industry=None,
+    )
+    assert len(messages) == 2
+    assert "Project industry/domain:" not in messages[1]["content"]
+
+
+def test_assemble_phase_with_industry() -> None:
+    store = _store("the README explains the project and how to run it locally")
+    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+
+    outcome = assemble_phase(
+        llm,
+        store,
+        phase_title="Project Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="Healthcare",
+    )
+
+    assert outcome.status == "assembled"
+    assert outcome.steps[0].title == "Read the README"
+
+
+def test_fingerprint_includes_industry() -> None:
+    store = _store("the README explains the project and how to run it locally")
+    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+
+    res_none = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry=None,
+    )
+    res_blank = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="   ",
+    )
+    res_fintech = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="Fintech",
+    )
+    res_healthcare = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="Healthcare",
+    )
+
+    fp_none = res_none.provenance.corpus_fingerprint
+    fp_blank = res_blank.provenance.corpus_fingerprint
+    fp_fintech = res_fintech.provenance.corpus_fingerprint
+    fp_healthcare = res_healthcare.provenance.corpus_fingerprint
+
+    assert fp_none is not None
+    assert fp_none == fp_blank
+    assert fp_fintech != fp_none
+    assert fp_healthcare != fp_none
+    assert fp_fintech != fp_healthcare
+
+
+def test_changing_industry_invalidates_fingerprint_cache() -> None:
+    store = _store("the README explains the project and how to run it locally")
+    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+
+    first = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        industry="Fintech",
+    )
+    assert first.status == "assembled"
+    fp_fintech = first.provenance.corpus_fingerprint
+    assert fp_fintech is not None
+
+    # Same industry + same last_fingerprint -> unchanged
+    same_industry = assemble_phase(
+        _llm(json.dumps({"steps": []})),
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        last_fingerprint=fp_fintech,
+        industry="Fintech",
+    )
+    assert same_industry.status == "unchanged"
+
+    # Changed industry + old last_fingerprint -> re-assembles (not unchanged)
+    changed_industry = assemble_phase(
+        llm,
+        store,
+        phase_title="Overview",
+        phase_prompt="Generate an overview.",
+        project_id=_PROJECT,
+        last_fingerprint=fp_fintech,
+        industry="Healthcare",
+    )
+    assert changed_industry.status == "assembled"
+    assert changed_industry.provenance.corpus_fingerprint != fp_fintech
