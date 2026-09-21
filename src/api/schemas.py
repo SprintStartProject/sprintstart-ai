@@ -1458,7 +1458,17 @@ class BuddyOpenRequest(BaseModel):
         default="",
         description=(
             "A plain-text snapshot of the hire's current state (pull requests, tasks, "
-            "competencies) for the greeting to ground itself in."
+            "competencies) for the greeting to ground itself in. In team mode this is "
+            "the team's attention list instead."
+        ),
+    )
+    team_mode: bool = Field(
+        default=False,
+        description=(
+            "True when a project's manager is opening a team conversation. The "
+            "greeting then addresses a manager about their team — `state` is the "
+            "team's attention list, not the reader's own onboarding — and the "
+            "suggested next step is a question about the team."
         ),
     )
 
