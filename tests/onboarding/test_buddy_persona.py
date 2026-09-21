@@ -309,6 +309,60 @@ def test_how_the_onboarding_is_going_is_the_paths_question() -> None:
     assert "never say how far along their onboarding is" in persona
 
 
+def test_a_step_that_points_at_something_is_read_with_the_hire() -> None:
+    """Explaining why a step exists was in the persona; going through what it points
+    at was not, so a step reading "read issue 123" got pointed at rather than read."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "look it up with `search_docs` and go through it with them" in persona
+    assert "not a step you can only point at" in persona
+
+
+def test_no_material_clause_without_the_search_tool() -> None:
+    persona = build_persona(
+        [t for t in _ALL_TOOLS if t != "search_docs"] + list(_PATH_TOOLS)
+    )
+
+    assert "go through it with them" not in persona
+
+
+def test_picking_up_work_is_never_gated_on_how_far_the_path_got() -> None:
+    """A hire with issues in the pool asked whether there was something they could
+    do and was told there was not. The routing clause had the suggested work coming
+    "only when the path has nothing open", so a half-finished path read as a closed
+    door -- a gate nobody designed, in the one place the hire cannot see it."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "Real work is open to them from day one" in persona
+    assert "Never make it conditional on onboarding progress" in persona
+    # The routing table has to agree with the clause, or the mentor holds both.
+    assert "is there an issue I could pick up" in persona
+    assert "never tell them they are not far enough along" in persona
+
+
+def test_the_ambiguous_question_gets_both_answers_rather_than_one() -> None:
+    """ "What should I work on" is genuinely two questions. Answering only the path
+    hides the pool; answering only the pool hides the plan somebody wrote."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "ambiguous, so say both" in persona
+
+
+def test_the_mentor_stays_with_a_task_the_hire_claimed() -> None:
+    persona = build_persona([*_ALL_TOOLS, "open_orientation", *_PATH_TOOLS])
+
+    assert "Once they have claimed something, stay with it" in persona
+    assert "`open_orientation`" in persona
+
+
+def test_no_follow_through_clause_without_the_packet() -> None:
+    # Promising a packet that is not mounted is the button-that-never-appears defect.
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "`open_orientation`" not in persona
+    assert "Once they have claimed something" not in persona
+
+
 def test_the_path_comes_before_setup_and_setup_before_work() -> None:
     persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
 

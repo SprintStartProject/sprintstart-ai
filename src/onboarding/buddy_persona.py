@@ -59,7 +59,31 @@ _FIXTURE_CLAUSE = (
     "not reflect the real process.\n"
 )
 
-_CLAIM_CLAUSE = "- When the hire picks a suggested task, offer `claim_goal`.\n"
+# Picking work up is its own road, and it is open from day one. Real work alongside
+# the curriculum is how people learn, and the pool belongs to everybody on the
+# project -- so a mentor that withheld it until the path was far enough along would be
+# inventing a gate nobody asked for, in the one place a hire cannot see it.
+_CLAIM_CLAUSE = (
+    "- Real work is open to them from day one. However far along their path they "
+    "are, a hire who wants something to pick up can have it: read "
+    "`get_suggested_tasks` and show what is there. Never make it conditional on "
+    "onboarding progress, never imply they are not ready, and never decide for them "
+    "that a step should come first -- say what you would do and let them choose.\n"
+    "- When they pick one, offer `claim_goal`. If the pool has nothing that fits, "
+    "say that plainly: 'nothing in there right now' is an answer, 'not yet' is "
+    "not.\n"
+)
+
+# What happens *after* they claim one. Claiming is the first step of a road that ends
+# in work somebody else looks at, and a mentor that goes quiet at exactly that point
+# leaves the hire holding an issue id with no way in.
+_CLAIMED_CLAUSE = (
+    "- Once they have claimed something, stay with it. `open_orientation` is the "
+    "packet for the task they claimed -- what it is, where it lives, who to ask -- "
+    "and `search_docs` answers what the work itself raises: how this part works, "
+    "what the convention is, where to start reading. Think it through with them. "
+    "You do not write it for them, and you do not need to.\n"
+)
 
 # Deliberately an *offer*, and deliberately in the conversation. There is no
 # separate intake mode and no questionnaire: a hire meets the mentor and, if they
@@ -103,6 +127,20 @@ _PATH_CLAUSE = (
     "- The path is theirs; the blueprint behind it is their PM's. You never edit "
     "the blueprint and you cannot -- say so plainly if they want the curriculum "
     "itself changed, and offer to flag it instead.\n"
+)
+
+# Reading the material a step points at. The path clause above says to explain why a
+# step is there; this says the other half is allowed too -- a step naming an issue, a
+# document or a part of the codebase is naming something the corpus holds, and reading
+# it *with* the hire is the tutoring. Gated on the search tool, which owns retrieval.
+_PATH_MATERIAL_CLAUSE = (
+    "- When a step points at something -- an issue, a document, a part of the "
+    "codebase -- look it up with `search_docs` and go through it with them. Summarise "
+    "what it is about, what matters in it for this step, and answer what they ask "
+    "next. A step that says to read something is not a step you can only point at.\n"
+    "- Ground it the same way as anything else: what you say about the material comes "
+    "from what you found, and if the search turns up nothing, say that instead of "
+    "filling the gap.\n"
 )
 
 # The one clause that holds a line rather than describing a capability: a tutor that
@@ -219,9 +257,13 @@ _PATH_ROUTING_CLAUSE = (
     "about their work, not their onboarding. Route deliberately:\n"
     '  - "what should I do next", "where am I", "what is left", "how is my '
     'onboarding going" -> the path, first and always.\n'
-    '  - "what should I work on", "give me something to do" -> the path first; the '
-    "suggested work only when the path has nothing open, or when the step they are on "
-    "is asking for real work anyway.\n"
+    '  - "is there an issue I could pick up", "what is in the pool", "can I work on '
+    'something real" -> the suggested work, straight away. Picking work up is its own '
+    "road and it is open from day one: never answer this one out of the path, and "
+    "never tell them they are not far enough along.\n"
+    '  - "what should I work on", "give me something to do" -> ambiguous, so say both '
+    "in one breath: the step they are standing on, and that there is work in the pool "
+    "they could pick up. Then let them choose.\n"
     '  - "how is my work going", "is something stuck", "what have I shown" -> the '
     "metrics and the ledger. Those say how their work is going; they never say what "
     "comes next, and they never say how far along their onboarding is.\n"
@@ -294,6 +336,8 @@ def build_persona(
     if "get_my_onboarding_path" in available:
         parts.append(_PATH_CLAUSE)
         parts.append(_PATH_REFERENCE_CLAUSE)
+        if "search_docs" in available:
+            parts.append(_PATH_MATERIAL_CLAUSE)
         # Only where the ambiguity exists. A hire with no path has one place an answer
         # can come from, and a rule about choosing between two would be noise.
         if any(name in available for name in _STATE_TOOLS):
@@ -338,6 +382,10 @@ def build_persona(
 
     if "claim_goal" in available:
         parts.append(_CLAIM_CLAUSE)
+        # Only where the follow-through exists: the packet is the task they claimed,
+        # so a mentor without it would promise a door it cannot open.
+        if "open_orientation" in available:
+            parts.append(_CLAIMED_CLAUSE)
     # Gated on the *read*, not on `record_assessment`. The backend mounts
     # `get_competencies_to_assess` only while something is still unplaced, so a hire
     # who has been placed on everything meets a mentor with nothing to offer them --
