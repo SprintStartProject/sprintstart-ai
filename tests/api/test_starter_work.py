@@ -33,6 +33,7 @@ def _issue_artifact(**overrides: object) -> ArtifactRecord:
         source_id="github:org/repo:ISSUE:1",
         source_url="https://github.com/org/repo/issues/1",
         labels=["good first issue"],
+        project_ids=("p1",),
     )
     defaults.update(overrides)
     return ArtifactRecord(**defaults)  # type: ignore[arg-type]
@@ -64,6 +65,7 @@ def mine_client() -> Generator[tuple[TestClient, StubLLMClient], Any, None]:
                 filename="a1.md",
                 text="# Fix typo in README\n\nThe install section has a typo.",
                 embedding=_EMBED,
+                project_ids=("p1",),
             )
         ]
     )
@@ -82,12 +84,29 @@ def test_mine_returns_proposed_tasks(
 ) -> None:
     http, _ = mine_client
 
-    response = http.post(f"{_BASE}/mine", json={})
+    response = http.post(f"{_BASE}/mine", json={"projectIds": ["p1"]})
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "proposed"
     assert body["tasks"][0]["source_id"] == "github:org/repo:ISSUE:1"
+
+
+def test_mine_requires_project_ids(
+    mine_client: tuple[TestClient, StubLLMClient],
+) -> None:
+    http, _ = mine_client
+    response = http.post(f"{_BASE}/mine", json={})
+    assert response.status_code == 422
+
+
+def test_mine_empty_project_ids_yields_skipped(
+    mine_client: tuple[TestClient, StubLLMClient],
+) -> None:
+    http, _ = mine_client
+    response = http.post(f"{_BASE}/mine", json={"projectIds": []})
+    assert response.status_code == 200
+    assert response.json()["status"] == "skipped"
 
 
 def test_mine_skips_already_pooled_issue(
@@ -97,7 +116,10 @@ def test_mine_skips_already_pooled_issue(
 
     response = http.post(
         f"{_BASE}/mine",
-        json={"active_source_ids": ["github:org/repo:ISSUE:1"]},
+        json={
+            "projectIds": ["p1"],
+            "active_source_ids": ["github:org/repo:ISSUE:1"],
+        },
     )
 
     assert response.status_code == 200, response.text
@@ -111,7 +133,7 @@ def test_mine_stream_yields_a_task_item_and_a_done_matching_the_sync_endpoint(
 ) -> None:
     http, _ = mine_client
 
-    stream = http.post(f"{_BASE}/mine/stream", json={})
+    stream = http.post(f"{_BASE}/mine/stream", json={"projectIds": ["p1"]})
     assert stream.status_code == 200, stream.text
     assert stream.headers["content-type"].startswith("text/event-stream")
 

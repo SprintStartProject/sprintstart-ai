@@ -40,7 +40,7 @@ from onboarding.orientation_models import (
 from onboarding.progress import ProgressEvent, ProgressStream, drain
 from onboarding.similarity import OVERLAP_THRESHOLD, text_overlap
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.types import ScoredChunk
+from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -300,6 +300,7 @@ def stream_orientation(
     store: VectorStore,
     *,
     task_title: str,
+    project_ids: frozenset[str],
     task_body: str = "",
     labels: list[str] | None = None,
     touched_paths: list[str] | None = None,
@@ -330,6 +331,7 @@ def stream_orientation(
         unchanged_label="Nothing changed — the cached packet is current",
         empty_warning_label="The project has no indexed material yet",
         empty_done_label="No orientation could be assembled",
+        project_ids=project_ids,
     )
     if early_outcome is not None:
         yield from early_events
@@ -350,6 +352,7 @@ def stream_orientation(
             min_score=_MIN_SCORE,
             bm25_cache=bm25_cache,
             exclude_roles=GROUNDING_EXCLUDED_ROLES,
+            filters=RetrievalFilters(project_ids=project_ids),
         ):
             # A chunk retrieved for two steps keeps its better score; the model
             # decides which step it belongs under, and it appears once either way.
@@ -452,6 +455,7 @@ def assemble_orientation(
     store: VectorStore,
     *,
     task_title: str,
+    project_ids: frozenset[str],
     task_body: str = "",
     labels: list[str] | None = None,
     touched_paths: list[str] | None = None,
@@ -476,6 +480,7 @@ def assemble_orientation(
             llm,
             store,
             task_title=task_title,
+            project_ids=project_ids,
             task_body=task_body,
             labels=labels,
             touched_paths=touched_paths,

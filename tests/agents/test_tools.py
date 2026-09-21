@@ -124,6 +124,93 @@ def test_grep_tool_coerces_single_string_pattern() -> None:
     assert len(result.chunks) == 1
 
 
+def test_retrieve_tool_includes_immediate_neighbours() -> None:
+    embedding = [1.0] + [0.0] * 767
+    unrelated = [0.0, 1.0] + [0.0] * 766
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id=f"c{position}",
+                artifact_id="doc-1",
+                filename="auth.py",
+                text="target symbol" if position == 1 else f"context {position}",
+                embedding=embedding if position == 1 else unrelated,
+                position=position,
+            )
+            for position in range(3)
+        ]
+    )
+
+    result = RetrieveTool(StubLLMClient(embedding=embedding), store).execute(
+        {"query": "target symbol"}
+    )
+
+    assert [chunk.id for chunk in result.chunks] == ["c1", "c0", "c2"]
+
+
+def test_grep_tool_includes_immediate_neighbours() -> None:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id=f"c{position}",
+                artifact_id="doc-1",
+                filename="auth.py",
+                text="def parse_config():" if position == 1 else f"context {position}",
+                embedding=[0.0] * 768,
+                position=position,
+            )
+            for position in range(3)
+        ]
+    )
+
+    result = GrepTool(store).execute({"patterns": "parse_config"})
+
+    assert [chunk.id for chunk in result.chunks] == ["c1", "c0", "c2"]
+    assert [chunk.id for chunk in result.matched_chunks()] == ["c1"]
+
+
+def test_grep_context_expansion_preserves_source_and_time_filtered_hit() -> None:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="c0",
+                artifact_id="doc-1",
+                filename="auth.py",
+                text="context",
+                embedding=[0.0] * 768,
+                position=0,
+                source_system="GITHUB",
+                created_at="2025-06-01T00:00:00Z",
+            ),
+            Chunk(
+                id="c1",
+                artifact_id="doc-1",
+                filename="auth.py",
+                text="def parse_config():",
+                embedding=[0.0] * 768,
+                position=1,
+                source_system="GITHUB",
+                created_at="2025-06-01T00:00:00Z",
+            ),
+        ]
+    )
+
+    result = GrepTool(
+        store,
+        filters=RetrievalFilters(
+            source_systems=["GITHUB"],
+            time_from="2025-01-01T00:00:00Z",
+            time_to="2025-12-31T23:59:59Z",
+        ),
+    ).execute({"patterns": "parse_config"})
+
+    assert [chunk.id for chunk in result.chunks] == ["c1", "c0"]
+    assert [chunk.id for chunk in result.matched_chunks()] == ["c1"]
+
+
 class _NoArgs(BaseModel):
     pass
 

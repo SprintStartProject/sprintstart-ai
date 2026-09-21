@@ -132,7 +132,10 @@ def get_store() -> VectorStore:
             "CHROMA_PATH is not set — using ephemeral in-memory store, "
             "data will not persist"
         )
-    return ChromaVectorStore(path=path)
+    return ChromaVectorStore(
+        path=path,
+        revision_store=get_ingestion_metadata_store(),
+    )
 
 
 @lru_cache

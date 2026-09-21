@@ -32,7 +32,14 @@ class VectorStore(Protocol):
         self,
         artifact_id: str,
         exclude_ids: list[str] | None = None,
-    ) -> int: ...
+    ) -> int:
+        """Delete chunks behind a durable, fail-closed artifact tombstone.
+
+        The tombstone must be visible to retrieval before deletion starts and
+        cleared only after the backend confirms that every targeted chunk is
+        gone. A failed call leaves the tombstone live for a later retry.
+        """
+        ...
 
     def list_chunks(self, limit: int, offset: int = 0) -> list[Chunk]: ...
 
@@ -42,6 +49,19 @@ class VectorStore(Protocol):
         limit: int,
         offset: int = 0,
     ) -> list[Chunk]: ...
+
+    def list_chunks_by_positions(
+        self,
+        artifact_id: str,
+        positions: frozenset[int],
+        start_page: int | None = None,
+    ) -> list[Chunk]:
+        """Return embedding-free chunks at exact positions in one artifact.
+
+        PDF positions restart on every page, so callers must pass
+        ``start_page`` when resolving neighbours for a PDF chunk.
+        """
+        ...
 
     def count_by_artifact(self, artifact_id: str) -> int: ...
 
@@ -54,6 +74,10 @@ class VectorStore(Protocol):
     ) -> list[Chunk]: ...
 
     def all_ids(self) -> frozenset[str]: ...
+
+    def corpus_revision(self) -> int:
+        """Cheap, datastore-backed revision of all retrieval-visible corpus state."""
+        ...
 
     def retrieval_fingerprints(self) -> frozenset[str]: ...
 

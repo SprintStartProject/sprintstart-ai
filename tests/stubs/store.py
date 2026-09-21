@@ -21,10 +21,15 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 class StubVectorStore:
     def __init__(self) -> None:
         self.chunks: list[Chunk] = []
+        self._corpus_revision = 0
+        self._revoked_artifact_ids: set[str] = set()
 
     def add(self, chunks: list[Chunk]) -> None:
+        if not chunks:
+            return
         new_ids = {c.id for c in chunks}
         self.chunks = [c for c in self.chunks if c.id not in new_ids] + chunks
+        self._corpus_revision += 1
 
     def query(
         self,
@@ -39,6 +44,9 @@ class StubVectorStore:
         scored: list[ScoredChunk] = []
 
         for chunk in self.chunks:
+            if chunk.artifact_id in self._revoked_artifact_ids:
+                continue
+
             if not matches_retrieval_filters(chunk, filters):
                 continue
 
@@ -79,16 +87,31 @@ class StubVectorStore:
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
 
     def delete(self, artifact_id: str, exclude_ids: list[str] | None = None) -> int:
+        if artifact_id not in self._revoked_artifact_ids:
+            self._revoked_artifact_ids.add(artifact_id)
+            self._corpus_revision += 1
+
         before = len(self.chunks)
         self.chunks = [
             chunk
             for chunk in self.chunks
             if chunk.artifact_id != artifact_id or chunk.id in (exclude_ids or [])
         ]
-        return before - len(self.chunks)
+        deleted = before - len(self.chunks)
+        if deleted:
+            self._corpus_revision += 1
+
+        self._revoked_artifact_ids.discard(artifact_id)
+        self._corpus_revision += 1
+        return deleted
 
     def list_chunks(self, limit: int, offset: int = 0) -> list[Chunk]:
-        return list(self.chunks[offset : offset + limit])
+        page = self.chunks[offset : offset + limit]
+        return [
+            chunk
+            for chunk in page
+            if chunk.artifact_id not in self._revoked_artifact_ids
+        ]
 
     def list_chunks_by_artifact(
         self,
@@ -96,25 +119,65 @@ class StubVectorStore:
         limit: int,
         offset: int = 0,
     ) -> list[Chunk]:
+        if artifact_id in self._revoked_artifact_ids:
+            return []
         matching = [chunk for chunk in self.chunks if chunk.artifact_id == artifact_id]
         return matching[offset : offset + limit]
 
+    def list_chunks_by_positions(
+        self,
+        artifact_id: str,
+        positions: frozenset[int],
+        start_page: int | None = None,
+    ) -> list[Chunk]:
+        return sorted(
+            (
+                replace(chunk, embedding=[])
+                for chunk in self.chunks
+                if chunk.artifact_id == artifact_id
+                and chunk.position in positions
+                and (start_page is None or chunk.start_page == start_page)
+            ),
+            key=lambda chunk: (
+                chunk.start_page if chunk.start_page is not None else 0,
+                chunk.position if chunk.position is not None else -1,
+            ),
+        )
+
     def count_by_artifact(self, artifact_id: str) -> int:
+        if artifact_id in self._revoked_artifact_ids:
+            return 0
         return sum(1 for chunk in self.chunks if chunk.artifact_id == artifact_id)
 
     def all_chunks_without_embeddings(self) -> list[Chunk]:
         return list(self.iter_chunks_without_embeddings())
 
     def iter_chunks_without_embeddings(self) -> Iterator[Chunk]:
-        yield from self.chunks
+        yield from (
+            chunk
+            for chunk in self.chunks
+            if chunk.artifact_id not in self._revoked_artifact_ids
+        )
 
     def list_chunks_without_embeddings(
         self, limit: int, offset: int = 0
     ) -> list[Chunk]:
-        return list(self.chunks[offset : offset + limit])
+        page = self.chunks[offset : offset + limit]
+        return [
+            chunk
+            for chunk in page
+            if chunk.artifact_id not in self._revoked_artifact_ids
+        ]
 
     def all_ids(self) -> frozenset[str]:
-        return frozenset(chunk.id for chunk in self.chunks)
+        return frozenset(
+            chunk.id
+            for chunk in self.chunks
+            if chunk.artifact_id not in self._revoked_artifact_ids
+        )
+
+    def corpus_revision(self) -> int:
+        return self._corpus_revision
 
     def retrieval_fingerprints(self) -> frozenset[str]:
         return frozenset(
@@ -130,6 +193,7 @@ class StubVectorStore:
                 ]
             )
             for chunk in self.chunks
+            if chunk.artifact_id not in self._revoked_artifact_ids
         )
 
     def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
@@ -146,9 +210,19 @@ class StubVectorStore:
         project_ids: tuple[str, ...],
     ) -> int:
         normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
+        current = {
+            project_id
+            for chunk in self.chunks
+            if chunk.artifact_id == artifact_id
+            for project_id in chunk.project_ids
+        }
+        tombstoned = bool(current - set(normalized))
+        if tombstoned:
+            self._revoked_artifact_ids.add(artifact_id)
+            self._corpus_revision += 1
+
         updated = 0
         rewritten: list[Chunk] = []
-
         for chunk in self.chunks:
             if chunk.artifact_id != artifact_id:
                 rewritten.append(chunk)
@@ -157,12 +231,25 @@ class StubVectorStore:
             updated += 1
 
         self.chunks = rewritten
+        if updated:
+            self._corpus_revision += 1
+        if tombstoned:
+            self._revoked_artifact_ids.discard(artifact_id)
+            self._corpus_revision += 1
         return updated
 
     def remove_project(self, project_id: str) -> int:
+        tombstones = {
+            chunk.artifact_id
+            for chunk in self.chunks
+            if project_id in chunk.project_ids
+        }
+        if tombstones:
+            self._revoked_artifact_ids.update(tombstones)
+            self._corpus_revision += 1
+
         updated = 0
         rewritten: list[Chunk] = []
-
         for chunk in self.chunks:
             if project_id not in chunk.project_ids:
                 rewritten.append(chunk)
@@ -178,6 +265,11 @@ class StubVectorStore:
             updated += 1
 
         self.chunks = rewritten
+        if updated:
+            self._corpus_revision += 1
+        if tombstones:
+            self._revoked_artifact_ids.difference_update(tombstones)
+            self._corpus_revision += 1
         return updated
 
     def count(self) -> int:

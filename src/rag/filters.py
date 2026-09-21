@@ -139,6 +139,7 @@ def where_filter_for_chroma(
     filters: RetrievalFilters | None,
     exclude_roles: frozenset[SourceRole] = frozenset(),
     exclusions: SourceExclusions = SourceExclusions(),
+    revoked_artifact_ids: frozenset[str] = frozenset(),
 ) -> Any | None:
     """Translate every eligibility constraint into a Chroma ``where`` clause.
 
@@ -192,6 +193,9 @@ def where_filter_for_chroma(
             conditions.append(
                 {"created_at_ts": {"$lte": timestamp_from_iso(filters.time_to)}}
             )
+
+    if revoked_artifact_ids:
+        conditions.append({"artifact_id": {"$nin": sorted(revoked_artifact_ids)}})
 
     if exclude_roles:
         conditions.append({"source_role": {"$nin": sorted(exclude_roles)}})

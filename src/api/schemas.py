@@ -1135,6 +1135,16 @@ class FaqGroupResponse(BaseModel):
 
 
 class MineStarterWorkRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_ids: ProjectIds = Field(
+        alias="projectIds",
+        description=(
+            "Projects this request is scoped to. Multi-project scoping is supported; "
+            "an empty list scopes to no projects (admitting no material)."
+        ),
+        examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
+    )
     active_source_ids: list[str] = Field(
         default=[],
         description=(
@@ -1160,6 +1170,16 @@ class MineStarterWorkRequest(BaseModel):
 
 
 class AssembleOrientationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_ids: ProjectIds = Field(
+        alias="projectIds",
+        description=(
+            "Projects this request is scoped to. Multi-project scoping is supported; "
+            "an empty list scopes to no projects (admitting no material)."
+        ),
+        examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
+    )
     task_title: str = Field(description="The task the packet orients somebody for.")
     task_body: str = ""
     labels: list[str] = Field(default_factory=list)
@@ -1182,6 +1202,16 @@ class AssembleOrientationRequest(BaseModel):
 
 
 class AssembleDiagramRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_ids: ProjectIds = Field(
+        alias="projectIds",
+        description=(
+            "Projects this request is scoped to. Multi-project scoping is supported; "
+            "an empty list scopes to no projects (admitting no material)."
+        ),
+        examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
+    )
     subject: str = Field(
         description=(
             "The question the diagram answers -- 'how a request reaches the "
@@ -1230,6 +1260,10 @@ class AssemblePhaseRequest(BaseModel):
             "if any. Idempotency is per phase: an unchanged corpus yields "
             "`unchanged` so cached content can be served without regeneration."
         ),
+    )
+    industry: str | None = Field(
+        default=None,
+        description="Optional detected or user-specified project industry/domain.",
     )
 
 
@@ -1563,9 +1597,20 @@ class SkillCatalogItem(BaseModel):
     )
 
 
-class SkillSuggestionRequest(ProjectScopedRequest):
+class SkillSuggestionRequest(BaseModel):
     """Request to suggest skills for a role in a project."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: ProjectId | None = Field(
+        alias="projectId",
+        default=None,
+        description=(
+            "Optional project this request is scoped to. When absent, retrieval "
+            "is skipped and only universal/role-typical skills are suggested."
+        ),
+        examples=["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
+    )
     role_name: str = Field(
         alias="roleName",
         min_length=1,
