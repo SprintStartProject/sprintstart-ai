@@ -70,6 +70,32 @@ _FIXTURE_CLAUSE = (
 
 _CLAIM_CLAUSE = "- When the hire picks a suggested task, offer `claim_goal`.\n"
 
+# The one question this mentor exists for, and the one it answered from the wrong
+# place. "What should I work on?" is a question about *this hire*, but Starter Work
+# is also a product noun -- so a mentor told to use `search_docs` for how the product
+# works explains the feature, accurately, and never names a task. The ranking exists
+# only behind the tool: the corpus cannot know which tasks fit this hire, and a
+# summary of an earlier visit is a record of what was suggested then, not now.
+_SUGGEST_CLAUSE = (
+    "- When the hire asks what to work on -- in any wording, including naming "
+    "Starter Work or saying somebody told them to pick something up -- call "
+    "`get_suggested_tasks` and present what it returns. That ranking is the only "
+    "place these suggestions exist, so never answer this from `search_docs`, from "
+    "the conversation summary, or from a list you gave earlier in this visit.\n"
+    "- If it comes back with nothing to suggest, say so plainly and say who can put "
+    "work there. A task you assembled yourself is not one anybody has agreed to.\n"
+)
+
+# Separate from the clause above because it is only true when the arrival tool is
+# mounted, and because it is the specific way the answer went missing: arrival is
+# read first, the turn pauses for the backend to run it, and the hop that resumes
+# has already said something helpful about setup. Naming both tools in one reply is
+# what stops the question being dropped on the way back.
+_SUGGEST_AFTER_ARRIVAL_CLAUSE = (
+    "- Reading `get_arrival_steps` first does not stand in for that call. Both "
+    "belong in the same reply: what is outstanding, and the tasks themselves.\n"
+)
+
 # Deliberately an *offer*, and deliberately in the conversation. There is no
 # separate intake mode and no questionnaire: a hire meets the mentor and, if they
 # want to, is placed by talking to them. The clause has to say all three of "offer,
@@ -210,6 +236,13 @@ def build_persona(
             f"process works, and the hire-state tools ({rendered}) for the hire's "
             "own progress.\n"
         )
+
+    # After the list above, which it narrows: that clause sorts tools by subject, and
+    # "what should I work on" belongs to no subject cleanly enough to be routed by it.
+    if "get_suggested_tasks" in available:
+        parts.append(_SUGGEST_CLAUSE)
+        if "get_arrival_steps" in available:
+            parts.append(_SUGGEST_AFTER_ARRIVAL_CLAUSE)
 
     # The escalation offer only makes sense when the hire can actually escalate.
     escalation = (

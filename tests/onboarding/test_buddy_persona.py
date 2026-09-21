@@ -86,6 +86,58 @@ def test_the_arrival_clause_is_absent_without_the_tool() -> None:
     assert "Before suggesting anything to work on" not in persona
 
 
+def test_asking_what_to_work_on_is_routed_to_the_suggestion_tool() -> None:
+    """The bug this clause exists for: the mentor answered the question without ever
+    naming a task, because the hire-state list sorts tools by subject and "what
+    should I work on" is not cleanly the hire's own progress."""
+    persona = build_persona(_ALL_TOOLS)
+
+    assert "When the hire asks what to work on" in persona
+    assert "call `get_suggested_tasks` and present what it returns" in persona
+
+
+def test_starter_work_is_never_answered_from_the_corpus() -> None:
+    """Starter Work is a product noun as well as this hire's queue, and
+    `search_docs` is described as covering how the product works -- so without this
+    the model explains the feature, accurately, and names no task."""
+    persona = build_persona(_ALL_TOOLS)
+
+    assert "naming Starter Work" in persona
+    assert "never answer this from `search_docs`" in persona
+    assert "from the conversation summary" in persona
+
+
+def test_an_empty_ranking_is_reported_rather_than_filled_in() -> None:
+    persona = build_persona(_ALL_TOOLS)
+
+    assert "nothing to suggest" in persona
+    assert "A task you assembled yourself is not one anybody has agreed to" in persona
+
+
+def test_the_arrival_read_does_not_stand_in_for_the_suggestion() -> None:
+    """Arrival pauses the turn for the backend to run it, and the hop that resumes
+    has already said something helpful. Both tools belong in the one reply."""
+    persona = build_persona(_ALL_TOOLS)
+
+    assert "does not stand in for that call" in persona
+    assert "Both belong in the same reply" in persona
+
+
+def test_without_the_arrival_tool_nothing_is_said_about_reading_it_first() -> None:
+    persona = build_persona([t for t in _ALL_TOOLS if t != "get_arrival_steps"])
+
+    assert "When the hire asks what to work on" in persona
+    assert "does not stand in for that call" not in persona
+
+
+def test_the_routing_rule_is_absent_without_the_suggestion_tool() -> None:
+    """A role with no starter work mounted must not be told to call for it."""
+    persona = build_persona([t for t in _ALL_TOOLS if t != "get_suggested_tasks"])
+
+    assert "get_suggested_tasks" not in persona
+    assert "When the hire asks what to work on" not in persona
+
+
 def test_default_vocabulary_is_the_engineering_wording() -> None:
     persona = build_persona(_ALL_TOOLS, DEFAULT_VOCABULARY)
 
@@ -202,6 +254,7 @@ def test_capabilities_off_never_offers_an_escalation_or_a_claim() -> None:
     assert "flag_to_pm" not in persona
     assert "claim_goal" not in persona
     assert "get_arrival_steps" not in persona
+    assert "get_suggested_tasks" not in persona
 
 
 def test_team_mode_addresses_the_manager_not_a_hire() -> None:
@@ -222,6 +275,10 @@ def test_team_mode_drops_every_hire_directed_clause() -> None:
     assert "get_competencies_to_assess" not in persona
     assert "record_assessment" not in persona
     assert "hire-state tools" not in persona
+    # The identity already forbids it; dropping the routing rule as well means a
+    # backend that one day mounts the tool still cannot hand a manager a task list.
+    assert "get_suggested_tasks" not in persona
+    assert "what to work on" not in persona
 
 
 def test_team_mode_states_situations_as_facts_about_the_situation() -> None:
