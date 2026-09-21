@@ -1395,6 +1395,27 @@ class BuddyAgentRequest(BaseModel):
             "to no projects (admitting no material)."
         ),
     )
+    capabilities_enabled: bool = Field(
+        default=True,
+        description=(
+            "False when the reader asked the corpus rather than the mentor: the "
+            "persona then says it is answering from the project's material only "
+            "and offers to do nothing. Send it on every hop — the persona is "
+            "rebuilt on each one, so a hop that drops it changes mode mid-turn."
+        ),
+    )
+    team_mode: bool = Field(
+        default=False,
+        description=(
+            "True when the reader is a project's manager asking about that "
+            "project's team, rather than a hire asking about their own "
+            "onboarding. The persona then addresses a manager, states team "
+            "members' situations as facts rather than judgments, and offers "
+            "changes for the manager to confirm instead of claiming to have made "
+            "them. Send it on every hop, for the same reason as "
+            "`capabilities_enabled`."
+        ),
+    )
 
 
 class BuddyAgentResponse(BaseModel):
@@ -1441,7 +1462,17 @@ class BuddyOpenRequest(BaseModel):
         default="",
         description=(
             "A plain-text snapshot of the hire's current state (pull requests, tasks, "
-            "competencies) for the greeting to ground itself in."
+            "competencies) for the greeting to ground itself in. In team mode this is "
+            "the team's attention list instead."
+        ),
+    )
+    team_mode: bool = Field(
+        default=False,
+        description=(
+            "True when a project's manager is opening a team conversation. The "
+            "greeting then addresses a manager about their team — `state` is the "
+            "team's attention list, not the reader's own onboarding — and the "
+            "suggested next step is a question about the team."
         ),
     )
 

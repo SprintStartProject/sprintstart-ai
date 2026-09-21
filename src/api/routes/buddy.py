@@ -84,6 +84,10 @@ def buddy_agent(
     Executes ``search_docs`` locally (retrieval + citations) and returns as soon as it
     either has a final answer or needs a backend-only tool run. The backend carries the
     ``messages`` list back verbatim, each pending tool's result appended as a ``tool``.
+
+    ``capabilities_enabled`` and ``team_mode`` pick the persona. Both are read on every
+    hop rather than only the first: the persona is rebuilt each time, so a resume hop
+    that omitted one would finish the turn in the other mode.
     """
     messages = [_to_message(m) for m in body.messages]
     backend_tools = [_to_toolspec(t) for t in body.backend_tools]
@@ -101,6 +105,8 @@ def buddy_agent(
                 contribution_verb_past=body.vocabulary.contribution_verb_past,
             ),
             project_ids=frozenset(body.project_ids),
+            capabilities_enabled=body.capabilities_enabled,
+            team_mode=body.team_mode,
         )
     except LLMUnavailableError as exc:
         raise HTTPException(
@@ -194,6 +200,9 @@ def buddy_open_stream(
     Emits ``token`` events carrying the greeting as it arrives and one terminal
     ``done`` carrying the whole greeting and any suggested action. Degrades to a plain
     welcome rather than erroring: opening the buddy must never fail the page.
+
+    With ``team_mode`` the reader is a project's manager and ``state`` is their team's
+    attention list, so both the prompt and that plain welcome address a manager.
     """
 
     def event_stream() -> Iterator[str]:
@@ -203,6 +212,7 @@ def buddy_open_stream(
                 recent=[_to_message(m) for m in body.recent],
                 state=body.state,
                 llm=llm,
+                team_mode=body.team_mode,
             ):
                 yield sse_event(event)
         except LLMUnavailableError as exc:
