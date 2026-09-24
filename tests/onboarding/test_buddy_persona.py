@@ -278,6 +278,14 @@ def test_a_wrong_answer_can_become_a_refresher_step_but_never_the_answer() -> No
     assert "not after every wrong answer" in persona
 
 
+def test_phases_are_a_choice_not_a_queue() -> None:
+    """A hire who finished phase 1 and picked phase 3 was sent back to phase 2."""
+    persona = build_persona([*_ALL_TOOLS, *_PATH_TOOLS])
+
+    assert "Phases are not a queue" in persona
+    assert "never tell them to take the lowest number first" in persona
+
+
 def test_the_path_is_described_as_a_graph_not_a_sequence() -> None:
     """It told a hire "after #6 comes #7" about items that did not depend on each
     other, because it read the page's numbering as an order."""
