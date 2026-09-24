@@ -71,6 +71,7 @@ _MIN_NODES = 2
 # page load, so a diagram that churns between loads would read as the system
 # changing its mind about the codebase.
 _TEMPERATURE = 0.0
+_MAX_GENERATION_ATTEMPTS = 2
 
 # Delimiter for the model-authored subject in the prompt. Same device the
 # artifact judge uses for hire-authored pull request text, for the same reason,
@@ -470,16 +471,46 @@ def stream_diagram(
         return outcome
 
     yield progress.stage("generating", f"Drawing it from {len(chunks)} source(s)")
-    raw = llm.generate(_build_prompt(subject, chunks), temperature=_TEMPERATURE)
-    try:
-        payload = _parse_payload(raw)
-    except AssemblyError as exc:
-        logger.warning("Diagram assembly failed for subject %r: %s", subject, exc)
+    messages = _build_prompt(subject, chunks)
+    # One correction round, as phase assembly and orientation have: a small local
+    # model breaks the JSON now and then, and asked back it usually fixes it.
+    parse_error: AssemblyError | None = None
+    payload: _GenPayload | None = None
+    for attempt in range(_MAX_GENERATION_ATTEMPTS):
+        raw = llm.generate(messages, temperature=_TEMPERATURE)
+        try:
+            payload = _parse_payload(raw)
+            break
+        except AssemblyError as exc:
+            parse_error = exc
+            logger.warning(
+                "Diagram assembly attempt %d failed for subject %r: %s",
+                attempt + 1,
+                subject,
+                exc,
+            )
+            if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
+                yield progress.stage("generating", "Correcting invalid generated JSON")
+                messages = [
+                    *messages,
+                    Message(role="assistant", content=raw),
+                    Message(
+                        role="user",
+                        content=(
+                            f"That response could not be validated: {exc}. Return the "
+                            "same grounded diagram again as one valid JSON object "
+                            "matching the schema exactly. Return JSON only."
+                        ),
+                    ),
+                ]
+
+    if payload is None:
+        assert parse_error is not None
         outcome = DiagramOutcome(
             status="skipped",
             chunks_retrieved=len(chunks),
             chunks_collapsed=collapsed,
-            notes=[str(exc)],
+            notes=[str(parse_error)],
         )
         yield progress.warning("The generated diagram could not be read")
         yield progress.done("No diagram could be assembled", _dump(outcome))

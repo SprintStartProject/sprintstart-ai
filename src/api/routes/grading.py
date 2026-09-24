@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_MAX_GRADING_ATTEMPTS = 2
+
 SYSTEM_PROMPT = """
 You grade short-text answers to onboarding knowledge-check questions.
 
@@ -62,6 +64,45 @@ def _build_prompt(answers: list[GradeAnswerItem]) -> list[Message]:
         Message(role="system", content=SYSTEM_PROMPT),
         Message(role="user", content="\n\n".join(blocks)),
     ]
+
+
+def _grade(llm: LLMClient, to_grade: list[GradeAnswerItem]) -> dict[str, _GradedItem]:
+    """Grade in one call, asking once more when the reply is not valid JSON.
+
+    An unreadable reply marks every answer in it "could not be graded" -- which the
+    caller records as wrong. A small local model breaks its JSON now and then, and
+    a hire whose right answer came back wrong for that reason has been told
+    something false about their own knowledge. One correction round is cheap
+    against that.
+    """
+    messages = _build_prompt(to_grade)
+    for attempt in range(_MAX_GRADING_ATTEMPTS):
+        try:
+            raw = llm.generate(messages)
+        except LLMUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        try:
+            payload = _Payload.model_validate_json(extract_json_object(raw))
+            return {item.id: item for item in payload.results}
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "Could not parse grade-answers output (attempt %d): %s",
+                attempt + 1,
+                exc,
+            )
+            messages = [
+                *messages,
+                Message(role="assistant", content=raw),
+                Message(
+                    role="user",
+                    content=(
+                        f"That response could not be validated: {exc}. Return the same "
+                        "grades again as one valid JSON object matching the schema "
+                        "exactly. Return JSON only."
+                    ),
+                ),
+            ]
+    return {}
 
 
 @router.post(
@@ -121,17 +162,7 @@ def grade_answers(
             )
 
     if to_grade:
-        try:
-            raw = llm.generate(_build_prompt(to_grade))
-        except LLMUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-        try:
-            payload = _Payload.model_validate_json(extract_json_object(raw))
-            graded_by_id = {item.id: item for item in payload.results}
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Could not parse grade-answers output: %s", exc)
-            graded_by_id = {}
+        graded_by_id = _grade(llm, to_grade)
 
         for item in to_grade:
             graded = graded_by_id.get(item.id)
