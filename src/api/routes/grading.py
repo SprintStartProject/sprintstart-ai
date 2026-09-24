@@ -90,6 +90,8 @@ def _grade(llm: LLMClient, to_grade: list[GradeAnswerItem]) -> dict[str, _Graded
                 attempt + 1,
                 exc,
             )
+            if attempt + 1 == _MAX_GRADING_ATTEMPTS:
+                break
             messages = [
                 *messages,
                 Message(role="assistant", content=raw),

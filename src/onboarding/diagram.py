@@ -234,6 +234,24 @@ def _build_prompt(subject: str, chunks: list[ScoredChunk]) -> list[Message]:
     ]
 
 
+def _correction_prompt(
+    messages: list[Message], raw: str, error: AssemblyError
+) -> list[Message]:
+    """Ask once for the same diagram with only its JSON corrected."""
+    return [
+        *messages,
+        Message(role="assistant", content=raw),
+        Message(
+            role="user",
+            content=(
+                f"That response could not be validated: {error}. Return the same "
+                "grounded diagram again as one valid JSON object matching the "
+                "schema exactly. Return JSON only."
+            ),
+        ),
+    ]
+
+
 def _parse_payload(raw: str) -> _GenPayload:
     try:
         return _GenPayload.model_validate_json(extract_json_object(raw))
@@ -491,18 +509,7 @@ def stream_diagram(
             )
             if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
                 yield progress.stage("generating", "Correcting invalid generated JSON")
-                messages = [
-                    *messages,
-                    Message(role="assistant", content=raw),
-                    Message(
-                        role="user",
-                        content=(
-                            f"That response could not be validated: {exc}. Return the "
-                            "same grounded diagram again as one valid JSON object "
-                            "matching the schema exactly. Return JSON only."
-                        ),
-                    ),
-                ]
+                messages = _correction_prompt(messages, raw, exc)
 
     if payload is None:
         assert parse_error is not None

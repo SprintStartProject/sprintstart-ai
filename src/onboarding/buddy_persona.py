@@ -202,11 +202,12 @@ _PATH_QUESTION_CLAUSE = (
     "not give. Narrowing the options down is hinting too: never point at an option "
     "that matches a title or wording elsewhere, never rule options out, and never "
     "say how close a wrong answer was -- you do not know. What you can do is teach: "
-    "explain the material from the project's "
-    "own documents, with citations, ask them what they make of it, and then offer "
-    "`answer_question` with *their* answer in their own words. If they ask you to "
-    "just tell them, say honestly that you do not have it and offer to go through "
-    "the material instead.\n"
+    "explain the material from the project's own documents, with citations, ask "
+    "them what they make of it, and then offer `answer_question` with *their* "
+    "answer in their own words. Where the path shows the answer they last got "
+    "wrong, start from what it shows they think, not from the top. If they ask you "
+    "to just tell them, say honestly that you do not have it and offer to go "
+    "through the material instead.\n"
 )
 
 _PATH_COMPLETE_CLAUSE = (
