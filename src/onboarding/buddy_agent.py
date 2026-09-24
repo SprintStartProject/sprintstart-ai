@@ -114,8 +114,15 @@ def _persona_prompt(
     summary: str | None,
     tool_names: Collection[str],
     vocabulary: Vocabulary,
+    capabilities_enabled: bool,
+    team_mode: bool,
 ) -> str:
-    persona = build_persona(tool_names, vocabulary)
+    persona = build_persona(
+        tool_names,
+        vocabulary,
+        capabilities_enabled=capabilities_enabled,
+        team_mode=team_mode,
+    )
     if not summary:
         return persona
     return persona + _SUMMARY_HEADER + summary
@@ -132,7 +139,12 @@ def _ensure_persona(
     summary: str | None,
     tool_names: Collection[str],
     vocabulary: Vocabulary,
+    capabilities_enabled: bool,
+    team_mode: bool,
 ) -> list[Message]:
+    # The system message a resume carries is replaced, not kept: only its summary
+    # survives. So both modes have to arrive on every hop -- a hop that dropped one
+    # would rebuild the default persona mid-turn and answer a manager as a hire.
     effective_summary = summary
     rest = messages
     if messages and messages[0]["role"] == "system":
@@ -141,7 +153,13 @@ def _ensure_persona(
         rest = messages[1:]
     persona_msg = Message(
         role="system",
-        content=_persona_prompt(effective_summary, tool_names, vocabulary),
+        content=_persona_prompt(
+            effective_summary,
+            tool_names,
+            vocabulary,
+            capabilities_enabled,
+            team_mode,
+        ),
     )
     return [persona_msg, *rest]
 
@@ -212,6 +230,8 @@ def run_agent_turn(
     prior_summary: str | None = None,
     vocabulary: Vocabulary = DEFAULT_VOCABULARY,
     project_ids: frozenset[str] | None = None,
+    capabilities_enabled: bool = True,
+    team_mode: bool = False,
 ) -> AgentTurnResult:
     """Runs one agent turn: executes ``search_docs`` locally, pauses on backend tools.
 
@@ -221,6 +241,10 @@ def run_agent_turn(
     more with no tools, forcing an answer.
 
     ``prior_summary`` stands in for everything older than ``messages``.
+
+    ``capabilities_enabled`` and ``team_mode`` choose the persona and must be passed
+    on every hop, because the persona is rebuilt on every hop: a resume that lost
+    either would answer the rest of the turn as the default mentor.
 
     This turn does not fold anything, and used not to be able to say that. A
     ``summarize_upto`` argument asked it to compact the oldest window messages
@@ -240,7 +264,14 @@ def run_agent_turn(
     # The persona describes exactly the tools this hire was mounted, never a fixed
     # catalogue: the backend decides what a given role can even have, and a mentor
     # told about a tool it does not have will offer the hire something impossible.
-    work = _ensure_persona(window, summary, {SEARCH_DOCS, *backend_names}, vocabulary)
+    work = _ensure_persona(
+        window,
+        summary,
+        {SEARCH_DOCS, *backend_names},
+        vocabulary,
+        capabilities_enabled,
+        team_mode,
+    )
     resolved_exclusions = exclusions if exclusions is not None else SourceExclusions()
     citations: list[Citation] = []
     seen_chunk_ids: set[str] = set()

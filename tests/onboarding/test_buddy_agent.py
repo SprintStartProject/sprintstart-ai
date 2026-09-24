@@ -365,3 +365,89 @@ def test_the_turn_never_folds_however_long_the_window_is() -> None:
     contents = [msg.get("content") for msg in result.messages]
     assert all(f"m{i}" in contents for i in range(1, 40))
     assert result.final is True
+
+
+def test_team_mode_builds_the_manager_persona() -> None:
+    llm = ScriptedLLMClient(turns=[], answer="answer")
+
+    run_agent_turn(
+        [_user("who needs me?")],
+        [_tool("get_team_attention")],
+        llm,
+        StubVectorStore(),
+        team_mode=True,
+    )
+
+    persona = _system_of(llm.chat_calls[0])
+    assert "manager of one project" in persona
+    assert "`get_team_attention`" in persona
+
+
+def test_capabilities_off_builds_the_search_only_persona() -> None:
+    llm = ScriptedLLMClient(turns=[], answer="answer")
+
+    run_agent_turn(
+        [_user("how does deployment work?")],
+        [],
+        llm,
+        StubVectorStore(),
+        capabilities_enabled=False,
+    )
+
+    assert "`search_docs` and nothing else" in _system_of(llm.chat_calls[0])
+
+
+def test_both_modes_survive_a_resume_hop_that_already_has_a_system_message() -> None:
+    """The resume replaces the system message and keeps only its summary, so a mode
+    that did not arrive again would finish the turn as the default mentor."""
+    llm = ScriptedLLMClient(turns=[[("get_team_attention", {})]], answer="answer")
+    first = run_agent_turn(
+        [_user("who needs me?")],
+        [_tool("get_team_attention")],
+        llm,
+        StubVectorStore(),
+        prior_summary="Earlier turns about the team.",
+        team_mode=True,
+    )
+
+    llm2 = ScriptedLLMClient(turns=[], answer="answer")
+    run_agent_turn(
+        [*first.messages, Message(role="tool", content="nobody is blocked")],
+        [_tool("get_team_attention")],
+        llm2,
+        StubVectorStore(),
+        team_mode=True,
+    )
+
+    persona = _system_of(llm2.chat_calls[0])
+    assert "manager of one project" in persona
+    assert "Earlier turns about the team." in persona
+
+
+def test_a_resume_that_lost_team_mode_is_the_default_mentor_again() -> None:
+    """Pinning the failure the flag exists to prevent: it is per hop, not per turn."""
+    llm = ScriptedLLMClient(turns=[], answer="answer")
+    first = run_agent_turn(
+        [_user("who needs me?")],
+        [_tool("get_team_attention")],
+        llm,
+        StubVectorStore(),
+        team_mode=True,
+    )
+
+    llm2 = ScriptedLLMClient(turns=[], answer="answer")
+    run_agent_turn(
+        first.messages, [_tool("get_team_attention")], llm2, StubVectorStore()
+    )
+
+    assert "manager of one project" not in _system_of(llm2.chat_calls[0])
+
+
+def test_the_modes_default_to_todays_behaviour() -> None:
+    llm = ScriptedLLMClient(turns=[], answer="answer")
+
+    run_agent_turn([_user("hello")], [_GET_MY_METRICS], llm, StubVectorStore())
+
+    persona = _system_of(llm.chat_calls[0])
+    assert "the mentor who guides a new hire" in persona
+    assert "search_docs` and nothing else" not in persona
