@@ -547,7 +547,7 @@ def test_team_mode_addresses_the_manager_not_a_hire() -> None:
 
     assert "manager of one project" in persona
     assert "Never greet them as a new hire" in persona
-    assert "the mentor who guides a new hire" not in persona
+    assert "the tutor who guides a new hire" not in persona
 
 
 def test_team_mode_drops_every_hire_directed_clause() -> None:

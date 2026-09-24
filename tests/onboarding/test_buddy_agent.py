@@ -449,5 +449,5 @@ def test_the_modes_default_to_todays_behaviour() -> None:
     run_agent_turn([_user("hello")], [_GET_MY_METRICS], llm, StubVectorStore())
 
     persona = _system_of(llm.chat_calls[0])
-    assert "the mentor who guides a new hire" in persona
+    assert "the tutor who guides a new hire" in persona
     assert "search_docs` and nothing else" not in persona
