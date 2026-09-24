@@ -225,6 +225,29 @@ def test_unparseable_output_is_skipped_not_a_half_packet() -> None:
     assert outcome.packet is None
 
 
+def test_broken_json_is_corrected_once_rather_than_losing_the_packet() -> None:
+    """A local model's one missing quote used to cost the hire the whole packet."""
+    store = _store("run make dev to start the service locally")
+    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    good = llm.generate
+    replies = iter(['{"summary": "cut off', None])
+    seen: list[list[object]] = []
+
+    def flaky(messages: list[object], **kwargs: object) -> str:
+        seen.append(messages)
+        reply = next(replies)
+        return reply if reply is not None else good(messages, **kwargs)  # type: ignore[arg-type]
+
+    llm.generate = flaky  # type: ignore[method-assign]
+
+    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+
+    assert outcome.status == "assembled"
+    # The second call carries the broken reply and asks for it corrected.
+    assert len(seen) == 2
+    assert "could not be validated" in str(seen[1][-1])
+
+
 def test_unchanged_corpus_serves_the_cached_packet() -> None:
     store = _store("run make dev to start the service locally")
     llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
