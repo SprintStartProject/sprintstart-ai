@@ -908,6 +908,41 @@ class RunArtifactsSyncResponse(BaseModel):
     )
 
 
+# What the knowledge base shows as an artifact's AI index state. ``indexed``
+# is the metadata store's ``completed``, renamed for the reader: it means the
+# chatbot can answer from the artifact. ``unknown`` means this service holds
+# no record of the id at all.
+ArtifactIndexStatus = Literal["indexed", "processing", "failed", "deindexed", "unknown"]
+
+# One requested id. Non-empty so that a stray ``artifact_ids=`` is a client
+# error rather than a lookup that can only ever answer ``unknown``.
+StatusArtifactId = Annotated[str, StringConstraints(min_length=1)]
+
+
+class ArtifactIngestStatusResponse(BaseModel):
+    """One artifact's index state, as the AI service recorded it."""
+
+    artifact_id: str = Field(description="The requested artifact id, verbatim.")
+    status: ArtifactIndexStatus
+    updated_at: str | None = Field(
+        default=None,
+        description="ISO timestamp of the last recorded change; null if unknown.",
+    )
+    chunk_count: int | None = Field(
+        default=None,
+        description="Chunks recorded for the artifact; null if unknown.",
+    )
+
+
+class IngestStatusResponse(BaseModel):
+    items: list[ArtifactIngestStatusResponse] = Field(
+        description=(
+            "One entry per distinct requested id, in the order the ids were "
+            "first requested. An id this service never saw is 'unknown'."
+        ),
+    )
+
+
 # ── Connector / source enable-disable ───────────────────────────────────────
 
 
