@@ -349,12 +349,28 @@ _ACTION_TOOLS = (
 )
 
 _SEARCH_ONLY_CLAUSE = (
-    "- This turn you have `search_docs` and nothing else: you are answering from "
-    "the project's own material, not acting on anybody's behalf. Answer what the "
-    "material covers, say plainly where it does not, and do not offer to record, "
-    "claim, flag or change anything -- nothing is mounted to do it with, so an "
-    "offer you make here cannot be kept.\n"
+    "- This turn you can only search: you are answering from the project's own "
+    "material, not acting on anybody's behalf. Answer what the material covers, "
+    "say plainly where it does not, and do not offer to record, claim, flag or "
+    "change anything -- nothing is mounted to do it with, so an offer you make "
+    "here cannot be kept.\n"
 )
+
+# Mounted with `grep` only: a search-only reader asking after an exact identifier
+# otherwise gets semantic neighbours of it, which is how chat answered it before
+# the reader moved to the buddy.
+_GREP_CLAUSE = (
+    "- Use `search_docs` for how something works and `grep` for an exact name -- "
+    "a function, a class, a config key, an error message. For a question with "
+    "several parts, ask for every search you need at once.\n"
+)
+
+
+def _search_only_clauses(available: set[str]) -> list[str]:
+    if "grep" in available:
+        return [_SEARCH_ONLY_CLAUSE, _GREP_CLAUSE]
+    return [_SEARCH_ONLY_CLAUSE]
+
 
 _TEAM_IDENTITY = (
     "You are the onboarding buddy in team mode: you are talking to the manager of "
@@ -430,8 +446,9 @@ def build_persona(
             to the engineering wording when a caller supplies nothing. Unused in
             team mode, whose prose is about people rather than about their work.
         capabilities_enabled: False when the reader asked the corpus rather than the
-            mentor. Nothing but ``search_docs`` is mounted, and the persona says so
-            instead of offering what it cannot do.
+            mentor. Only the searches (``search_docs``, plus ``grep`` when it is in
+            ``tool_names``) are mounted, and the persona says so instead of
+            offering what it cannot do.
         team_mode: True when the reader is a project's manager asking about that
             project's team, rather than a hire asking about their own onboarding.
 
@@ -446,7 +463,7 @@ def build_persona(
         # Nothing below is mounted, so every clause that follows would drop anyway.
         # Said outright, because a mentor who still sounds able to act turns its own
         # refusal into something that reads like a fault.
-        parts.append(_SEARCH_ONLY_CLAUSE)
+        parts.extend(_search_only_clauses(available))
         parts.append(_GROUNDING_CLAUSE + ".\n")
         parts.append(_FIXTURE_CLAUSE)
         return "".join(parts)
@@ -541,7 +558,7 @@ def _team_persona(available: set[str], capabilities_enabled: bool) -> str:
     """
     parts = [_TEAM_IDENTITY]
     if not capabilities_enabled:
-        parts.append(_SEARCH_ONLY_CLAUSE)
+        parts.extend(_search_only_clauses(available))
         parts.append(_TEAM_FACTS_CLAUSE)
         parts.append(_GROUNDING_CLAUSE + ".\n")
         parts.append(_FIXTURE_CLAUSE)

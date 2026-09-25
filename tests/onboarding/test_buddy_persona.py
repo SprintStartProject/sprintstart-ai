@@ -527,7 +527,7 @@ _TEAM_TOOLS = (
 def test_capabilities_off_says_it_is_answering_from_the_material() -> None:
     persona = build_persona(["search_docs"], capabilities_enabled=False)
 
-    assert "`search_docs` and nothing else" in persona
+    assert "This turn you can only search" in persona
     assert "do not offer to record, claim, flag or change anything" in persona
 
 
@@ -639,7 +639,7 @@ def test_team_mode_with_capabilities_off_is_search_only_and_still_a_manager() ->
     persona = build_persona(_TEAM_TOOLS, team_mode=True, capabilities_enabled=False)
 
     assert "manager of one project" in persona
-    assert "`search_docs` and nothing else" in persona
+    assert "This turn you can only search" in persona
     assert "never as a judgment of the person" in persona
     assert "get_team_attention" not in persona
 
@@ -649,3 +649,15 @@ def test_the_defaults_are_todays_behaviour() -> None:
         _ALL_TOOLS, capabilities_enabled=True, team_mode=False
     )
     assert build_persona(_ALL_TOOLS, DEFAULT_VOCABULARY) == build_persona(_ALL_TOOLS)
+
+
+def test_search_only_names_grep_only_when_it_is_mounted() -> None:
+    with_grep = build_persona(["search_docs", "grep"], capabilities_enabled=False)
+    without = build_persona(["search_docs"], capabilities_enabled=False)
+    team = build_persona(
+        ["search_docs", "grep"], capabilities_enabled=False, team_mode=True
+    )
+
+    assert "`grep` for an exact name" in with_grep
+    assert "`grep` for an exact name" in team
+    assert "grep" not in without
