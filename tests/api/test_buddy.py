@@ -10,7 +10,9 @@ from api.app import app
 from api.dependencies import get_llm, get_source_state_store, get_store
 from ingestion.source_state_store import SourceStateStore
 from llm.errors import LLMUnavailableError
-from tests.stubs.llm import StubLLMClient
+from onboarding.buddy_agent import NO_FILTERED_RESULTS_MESSAGE
+from rag.types import Chunk
+from tests.stubs.llm import ScriptedLLMClient, StubLLMClient
 from tests.stubs.store import StubVectorStore
 
 _URL = "/api/v1/onboarding/buddy/agent"
@@ -51,8 +53,9 @@ def test_the_prior_summary_stands_in_for_the_conversation_older_than_the_window(
     assert body["messages"][0]["role"] == "system"
     assert "old notes" in body["messages"][0]["content"]
     contents = [m["content"] for m in body["messages"]]
-    assert "m1" in contents
-    assert "m2" in contents
+    # Fenced (`onboarding.query_fence`), so each is inside its marker lines.
+    assert any("\nm1\n" in c for c in contents)
+    assert any("\nm2\n" in c for c in contents)
 
 
 def test_a_turn_never_folds_and_returns_no_summary(client: TestClient) -> None:
@@ -166,7 +169,8 @@ def test_capabilities_off_reaches_the_persona(client: TestClient) -> None:
     )
 
     assert response.status_code == 200
-    assert "`search_docs` and nothing else" in response.json()["messages"][0]["content"]
+    persona = response.json()["messages"][0]["content"]
+    assert "This turn you can only search" in persona
 
 
 def test_omitting_both_modes_is_the_hire_mentor(client: TestClient) -> None:
@@ -237,3 +241,100 @@ def test_open_stream_without_team_mode_is_the_hire_greeting() -> None:
     assert response.status_code == 200
     assert "greeting a new hire" in recorded[0]
     assert "project's manager" not in recorded[0]
+
+
+def _scripted_client(llm: ScriptedLLMClient) -> Generator[TestClient, Any, None]:
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="auth.md",
+                text="the login handler lives in auth.py",
+                embedding=[0.0] * 768,
+                source_system="GITHUB",
+                project_ids=("p1",),
+            )
+        ]
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_source_state_store] = lambda: SourceStateStore(
+        ":memory:"
+    )
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_filters_reach_the_searches_and_an_empty_result_is_said_plainly() -> None:
+    llm = ScriptedLLMClient(
+        turns=[[("grep", {"patterns": ["login handler"]})]], answer="ungrounded"
+    )
+    for client in _scripted_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "where is login?"}],
+                "capabilities_enabled": False,
+                "filters": {"source_systems": ["jira"]},
+                "project_ids": ["p1"],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == NO_FILTERED_RESULTS_MESSAGE
+
+
+def test_empty_source_systems_mean_all_as_they_did_for_chat() -> None:
+    llm = ScriptedLLMClient(
+        turns=[[("grep", {"patterns": ["login handler"]})]], answer="In auth.py."
+    )
+    for client in _scripted_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "where is login?"}],
+                "capabilities_enabled": False,
+                "filters": {"source_systems": []},
+                "project_ids": ["p1"],
+            },
+        )
+
+    assert response.json()["text"] == "In auth.py."
+    assert [c["artifact_id"] for c in response.json()["citations"]] == ["a1"]
+
+
+def test_reasoning_is_returned_and_never_carried_in_messages() -> None:
+    llm = ScriptedLLMClient(
+        turns=[[("grep", {"patterns": ["login"]})]],
+        reasoning="grep for it",
+        reasoning_details=[{"type": "reasoning.text", "text": "grep for it"}],
+    )
+    for client in _scripted_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "login?"}],
+                "capabilities_enabled": False,
+            },
+        )
+
+    body = response.json()
+    assert body["reasoning"] == ["grep for it"]
+    assert all(
+        set(m) <= {"role", "content", "tool_calls", "tool_call_id"}
+        for m in body["messages"]
+    )
+    assert "grep for it" not in str(body["messages"])
+
+
+def test_a_caller_that_sends_no_filters_gets_todays_turn(client: TestClient) -> None:
+    response = client.post(
+        _URL, json={"messages": [{"role": "user", "content": "hello"}]}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reasoning"] == []

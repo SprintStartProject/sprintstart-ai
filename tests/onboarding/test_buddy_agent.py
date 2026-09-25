@@ -1,10 +1,11 @@
 import pytest
 
+from agents.tools.base import ToolResult
 from llm.base import Message, ToolSpec
 from llm.errors import LLMUnavailableError
 from onboarding.buddy_agent import (
     SEARCH_DOCS,
-    _format_chunks,
+    _format_result,
     drop_test_material,
     run_agent_turn,
 )
@@ -127,7 +128,9 @@ def test_a_search_finding_only_fixtures_finds_nothing() -> None:
     # to ask a colleague, which beats reciting an example as policy.
     kept = drop_test_material([_chunk("process.md", _FIXTURE_URL), _chunk("test_x.py")])
 
-    assert _format_chunks(kept) == "No indexed material matched this search."
+    assert _format_result(ToolResult.empty("x"), kept) == (
+        "No indexed material matched this search."
+    )
 
 
 def test_ingest_time_role_is_honoured_even_with_no_url() -> None:
@@ -137,14 +140,16 @@ def test_ingest_time_role_is_honoured_even_with_no_url() -> None:
 
 
 def test_still_marks_anything_that_slips_past_the_drop() -> None:
-    # Belt to the braces: `_format_chunks` is reachable with un-dropped input.
-    formatted = _format_chunks([_chunk("process.md", _FIXTURE_URL)])
+    # Belt to the braces: `_format_result` is reachable with un-dropped input.
+    chunks = [_chunk("process.md", _FIXTURE_URL)]
+    formatted = _format_result(ToolResult(summary="", chunks=chunks), chunks)
 
     assert "test/fixture file" in formatted
 
 
 def test_does_not_mark_a_real_source_chunk() -> None:
-    formatted = _format_chunks([_chunk("process.md", _REAL_DOC_URL)])
+    chunks = [_chunk("process.md", _REAL_DOC_URL)]
+    formatted = _format_result(ToolResult(summary="", chunks=chunks), chunks)
 
     assert "test/fixture file" not in formatted
 
@@ -163,7 +168,7 @@ def test_runs_search_docs_locally_and_collects_citations(
     def _fake_retrieve(*args: object, **kwargs: object) -> list[ScoredChunk]:
         return [chunk]
 
-    monkeypatch.setattr("onboarding.buddy_agent.retrieve", _fake_retrieve)
+    monkeypatch.setattr("agents.tools.retrieve.retrieve", _fake_retrieve)
     llm = ScriptedLLMClient(
         turns=[[(SEARCH_DOCS, {"query": "how to build"})], []],
         answer="Run ./gradlew build.",
@@ -190,10 +195,10 @@ def test_search_is_scoped_to_the_project_the_hire_is_on(
     seen: list[object] = []
 
     def _fake_retrieve(*args: object, **kwargs: object) -> list[ScoredChunk]:
-        seen.append(kwargs.get("filters"))
+        seen.append(args[6])  # RetrieveTool passes filters positionally
         return []
 
-    monkeypatch.setattr("onboarding.buddy_agent.retrieve", _fake_retrieve)
+    monkeypatch.setattr("agents.tools.retrieve.retrieve", _fake_retrieve)
     llm = ScriptedLLMClient(turns=[[(SEARCH_DOCS, {"query": "how do we deploy"})], []])
 
     run_agent_turn(
@@ -213,10 +218,10 @@ def test_a_deployment_serving_one_project_scopes_to_nothing(
     seen: list[object] = []
 
     def _fake_retrieve(*args: object, **kwargs: object) -> list[ScoredChunk]:
-        seen.append(kwargs.get("filters"))
+        seen.append(args[6])  # RetrieveTool passes filters positionally
         return []
 
-    monkeypatch.setattr("onboarding.buddy_agent.retrieve", _fake_retrieve)
+    monkeypatch.setattr("agents.tools.retrieve.retrieve", _fake_retrieve)
     llm = ScriptedLLMClient(turns=[[(SEARCH_DOCS, {"query": "how do we deploy"})], []])
 
     run_agent_turn([_user("how?")], [], llm, StubVectorStore())
@@ -246,7 +251,7 @@ def test_a_spent_search_budget_tells_the_model_it_has_no_tools(
     # The failure this pins: a model that searched until the budget ran out answered
     # with the persona still saying "offer X", and told the hire to confirm a button
     # no tool call had produced.
-    monkeypatch.setattr("onboarding.buddy_agent.retrieve", lambda *a, **k: [])
+    monkeypatch.setattr("agents.tools.retrieve.retrieve", lambda *a, **k: [])
     llm = _RecordingForcedAnswer(
         turns=[[(SEARCH_DOCS, {"query": "again"})]] * 20, answer="Here is what I know."
     )
@@ -362,8 +367,8 @@ def test_the_turn_never_folds_however_long_the_window_is() -> None:
     result = run_agent_turn(history, [_GET_MY_METRICS], llm, StubVectorStore())
 
     # Nothing is dropped, so nothing needed summarizing: the whole window is sent.
-    contents = [msg.get("content") for msg in result.messages]
-    assert all(f"m{i}" in contents for i in range(1, 40))
+    contents = [msg.get("content") or "" for msg in result.messages]
+    assert all(any(f"\nm{i}\n" in c for c in contents) for i in range(1, 40))
     assert result.final is True
 
 
@@ -394,7 +399,7 @@ def test_capabilities_off_builds_the_search_only_persona() -> None:
         capabilities_enabled=False,
     )
 
-    assert "`search_docs` and nothing else" in _system_of(llm.chat_calls[0])
+    assert "This turn you can only search" in _system_of(llm.chat_calls[0])
 
 
 def test_both_modes_survive_a_resume_hop_that_already_has_a_system_message() -> None:
@@ -450,4 +455,4 @@ def test_the_modes_default_to_todays_behaviour() -> None:
 
     persona = _system_of(llm.chat_calls[0])
     assert "the tutor who guides a new hire" in persona
-    assert "search_docs` and nothing else" not in persona
+    assert "This turn you can only search" not in persona

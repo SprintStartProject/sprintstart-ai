@@ -1451,6 +1451,17 @@ class BuddyAgentRequest(BaseModel):
             "`capabilities_enabled`."
         ),
     )
+    filters: ChatFilters | None = Field(
+        default=None,
+        description=(
+            "Narrows every search this turn runs (`search_docs` and `grep`) to "
+            "some source systems and/or a time window, on top of the project "
+            "scope in `project_ids`. When at least one search ran and every one "
+            "came back empty under these filters, the turn answers with a fixed "
+            "notice instead of letting the model answer from nothing. Send it "
+            "on every hop -- searches run on resume hops too."
+        ),
+    )
 
 
 class BuddyAgentResponse(BaseModel):
@@ -1474,6 +1485,17 @@ class BuddyAgentResponse(BaseModel):
     citations: list[BuddyCitationSchema] = Field(
         default_factory=list[BuddyCitationSchema],
         description="Sources the grounded searches drew on.",
+    )
+    reasoning: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "The model's reasoning on this hop, one entry per model call that "
+            "returned any, oldest first. Display-only: never part of "
+            "`messages`, so it is not carried back and never re-enters the "
+            "model's context. Each hop returns only its own; a caller showing "
+            "a whole turn concatenates the hops. Empty when the provider "
+            "exposes none."
+        ),
     )
 
 
