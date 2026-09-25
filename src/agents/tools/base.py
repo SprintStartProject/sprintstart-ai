@@ -24,7 +24,7 @@ class ToolResult:
     ``summary`` is the one-line fallback shown to the model when there is
     nothing to show — an error, or a search that matched nothing. When
     ``chunks`` is non-empty the model is given the chunks themselves instead;
-    see ``agents.chat_agent._format_evidence``.
+    see ``agents.tools.evidence.format_evidence``.
     """
 
     summary: str

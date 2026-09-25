@@ -24,10 +24,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from agents.tools.base import Invocation, ToolRegistry, ToolResult
+from agents.tools.evidence import format_evidence, limit_evidence
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
 from llm.base import ChatResult, LLMClient, Message, ReasoningDelta, TextDelta, ToolCall
-from rag.prompt import chunk_header
 from rag.source_filter import SourceExclusions
 from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
@@ -36,27 +36,6 @@ from store.base import VectorStore
 # when hops keep coming back partly empty — a turn whose searches all landed
 # ends the loop (see `run`).
 _MAX_STEPS = 3
-
-# Per-chunk cap on what goes back to the model, so a handful of large chunks
-# can't crowd out the conversation.
-_SOURCE_CHARS = 800
-
-# Caps on a *whole* tool result. The per-chunk limit alone bounds nothing:
-# `grep` returns every match in the scoped corpus, so a broad pattern can
-# return hundreds of chunks that are individually small and collectively
-# larger than the context window.
-#
-# Both are needed, and each has to bite where the other doesn't: the char
-# budget bounds full-size chunks (it stops at 10 of them), the chunk count
-# bounds a long tail of small ones. Keep `_MAX_EVIDENCE_CHUNKS * _SOURCE_CHARS`
-# above `_MAX_EVIDENCE_CHARS` or the char budget becomes unreachable.
-#
-# Applied per call rather than per turn, so what one search returns never
-# depends on which others shared its turn; a step is therefore bounded by
-# `_MAX_PARALLEL_TOOLS` times this — ~32k chars, which the smallest configured
-# Ollama context can still be too tight for (see `OLLAMA_NUM_CTX`).
-_MAX_EVIDENCE_CHUNKS = 12
-_MAX_EVIDENCE_CHARS = 8_000
 
 # Searches asked for in the same turn run together. The cap is low because each
 # `retrieve` already forks a pair of threads internally (`rag.hybrid`), so the
@@ -130,76 +109,6 @@ class Evidence:
 
 
 ChatEvent = Invocation | Evidence | Reasoning | Token
-
-
-def _limit_evidence(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
-    """The prefix of ``chunks`` that fits the budget, in the order given.
-
-    Deterministic and order-preserving: the tools already return their best
-    matches first, so taking a prefix keeps the most relevant sources. The
-    first chunk is always kept, so an oversized one is truncated by
-    ``_SOURCE_CHARS`` rather than dropped entirely.
-    """
-    selected: list[ScoredChunk] = []
-    used = 0
-    for chunk in chunks:
-        if len(selected) >= _MAX_EVIDENCE_CHUNKS:
-            break
-        size = min(len(chunk.text), _SOURCE_CHARS)
-        if selected and used + size > _MAX_EVIDENCE_CHARS:
-            break
-        selected.append(chunk)
-        used += size
-    return selected
-
-
-def _format_evidence(result: ToolResult, chunks: list[ScoredChunk]) -> str:
-    """What the model sees for one tool call — the sources themselves.
-
-    ``chunks`` is what survived the budget, which is what the caller cites; a
-    dropped chunk is counted but never quoted, so the model is not asked to
-    answer from text it cannot see.
-    """
-    if not chunks:
-        return result.summary or "No matches."
-    ordered_chunks = _order_evidence_for_display(chunks)
-    body = "\n\n---\n\n".join(
-        f"{chunk_header(chunk)}\n{chunk.text[:_SOURCE_CHARS]}"
-        for chunk in ordered_chunks
-    )
-    omitted = result.match_count - len(result.matched_chunks(chunks))
-    if omitted:
-        body += f"\n\n---\n\n({omitted} further match(es) omitted.)"
-    return body
-
-
-def _order_evidence_for_display(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
-    """Keep artifact relevance order while restoring source order within each file.
-
-    Budget selection receives direct hits before neighbours so context cannot
-    displace a match. The model should nevertheless read each selected file in
-    its natural order; grouping after selection gives us both properties.
-    """
-    by_artifact: dict[str, list[ScoredChunk]] = {}
-    for chunk in chunks:
-        by_artifact.setdefault(chunk.artifact_id, []).append(chunk)
-
-    ordered: list[ScoredChunk] = []
-    for artifact_chunks in by_artifact.values():
-        if all(chunk.position is None for chunk in artifact_chunks):
-            ordered.extend(artifact_chunks)
-            continue
-        ordered.extend(
-            sorted(
-                artifact_chunks,
-                key=lambda chunk: (
-                    chunk.start_page if chunk.start_page is not None else 0,
-                    chunk.position is None,
-                    chunk.position if chunk.position is not None else 0,
-                ),
-            )
-        )
-    return ordered
 
 
 class ChatAgent:
@@ -307,7 +216,7 @@ class ChatAgent:
             for call, tool_result in zip(
                 result.tool_calls, self._run_tools(result.tool_calls), strict=True
             ):
-                chunks = _limit_evidence(tool_result.chunks)
+                chunks = limit_evidence(tool_result.chunks)
                 matched_chunks = tool_result.matched_chunks(chunks)
                 if matched_chunks:
                     yield Evidence(matched_chunks)
@@ -317,7 +226,7 @@ class ChatAgent:
                 messages.append(
                     Message(
                         role="tool",
-                        content=_format_evidence(tool_result, chunks),
+                        content=format_evidence(tool_result, chunks),
                         tool_call_id=call.id,
                         name=call.name,
                     )
