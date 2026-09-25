@@ -19,6 +19,7 @@ from api.routes import (  # noqa: E402
     health,
     ingest,
     ingest_run,
+    ingest_status,
     insights,
     knowledge_gaps,
     onboarding,
@@ -84,6 +85,7 @@ api_router.include_router(chat.router)
 api_router.include_router(buddy.router)
 api_router.include_router(ingest.router)
 api_router.include_router(ingest_run.router)
+api_router.include_router(ingest_status.router)
 api_router.include_router(artifact_projects.router)
 api_router.include_router(title.router)
 api_router.include_router(vector_db.router)
