@@ -1,9 +1,9 @@
 """Semantic grouping of recurring user questions into FAQ clusters.
 
 Called by the backend's ``POST /insights/faq/refresh`` (pull-based, per
-issue #66). ``/chat`` is stateless and this service does not retain question
-history itself, so the backend sends the full set of questions to group on
-every request.
+issue #66). The project's assistant is stateless and this service does not
+retain question history itself, so the backend sends the full set of questions
+to group on every request.
 
 A *group* is one recurring question — the same thing asked in different words.
 Each carries a short generated **title** naming what is being asked (issue
@@ -14,7 +14,7 @@ while the phrasings under it vary.
 
 This full rebuild is the expensive path: its cost grows with the total number
 of questions, so it is the manual-refresh fallback rather than something to run
-per chat message. The incremental counterpart lives in
+per question asked. The incremental counterpart lives in
 :mod:`insights.faq_classification`.
 """
 
@@ -105,15 +105,42 @@ TITLE_RULE = (
     "apart from a neighbouring one — 'Setup' or 'Access' alone is too generic"
 )
 
+# What is *not* an FAQ question, shared word for word by the live classifier
+# (`insights.faq_classification`) and the full rebuild below, so a rebuild never
+# resurrects what the classifier dropped, or the other way round.
+#
+# The questions come from the project's assistant (Buddy), which is a mentor
+# as well as a documentation search: besides "how does X work" it is asked to
+# act ("move my card"), to report on the asker ("what should I work on next?")
+# and to continue a conversation ("and the second one?"). None of those is
+# answered by documentation, and each would otherwise surface to the PM as a
+# recurring question. The closing sentence keeps a personal *phrasing* from
+# being mistaken for a personal *question*: "how do I get VPN access?" says "I"
+# and is still the same question for every hire.
+NON_FAQ_KINDS = (
+    "(a) greetings, smalltalk, thanks or chit-chat (e.g. 'hey', 'hey there, "
+    "how you doing', 'thanks!'); "
+    "(b) requests for the assistant to do something rather than explain "
+    "something — board or task actions, reminders, messages to someone (e.g. "
+    "'move my card to done', 'remind my PM about the review'); "
+    "(c) questions about the asker's own onboarding state — their tasks, "
+    "progress or path (e.g. 'what should I work on next?', 'summarise my "
+    "onboarding path'); "
+    "(d) follow-ups that only make sense inside the conversation they were "
+    "asked in (e.g. 'and the second one?', 'can you explain that again?'). "
+    "A question stays a documentation question when the same documentation "
+    "would answer anyone who asks it, even when it is phrased personally "
+    "(e.g. 'how do I get VPN access?')"
+)
+
 _GROUPING_SYSTEM = (
-    "You group recurring end-user questions asked to a docs chatbot into FAQ "
-    "entries for a PM-facing dashboard. Each input question is prefixed with "
-    "its id in square brackets.\n\n"
+    "You group recurring end-user questions asked to the project's assistant "
+    "into FAQ entries for a PM-facing dashboard. Each input question is "
+    "prefixed with its id in square brackets.\n\n"
     "Rules:\n"
-    "1. First set aside anything that is not a genuine, documentation-relevant "
-    "question — greetings, smalltalk, or chit-chat (e.g. 'hey', 'hey there, "
-    "how you doing', 'thanks!'). List their ids in discard_ids instead of a "
-    "group.\n"
+    "1. First set aside anything that is not a genuine documentation question "
+    "and list its ids in discard_ids instead of a group. That covers: "
+    f"{NON_FAQ_KINDS}.\n"
     "2. Group the remaining questions by what they are actually asking, not by "
     "surface sentence structure. Two questions belong together only if the "
     "same piece of documentation would answer both. Questions that name "
@@ -149,8 +176,8 @@ def _cluster_questions(
     embedding-threshold clustering: it judges cluster membership by meaning
     (e.g. treating a named component like "frontend" vs "backend" as
     distinguishing) rather than a fixed cosine cutoff, isn't sensitive to
-    input order, and filters out non-questions (greetings/smalltalk) before
-    they can be surfaced as a group.
+    input order, and filters out what is not a documentation question
+    (see ``NON_FAQ_KINDS``) before it can be surfaced as a group.
     """
     by_id = {q.id: q for q in questions if q.text.strip()}
     if not by_id:
