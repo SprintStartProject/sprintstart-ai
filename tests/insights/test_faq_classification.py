@@ -1,12 +1,16 @@
 import json
+from typing import cast
+
+import pytest
 
 from ingestion.metadata_store import IngestionMetadataStore
-from insights.faq import FaqDocument
+from insights.faq import NON_FAQ_KINDS, FaqDocument
 from insights.faq_classification import (
     ExistingGroup,
     classify_question,
     merge_groups,
 )
+from llm.base import Message
 from rag.types import Chunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
@@ -516,3 +520,85 @@ def test_merge_groups_leaves_groups_alone_on_unparseable_output() -> None:
     llm = _ScriptedLLM("not json")
 
     assert merge_groups(_groups("g1", "g2", "g3"), target_max=2, llm=llm) == []
+
+
+class _PromptCapturingLLM(_ScriptedLLM):
+    """Records the system prompt of every `generate` call."""
+
+    def __init__(self, payload: object) -> None:
+        super().__init__(payload)
+        self.system_prompts: list[str] = []
+
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
+        self.system_prompts.append(str(messages[0].get("content") or ""))
+        return super().generate(cast("list[dict[str, object]]", messages))
+
+
+def _classify_prompt() -> str:
+    llm = _PromptCapturingLLM({"relevant": False})
+    _classify(llm, question="move my card to done")
+    return llm.system_prompts[0]
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        # Each Buddy-only kind of non-question the classifier has to drop.
+        "requests for the assistant to do something",
+        "'move my card to done'",
+        "'remind my PM about the review'",
+        "questions about the asker's own onboarding state",
+        "'what should I work on next?'",
+        "'summarise my onboarding path'",
+        "follow-ups that only make sense inside the conversation",
+        "'and the second one?'",
+        # Smalltalk stays covered.
+        "greetings, smalltalk, thanks or chit-chat",
+    ],
+)
+def test_classify_prompt_names_every_kind_of_non_question(rule: str) -> None:
+    assert rule in _classify_prompt()
+
+
+def test_classify_prompt_keeps_personally_phrased_doc_questions() -> None:
+    """'How do I get VPN access?' says "I" and is still everyone's question."""
+    prompt = _classify_prompt()
+
+    assert "same documentation would answer anyone who asks it" in prompt
+    assert "'how do I get VPN access?'" in prompt
+
+
+def test_classify_prompt_no_longer_describes_a_docs_chatbot() -> None:
+    prompt = _classify_prompt()
+
+    assert "chatbot" not in prompt
+    assert "the project's assistant" in prompt
+
+
+def test_classify_and_rebuild_share_one_list_of_non_questions() -> None:
+    """A rebuild must keep out exactly what the live classifier kept out."""
+    assert NON_FAQ_KINDS in _classify_prompt()
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "move my card to done",
+        "what should I work on next?",
+        "and the second one?",
+    ],
+)
+def test_classify_drops_a_buddy_request_the_model_marks_irrelevant(
+    question: str,
+) -> None:
+    """The model's verdict is final: no title, no documents, no redaction."""
+    llm = _ScriptedLLM({"relevant": False})
+
+    result = _classify(llm, question=question)
+
+    assert not result.relevant
+    assert result.group_id is None
+    assert result.documents == []
+    assert llm.calls == 1

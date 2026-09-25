@@ -1560,7 +1560,9 @@ class FaqGroupRefSchema(BaseModel):
 
 
 class FaqClassifyRequest(ProjectScopedRequest):
-    question: str = Field(description="The question a user just asked in the chat.")
+    question: str = Field(
+        description="The question a user just asked the project's assistant."
+    )
     groups: list[FaqGroupRefSchema] = Field(
         default_factory=list[FaqGroupRefSchema],
         description=(
@@ -1595,7 +1597,10 @@ class FaqClassifyResponse(BaseModel):
 
     relevant: bool = Field(
         description=(
-            "False for greetings, smalltalk and other non-questions. The "
+            "False for anything that is not a documentation question: "
+            "greetings and smalltalk, requests for the assistant to act, "
+            "questions about the asker's own onboarding state, and follow-ups "
+            "that only make sense inside their conversation. The "
             "backend drops those instead of surfacing them as an FAQ."
         )
     )

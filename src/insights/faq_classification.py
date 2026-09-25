@@ -3,8 +3,8 @@
 The full rebuild in :mod:`insights.faq` costs one LLM pass over *every*
 question a project ever asked. That is fine as a manual fallback and impossible
 as a per-message operation, which is what issues #284/#285 need: the FAQ should
-be current the moment someone asks a question in the chat, without a PM
-pressing refresh.
+be current the moment someone asks the project's assistant a question, without
+a PM pressing refresh.
 
 This module is the cheap online counterpart. Two operations, each with a prompt
 whose size is bounded by the *structure* of the FAQ rather than by its history:
@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, ValidationError, model_validator
 
 from ingestion.metadata_store import IngestionMetadataStore
-from insights.faq import TITLE_RULE, FaqDocument, documents_for
+from insights.faq import NON_FAQ_KINDS, TITLE_RULE, FaqDocument, documents_for
 from insights.redaction import redact_pii, redact_structured
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
@@ -63,9 +63,10 @@ class ExistingGroup:
 class Classification:
     """What to do with one incoming question.
 
-    ``relevant`` false means the text was smalltalk or otherwise not a
-    documentation question; the caller drops it and nothing else in this
-    object is meaningful.
+    ``relevant`` false means the text was not a documentation question —
+    smalltalk, a request to act, a question about the asker's own onboarding,
+    or a context-only follow-up (see ``insights.faq.NON_FAQ_KINDS``); the
+    caller drops it and nothing else in this object is meaningful.
 
     ``group_id`` set means "add to that existing entry"; ``None`` means "open a
     new one", in which case ``title`` names it and ``documents`` holds the
@@ -119,14 +120,15 @@ class _MergePayload(BaseModel):
 
 
 _CLASSIFY_SYSTEM = (
-    "You maintain the FAQ of a documentation chatbot for a PM-facing "
-    "dashboard. A user just asked one question. Decide where it belongs.\n\n"
+    "You maintain the FAQ of the project's assistant for a PM-facing "
+    "dashboard. A user just asked the assistant one question. Decide where it "
+    "belongs.\n\n"
     "You are given the FAQ's existing entries, each one a recurring question "
     "listed with its id, its title and the wording it is usually asked in.\n\n"
     "Rules:\n"
-    "1. If the text is not a genuine, documentation-relevant question — a "
-    "greeting, smalltalk, thanks, or chit-chat — set relevant to false and "
-    "stop. Everything else is then ignored.\n"
+    "1. If the text is not a genuine documentation question, set relevant to "
+    "false and stop. Everything else is then ignored. That covers: "
+    f"{NON_FAQ_KINDS}.\n"
     "2. Match the question to an existing entry ONLY if the same piece of "
     "documentation would answer both — i.e. it is the same request in "
     "different words. Questions naming different components, services, or "
