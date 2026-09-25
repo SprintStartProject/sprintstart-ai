@@ -1,6 +1,9 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from ingestion import metadata_store
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
 
 _NOW = "2026-01-01T00:00:00+00:00"
@@ -432,3 +435,50 @@ def test_only_failed_revocation_operations_are_recoverable(tmp_path: Path) -> No
         )
     finally:
         store.close()
+
+
+def test_get_artifacts_returns_known_ids_and_omits_unknown() -> None:
+    store = IngestionMetadataStore(":memory:")
+    store.save_completed_artifact(_record("a1", chunk_count=3))
+    store.save_completed_artifact(_record("a2", status="failed"))
+
+    records = store.get_artifacts(["a2", "missing", "a1", "a2"])
+
+    assert set(records) == {"a1", "a2"}
+    assert records["a1"].chunk_count == 3
+    assert records["a2"].status == "failed"
+
+
+def test_get_artifacts_without_ids_returns_empty() -> None:
+    store = IngestionMetadataStore(":memory:")
+    store.save_completed_artifact(_record("a1"))
+
+    assert store.get_artifacts([]) == {}
+
+
+def test_get_artifacts_reads_a_batch_in_one_query() -> None:
+    store = IngestionMetadataStore(":memory:")
+    ids = [f"a{i}" for i in range(100)]
+    for artifact_id in ids:
+        store.save_completed_artifact(_record(artifact_id))
+    statements: list[str] = []
+    store._connection.set_trace_callback(statements.append)
+
+    records = store.get_artifacts(ids)
+
+    assert set(records) == set(ids)
+    selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+    assert len(selects) == 1
+
+
+def test_get_artifacts_splits_batches_above_the_parameter_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(metadata_store, "_MAX_IN_PARAMS", 2)
+    store = IngestionMetadataStore(":memory:")
+    for artifact_id in ("a1", "a2", "a3", "a4", "a5"):
+        store.save_completed_artifact(_record(artifact_id))
+
+    records = store.get_artifacts(["a5", "a1", "missing", "a3", "a2", "a4"])
+
+    assert set(records) == {"a1", "a2", "a3", "a4", "a5"}

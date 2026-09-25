@@ -38,6 +38,11 @@ _COLUMNS = (
     "labels",
 )
 
+# SQLite builds before 3.32 reject statements binding more than 999
+# parameters. Staying below that keeps batch lookups portable to any
+# interpreter's bundled SQLite.
+_MAX_IN_PARAMS = 900
+
 
 @dataclass(frozen=True)
 class ArtifactRecord:
@@ -543,6 +548,35 @@ class IngestionMetadataStore:
             return None
 
         return self._row_to_record(row)
+
+    def get_artifacts(self, artifact_ids: Sequence[str]) -> dict[str, ArtifactRecord]:
+        """Look up many artifacts at once, keyed by id.
+
+        Ids with no record are simply absent from the result, so callers can
+        tell "never ingested" from every recorded status. The result carries
+        no order; a caller that must answer in request order walks its own
+        list. Duplicates collapse, and the lookup is batched into as few
+        ``IN`` queries as SQLite's bound-parameter limit allows -- one for any
+        request of up to ``_MAX_IN_PARAMS`` distinct ids.
+        """
+        normalized = tuple(dict.fromkeys(artifact_ids))
+        if not normalized:
+            return {}
+
+        rows: list[sqlite3.Row] = []
+        with self._lock:
+            for start in range(0, len(normalized), _MAX_IN_PARAMS):
+                batch = normalized[start : start + _MAX_IN_PARAMS]
+                placeholders = ", ".join("?" for _ in batch)
+                cursor = self._connection.execute(
+                    f"SELECT {', '.join(_COLUMNS)} FROM artifacts "
+                    f"WHERE id IN ({placeholders})",
+                    batch,
+                )
+                rows.extend(cast(list[sqlite3.Row], cursor.fetchall()))
+
+        records = (self._row_to_record(row) for row in rows)
+        return {record.id: record for record in records}
 
     def list_artifacts(
         self,
