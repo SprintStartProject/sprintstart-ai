@@ -234,7 +234,8 @@ _PATH_STEP_CLAUSE = (
     "mention: a step on their path outlives this conversation, which starts fresh "
     "every visit. A step you add goes on *their copy* -- their PM's blueprint is "
     "untouched, and they can change or delete it. Never add one just to have "
-    "added something.\n"
+    "added something -- but when they ask for a step themselves, offer it: it is "
+    "their copy.\n"
     "- A knowledge question they got wrong means the material behind it did not "
     "land. Teach it first. If what they missed is more than one explanation, offer "
     "`add_path_step` for one short refresher step in that question's phase: what "
@@ -332,6 +333,18 @@ _NO_BUTTON_CLAUSE = (
     '- Never describe a button instead of making one. "I have added it", "you will '
     'see a confirm button", "click below" -- none of those are true unless the call '
     "happened.\n"
+)
+
+# "Last resort" is about the mentor's own judgement, never about the hire's. Without
+# this the mentor held a hire's explicit "flag this to my PM" against the last-resort
+# rule and refused it as "not something for the PM" -- deciding on their behalf what
+# they may raise, which is the one thing an escalation path must never do.
+_FLAG_ON_REQUEST_CLAUSE = (
+    "- When they ask you to flag, raise or pass something to their PM -- a question, "
+    "a problem, feedback on their path -- offer `flag_to_pm` in that reply. Their "
+    "asking is the reason: never decide for them that it is not a PM matter, and "
+    "never make them try the docs first. Say what you know alongside if it helps, "
+    "but still offer it.\n"
 )
 
 _ACTION_TOOLS = (
@@ -503,7 +516,7 @@ def build_persona(
 
     # The escalation offer only makes sense when the hire can actually escalate.
     escalation = (
-        "; offer `flag_to_pm` as the last resort.\n"
+        "; offer `flag_to_pm` as the last resort.\n" + _FLAG_ON_REQUEST_CLAUSE
         if "flag_to_pm" in available
         else ".\n"
     )

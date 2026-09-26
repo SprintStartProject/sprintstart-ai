@@ -44,6 +44,18 @@ def test_without_an_escalation_tool_the_persona_offers_no_escalation() -> None:
     assert "rather than inventing an answer" in persona
 
 
+def test_a_hire_who_asks_to_flag_something_is_offered_it() -> None:
+    """'Last resort' is the mentor's bar for flagging unasked, never the hire's.
+
+    Read as the only rule, it had the mentor refuse an explicit "flag this to my PM"
+    as not being a PM matter.
+    """
+    persona = build_persona(_ALL_TOOLS)
+
+    assert "When they ask you to flag" in persona
+    assert "never decide for them that it is not a PM matter" in persona
+
+
 def test_hire_state_tools_are_listed_only_when_mounted() -> None:
     persona = build_persona(["search_docs", "get_my_metrics"])
 
