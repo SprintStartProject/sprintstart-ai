@@ -158,6 +158,41 @@ def test_unparseable_llm_output_marks_ungraded_as_incorrect(
     assert result["correct"] is False
 
 
+def test_broken_json_is_corrected_once_before_an_answer_counts_as_wrong(
+    client: tuple[TestClient, StubLLMClient],
+):
+    """An unreadable reply used to record a right answer as wrong."""
+    http_client, _ = client
+    calls: list[list[Message]] = []
+
+    class FlakyLLM(StubLLMClient):
+        def generate(self, messages: list[Message]) -> str:
+            calls.append(messages)
+            if len(calls) == 1:
+                return '{"results": [{"id": "q1", "correct": true'
+            return '{"results": [{"id": "q1", "correct": true, "feedback": "Yes."}]}'
+
+    app.dependency_overrides[get_llm] = lambda: FlakyLLM()
+
+    response = http_client.post(
+        "/api/v1/grade-answers",
+        json={
+            "answers": [
+                {
+                    "id": "q1",
+                    "question": "Q1",
+                    "reference_answer": "a1",
+                    "user_answer": "a1",
+                }
+            ]
+        },
+    )
+
+    assert response.json()["results"][0]["correct"] is True
+    assert len(calls) == 2
+    assert "could not be validated" in str(calls[1][-1])
+
+
 def test_llm_failure_returns_503(client: tuple[TestClient, StubLLMClient]):
     http_client, _ = client
 
