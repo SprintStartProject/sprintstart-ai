@@ -73,6 +73,12 @@ Supporting decisions:
 - **Classification is idempotent** via the source message id. Events can be redelivered, and
   counting a message twice would quietly corrupt the frequency ranking the whole panel is ordered
   by.
+- **The classifier, not the caller, decides what is an FAQ question.** Questions to Buddy (the
+  project's assistant, Wiki#319) include requests to act ("move my card to done"), questions about
+  the asker's own onboarding ("what should I work on next?") and context-only follow-ups ("and the
+  second one?") next to documentation questions. All of them are sent; `relevant = false` drops
+  them, as it drops smalltalk. Classify and the full rebuild share one list of these categories
+  (`insights.faq.NON_FAQ_KINDS`), so a rebuild keeps out exactly what the live path kept out.
 - **Retrieval only runs for a new entry.** An existing one already carries the documents that
   answer it.
 - **Redaction is folded into the same call**, rather than a second round-trip per message.
