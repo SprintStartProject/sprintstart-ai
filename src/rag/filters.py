@@ -81,6 +81,31 @@ def _parse_timestamp(value: str | None) -> float | None:
         return None
 
 
+def has_narrowing_filters(filters: RetrievalFilters | None) -> bool:
+    """Whether ``filters`` narrows the corpus beyond the always-present scope.
+
+    Only a caller-chosen narrowing counts. The project scope is on nearly every
+    request and must never look like one: /chat switches off its agentic path
+    on this answer, and the buddy turn's canned reply below is guarded by it.
+    """
+    if filters is None:
+        return False
+
+    return bool(filters.source_systems) or (
+        filters.time_from is not None or filters.time_to is not None
+    )
+
+
+# The reply a narrowed search gets when nothing under the narrowing matched.
+# Shared by /chat's single-shot path and the buddy turn so the two cannot
+# drift: answering from no sources under a filter the reader chose themselves
+# is the one thing not to do.
+NO_FILTERED_RESULTS_MESSAGE = (
+    "I could not find any matching sources for the selected filters, "
+    "so I cannot answer this reliably."
+)
+
+
 def matches_retrieval_filters(
     chunk: Chunk | ScoredChunk,
     filters: RetrievalFilters | None,

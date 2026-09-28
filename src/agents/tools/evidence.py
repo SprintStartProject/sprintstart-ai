@@ -68,9 +68,15 @@ def format_evidence(
 
     ``header`` labels each chunk (the buddy adds a test-file warning to the
     default). ``empty`` replaces the tool's own one-line summary when nothing
-    survived, for a caller whose persona reacts to specific wording.
+    survived, for a caller whose persona reacts to specific wording -- but
+    never when the call itself failed: a model told "no matches" retries the
+    search, a model told its arguments were wrong fixes them.
     """
     if not chunks:
+        # An error is not a result: the caller's wording may never hide why the
+        # call did not run.
+        if result.is_error:
+            return result.summary or "No matches."
         return empty or result.summary or "No matches."
     body = "\n\n---\n\n".join(
         f"{header(chunk)}\n{chunk.text[:SOURCE_CHARS]}"

@@ -1,7 +1,3 @@
-import threading
-
-from pydantic import BaseModel
-
 from agents.chat_agent import (
     ChatAgent,
     ChatEvent,
@@ -10,16 +6,11 @@ from agents.chat_agent import (
     Token,
     wrap_user_query,
 )
-from agents.tools.base import Invocation, Tool, ToolRegistry, ToolResult
+from agents.tools.base import Invocation
 from llm.base import ChatResult, Message, ReasoningDelta, TextDelta, ToolCall
 from rag.types import Chunk
 from tests.stubs.llm import ScriptedLLMClient, Turn
 from tests.stubs.store import StubVectorStore
-
-
-class _NoArgs(BaseModel):
-    pass
-
 
 _RETRIEVE: tuple[str, dict[str, object]] = ("retrieve", {"query": "blockers"})
 _GREP: tuple[str, dict[str, object]] = ("grep", {"patterns": ["login"]})
@@ -340,77 +331,6 @@ def test_parallel_tool_calls_in_one_step_all_run() -> None:
     assert _invoked(events) == ["retrieve", "grep"]
     assert len(llm.chat_calls) == 1
     assert len(_tool_messages(llm.stream_calls[0])) == 2
-
-
-def test_tool_calls_in_one_step_execute_concurrently() -> None:
-    """Two searches in a turn must overlap, not queue behind each other.
-
-    The barrier is the assertion: it only releases once both tools are inside
-    it at the same time, so a serial implementation deadlocks and trips the
-    timeout instead of quietly taking twice as long.
-    """
-    barrier = threading.Barrier(2, timeout=5)
-
-    class _BlockingTool(Tool[_NoArgs]):
-        args_model = _NoArgs
-
-        def __init__(self, name: str) -> None:
-            self.name = name
-            self.description = "blocks until its partner arrives"
-
-        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
-            barrier.wait()
-            return ToolResult(summary=f"{self.name} ran")
-
-    agent = ChatAgent(_llm(), _store())
-    agent._tools = ToolRegistry(  # pyright: ignore[reportPrivateUsage]
-        [_BlockingTool("first"), _BlockingTool("second")]
-    )
-
-    results = agent._run_tools(  # pyright: ignore[reportPrivateUsage]
-        [
-            ToolCall(id="a", name="first", arguments={}),
-            ToolCall(id="b", name="second", arguments={}),
-        ]
-    )
-
-    assert [r.summary for r in results] == ["first ran", "second ran"]
-
-
-def test_tool_results_come_back_in_call_order_not_completion_order() -> None:
-    """What the model sees must not depend on which search finished first."""
-    started = threading.Event()
-
-    class _SlowTool(Tool[_NoArgs]):
-        name = "slow"
-        description = "finishes last"
-        args_model = _NoArgs
-
-        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
-            started.wait(timeout=5)
-            return ToolResult(summary="slow ran")
-
-    class _FastTool(Tool[_NoArgs]):
-        name = "fast"
-        description = "finishes first"
-        args_model = _NoArgs
-
-        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
-            started.set()
-            return ToolResult(summary="fast ran")
-
-    agent = ChatAgent(_llm(), _store())
-    agent._tools = ToolRegistry([_SlowTool(), _FastTool()])  # pyright: ignore[reportPrivateUsage]
-
-    results = agent._run_tools(  # pyright: ignore[reportPrivateUsage]
-        [
-            ToolCall(id="a", name="slow", arguments={}),
-            ToolCall(id="b", name="fast", arguments={}),
-        ]
-    )
-
-    # "fast" completed first; the results still follow the order requested.
-    assert [r.summary for r in results] == ["slow ran", "fast ran"]
 
 
 def test_unknown_tool_call_is_reported_to_the_model_not_raised() -> None:

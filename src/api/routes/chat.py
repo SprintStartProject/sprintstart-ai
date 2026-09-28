@@ -17,6 +17,7 @@ from ingestion.source_state_store import SourceStateStore
 from llm.base import LLMClient, Message, ReasoningDelta, TextDelta
 from llm.errors import LLMUnavailableError
 from rag.citation import build_citations
+from rag.filters import NO_FILTERED_RESULTS_MESSAGE, has_narrowing_filters
 from rag.prompt import build_messages
 from rag.retriever import retrieve
 from rag.types import RetrievalFilters
@@ -28,11 +29,6 @@ router = APIRouter()
 
 _FILTERED_TOP_K = 5
 _FILTERED_MIN_SCORE = 0.3
-
-_NO_FILTERED_RESULTS_MESSAGE = (
-    "I could not find any matching sources for the selected filters, "
-    "so I cannot answer this reliably."
-)
 
 
 def _retrieval_filters_from_request(body: ChatRequest) -> RetrievalFilters:
@@ -53,23 +49,6 @@ def _retrieval_filters_from_request(body: ChatRequest) -> RetrievalFilters:
     )
 
 
-def _has_narrowing_filters(body: ChatRequest) -> bool:
-    """Whether the caller narrowed the corpus beyond the project scope.
-
-    Only a caller-chosen narrowing switches /chat from the agentic path to the
-    single-shot filtered retrieval below; the always-present project scope must
-    not, or the agent would never run again.
-    """
-    if body.filters is None:
-        return False
-
-    return bool(
-        body.filters.source_systems
-        or body.filters.time_from is not None
-        or body.filters.time_to is not None
-    )
-
-
 @router.post(
     "/chat",
     summary="Ask a question (streaming)",
@@ -87,7 +66,7 @@ def chat(
         try:
             filters = _retrieval_filters_from_request(body)
 
-            if not _has_narrowing_filters(body):
+            if not has_narrowing_filters(filters):
                 yield from build_orchestrator(filters).stream(
                     body.question,
                     body.history,
@@ -112,7 +91,7 @@ def chat(
                 yield sse_event(
                     {
                         "type": "token",
-                        "content": _NO_FILTERED_RESULTS_MESSAGE,
+                        "content": NO_FILTERED_RESULTS_MESSAGE,
                     }
                 )
                 yield sse_event({"type": "done"})

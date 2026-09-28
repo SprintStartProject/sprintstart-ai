@@ -61,6 +61,16 @@ def test_format_falls_back_to_the_tool_summary_when_empty() -> None:
     assert format_evidence(result, []) == "grep(['xyzzy']): 0 chunk(s)."
 
 
+def test_an_error_is_never_hidden_behind_the_callers_empty_wording() -> None:
+    """A malformed call must reach the model as the error, not as "no matches"."""
+    result = ToolResult.failed("Invalid arguments for tool 'grep'.")
+
+    assert (
+        format_evidence(result, [], empty="No indexed material matched this search.")
+        == "Invalid arguments for tool 'grep'."
+    )
+
+
 def test_dropped_context_is_not_reported_as_an_omitted_match() -> None:
     chunks = [
         ScoredChunk(

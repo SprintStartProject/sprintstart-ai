@@ -1,5 +1,7 @@
+import pytest
+
 from llm.base import Message
-from onboarding.query_fence import fence, fence_user_messages, is_fenced
+from onboarding.query_fence import fence, fence_key, fence_user_messages, is_fenced
 
 
 def test_the_same_text_always_gets_the_same_fence() -> None:
@@ -56,3 +58,22 @@ def test_fencing_is_idempotent() -> None:
     once = fence_user_messages([Message(role="user", content="q")])
 
     assert fence_user_messages(once) == once
+
+
+def test_non_ascii_text_fences_like_any_other() -> None:
+    """Umlauts, dashes and emoji used to raise: compare_digest rejects non-ASCII."""
+    text = "Wie kann ich mich am besten für die Präsentation nächste Woche vorbereiten?"
+
+    assert not is_fenced(text)
+    assert is_fenced(fence(text))
+
+
+def test_a_deployment_key_is_shared_but_a_restart_draws_a_new_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """More than one process must fence into the same bytes, so FENCE_KEY exists."""
+    monkeypatch.setenv("FENCE_KEY", "a deployment-wide secret")
+    assert fence_key() == fence_key()
+
+    monkeypatch.delenv("FENCE_KEY")
+    assert fence_key() != fence_key()

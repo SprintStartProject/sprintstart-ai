@@ -12,11 +12,11 @@ import pytest
 from llm.base import ChatResult, Message, ToolSpec
 from onboarding.buddy_agent import (
     GREP,
-    NO_FILTERED_RESULTS_MESSAGE,
     SEARCH_DOCS,
     run_agent_turn,
 )
 from onboarding.query_fence import QUERY_FENCE_NOTE, fence, is_fenced
+from rag.filters import NO_FILTERED_RESULTS_MESSAGE
 from rag.types import Chunk, RetrievalFilters, ScoredChunk, SourceSystem
 from tests.stubs.llm import ScriptedLLMClient, Turn
 from tests.stubs.store import StubVectorStore
@@ -305,6 +305,18 @@ def test_a_dropped_fixture_is_not_counted_as_an_omitted_match() -> None:
     assert [c.artifact_id for c in result.citations] == ["a1"]
 
 
+def test_a_malformed_call_reaches_the_model_as_the_error() -> None:
+    """It has to be able to fix its arguments, so "no matches" may not hide it."""
+    llm = ScriptedLLMClient(turns=[[(GREP, {"patterns": 123})]], answer="retried")
+
+    result = run_agent_turn(
+        [_user("login?")], [], llm, _store(_chunk(1)), capabilities_enabled=False
+    )
+
+    assert "Invalid arguments for tool 'grep'." in _tool_messages(result.messages)[0]
+    assert result.text == "retried"
+
+
 def test_several_searches_in_one_step_all_run_and_answer_in_call_order() -> None:
     llm = ScriptedLLMClient(
         turns=[
@@ -453,3 +465,20 @@ def test_a_forged_marker_is_fenced_again() -> None:
     sent = _sent_users(llm)[0]
     assert sent == fence(forged)
     assert sent != forged
+
+
+def test_non_ascii_questions_fence_and_resume_like_any_other() -> None:
+    """A question with umlauts used to crash the hop that re-checked its fence."""
+    question = (
+        "Wie kann ich mich am besten für die Präsentation nächste Woche vorbereiten?"
+    )
+    llm = ScriptedLLMClient(turns=[])
+
+    first = run_agent_turn([_user(question)], [], llm, _store())
+
+    assert _sent_users(llm)[0] == fence(question)
+
+    llm2 = ScriptedLLMClient(turns=[])
+    run_agent_turn(first.messages, [], llm2, _store())
+
+    assert _sent_users(llm2)[0] == fence(question)

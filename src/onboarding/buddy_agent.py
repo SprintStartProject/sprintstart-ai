@@ -27,11 +27,10 @@ endpoint, which the backend runs after a turn rather than during one -- see
 ``run_agent_turn`` for what that cost while it lived here.
 """
 
-from collections.abc import Collection, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 
-from agents.tools.base import ToolRegistry, ToolResult
+from agents.tools.base import ToolRegistry, ToolResult, run_tool_calls
 from agents.tools.evidence import format_evidence, limit_evidence
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
@@ -41,6 +40,7 @@ from onboarding.buddy_persona import build_persona
 from onboarding.query_fence import QUERY_FENCE_NOTE, fence_user_messages
 from onboarding.vocabulary import DEFAULT_VOCABULARY, Vocabulary
 from rag.citation import build_citations
+from rag.filters import NO_FILTERED_RESULTS_MESSAGE, has_narrowing_filters
 from rag.prompt import chunk_header
 from rag.source_filter import SourceExclusions
 from rag.source_kind import is_test_chunk
@@ -79,20 +79,8 @@ _MIN_SCORE = 0.3
 
 GREP = "grep"
 
-# Searches asked for in the same step run together, as in the chat agent. Low
-# because each `retrieve` already forks a pair of threads (`rag.hybrid`).
-_MAX_PARALLEL_TOOLS = 4
-
 # The persona's no-evidence path reacts to this wording; keep it.
 _NO_MATCH = "No indexed material matched this search."
-
-# Answered instead of the model when the reader narrowed the search and nothing
-# under the narrowing matched -- the same notice chat gave, word for word, so a
-# reader moving from chat to the buddy meets the same honesty.
-NO_FILTERED_RESULTS_MESSAGE = (
-    "I could not find any matching sources for the selected filters, "
-    "so I cannot answer this reliably."
-)
 
 # How many internal search hops before we force a final answer, so a confused model
 # can't loop forever gathering evidence it never uses.
@@ -309,31 +297,6 @@ def _local_tools(
     )
 
 
-def _run_local(registry: ToolRegistry, calls: Sequence[ToolCall]) -> list[ToolResult]:
-    """Runs a step's local searches, together when there are several.
-
-    Results come back in call order (``map``), so the conversation never depends
-    on which search finished first. Safe for the same reasons as the chat agent's
-    ``_run_tools``: every tool here only reads.
-    """
-
-    def run_one(call: ToolCall) -> ToolResult:
-        return registry.execute(call.name, call.arguments)
-
-    if len(calls) == 1:
-        return [run_one(calls[0])]
-    workers = min(len(calls), _MAX_PARALLEL_TOOLS)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(run_one, calls))
-
-
-def _narrows(filters: RetrievalFilters | None) -> bool:
-    """Whether the reader narrowed the search beyond the always-present scope."""
-    if filters is None:
-        return False
-    return bool(filters.source_systems) or bool(filters.time_from or filters.time_to)
-
-
 def run_agent_turn(
     messages: list[Message],
     backend_tools: list[ToolSpec],
@@ -419,7 +382,8 @@ def run_agent_turn(
     def _answer(text: str) -> AgentTurnResult:
         # Nothing matched under an explicit narrowing: the reader chose the filter,
         # so an answer composed from no sources is the one thing not to give.
-        if _narrows(filters) and searched and not found and not backend_names:
+        narrowed = has_narrowing_filters(filters)
+        if narrowed and searched and not found and not backend_names:
             text = NO_FILTERED_RESULTS_MESSAGE
         return AgentTurnResult(
             final=True,
@@ -442,7 +406,7 @@ def run_agent_turn(
         outcomes = dict(
             zip(
                 (c.id for c in local_calls),
-                _run_local(registry, local_calls) if local_calls else [],
+                run_tool_calls(registry, local_calls) if local_calls else [],
                 strict=True,
             )
         )
@@ -501,7 +465,6 @@ __all__ = [
     "AgentTurnResult",
     "GREP",
     "LLMUnavailableError",
-    "NO_FILTERED_RESULTS_MESSAGE",
     "run_agent_turn",
     "SEARCH_DOCS",
 ]

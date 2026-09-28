@@ -10,7 +10,7 @@ from api.app import app
 from api.dependencies import get_llm, get_source_state_store, get_store
 from ingestion.source_state_store import SourceStateStore
 from llm.errors import LLMUnavailableError
-from onboarding.buddy_agent import NO_FILTERED_RESULTS_MESSAGE
+from rag.filters import NO_FILTERED_RESULTS_MESSAGE
 from rag.types import Chunk
 from tests.stubs.llm import ScriptedLLMClient, StubLLMClient
 from tests.stubs.store import StubVectorStore

@@ -19,15 +19,14 @@ count-only summary silently restores the second pass.
 import os
 import secrets
 import sys
-from collections.abc import Iterator, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator
 from dataclasses import dataclass
 
-from agents.tools.base import Invocation, ToolRegistry, ToolResult
+from agents.tools.base import Invocation, ToolRegistry, run_tool_calls
 from agents.tools.evidence import format_evidence, limit_evidence
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
-from llm.base import ChatResult, LLMClient, Message, ReasoningDelta, TextDelta, ToolCall
+from llm.base import ChatResult, LLMClient, Message, ReasoningDelta, TextDelta
 from rag.source_filter import SourceExclusions
 from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
@@ -36,11 +35,6 @@ from store.base import VectorStore
 # when hops keep coming back partly empty — a turn whose searches all landed
 # ends the loop (see `run`).
 _MAX_STEPS = 3
-
-# Searches asked for in the same turn run together. The cap is low because each
-# `retrieve` already forks a pair of threads internally (`rag.hybrid`), so the
-# real thread count is about double this.
-_MAX_PARALLEL_TOOLS = 4
 
 _DEBUG_OFF = {"", "0", "false", "no", "off"}
 
@@ -127,32 +121,6 @@ class ChatAgent:
             ]
         )
 
-    def _run_one(self, call: ToolCall) -> ToolResult:
-        tool = self._tools.get(call.name)
-        if tool is None:
-            return ToolResult.empty(f"Unknown tool: {call.name!r}.")
-        return tool.execute(call.arguments)
-
-    def _run_tools(self, calls: Sequence[ToolCall]) -> list[ToolResult]:
-        """Run a turn's tool calls, concurrently when there is more than one.
-
-        The prompt asks the model to request every search it needs in one turn,
-        which only pays off if they overlap: each search is a network
-        round-trip (an embedding call) plus a corpus scan, so running three
-        serially costs three times what running them together does.
-
-        Safe because the tools only read — the process-wide BM25 index guards
-        its rebuild with a lock (`rag.hybrid.BM25IndexCache`), the store's
-        queries are reads, and the SDK HTTP clients are thread-safe. Results
-        come back in call order (``map``), so what the model and the caller see
-        never depends on which search happened to finish first.
-        """
-        if len(calls) == 1:
-            return [self._run_one(calls[0])]
-        workers = min(len(calls), _MAX_PARALLEL_TOOLS)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(self._run_one, calls))
-
     def run(self, question: str, history: list[Message]) -> Iterator[ChatEvent]:
         """Answer ``question``, yielding tool use, evidence and answer tokens.
 
@@ -214,7 +182,9 @@ class ChatAgent:
 
             all_found = True
             for call, tool_result in zip(
-                result.tool_calls, self._run_tools(result.tool_calls), strict=True
+                result.tool_calls,
+                run_tool_calls(self._tools, result.tool_calls),
+                strict=True,
             ):
                 chunks = limit_evidence(tool_result.chunks)
                 matched_chunks = tool_result.matched_chunks(chunks)
