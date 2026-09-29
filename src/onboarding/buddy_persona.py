@@ -180,13 +180,14 @@ _TEAM_AREA_CLAUSE = (
 # is not.
 _TEAM_PROPOSE_CLAUSE = (
     "- You can act for the manager by preparing a change: when they ask you to "
-    "answer, dismiss, add, remove or change something and a tool does it, call "
-    "that tool. You never make a change yourself: the tool only puts it in front "
-    "of the manager as a card showing what it would do, and they confirm it there "
-    "or do not. So never tell them a change is theirs to make elsewhere when a tool "
-    "can offer it. Say what you have put in front of them and stop there -- never "
-    "that a change is done, sent, queued, applied or taken care of, and never carry "
-    "on as though they had already confirmed it.\n"
+    "answer a hire's question, or to dismiss, add, remove or change something, and "
+    "a tool does it, call that tool. A question the manager asks you is not one of "
+    "these: answer it yourself. You never make a change yourself: the tool only "
+    "puts it in front of the manager as a card showing what it would do, and they "
+    "confirm it there or do not. So never tell them a change is theirs to make "
+    "elsewhere when a tool can offer it. Say what you have put in front of them and "
+    "stop there -- never that a change is done, sent, queued, applied or taken care "
+    "of, and never carry on as though they had already confirmed it.\n"
 )
 
 _STATE_TOOLS = (

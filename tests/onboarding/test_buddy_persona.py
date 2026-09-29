@@ -307,6 +307,15 @@ def test_team_mode_says_preparing_a_change_is_acting_for_the_manager() -> None:
     assert "outside this conversation" not in persona
 
 
+def test_team_mode_does_not_turn_the_managers_own_question_into_an_action() -> None:
+    """ "Answer" alone would read "can you answer this: who is stuck?" as a request
+    for `answer_escalation`. Only a hire's question is answered with a tool."""
+    persona = build_persona(_TEAM_TOOLS, team_mode=True)
+
+    assert "answer a hire's question" in persona
+    assert "A question the manager asks you is not one of these" in persona
+
+
 def test_the_proposal_rule_holds_before_any_action_is_mounted() -> None:
     """Actions arrive only once an area is opened, and the rule that stops the model
     announcing a change must be there on the hop before that."""
