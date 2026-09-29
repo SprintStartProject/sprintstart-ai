@@ -49,7 +49,7 @@ class _GradedItem(BaseModel):
 
 
 class _Payload(BaseModel):
-    results: list[_GradedItem] = []
+    results: list[_GradedItem]
 
 
 def _build_prompt(answers: list[GradeAnswerItem]) -> list[Message]:
@@ -67,14 +67,19 @@ def _build_prompt(answers: list[GradeAnswerItem]) -> list[Message]:
 
 
 def _grade(llm: LLMClient, to_grade: list[GradeAnswerItem]) -> dict[str, _GradedItem]:
-    """Grade in one call, asking once more when the reply is not valid JSON.
+    """Grade in one call, asking once more when the reply is unusable.
 
     An unreadable reply marks every answer in it "could not be graded" -- which the
     caller records as wrong. A small local model breaks its JSON now and then, and
     a hire whose right answer came back wrong for that reason has been told
     something false about their own knowledge. One correction round is cheap
     against that.
+
+    Valid JSON is not enough: a reply that leaves an answer out (``{}``, or one id
+    missing) would record that answer as wrong just the same, so it gets the same
+    correction round. It must hold exactly one grade per requested id.
     """
+    expected_ids = {item.id for item in to_grade}
     messages = _build_prompt(to_grade)
     for attempt in range(_MAX_GRADING_ATTEMPTS):
         try:
@@ -83,7 +88,17 @@ def _grade(llm: LLMClient, to_grade: list[GradeAnswerItem]) -> dict[str, _Graded
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         try:
             payload = _Payload.model_validate_json(extract_json_object(raw))
-            return {item.id: item for item in payload.results}
+            graded_by_id = {item.id: item for item in payload.results}
+            if (
+                len(payload.results) != len(to_grade)
+                or set(graded_by_id) != expected_ids
+            ):
+                raise ValueError(
+                    "grading response does not match the requested answer ids: "
+                    f"expected {sorted(expected_ids)}, got "
+                    f"{[item.id for item in payload.results]}"
+                )
+            return graded_by_id
         except (ValidationError, json.JSONDecodeError, ValueError) as exc:
             logger.warning(
                 "Could not parse grade-answers output (attempt %d): %s",
