@@ -134,7 +134,7 @@ _APP_GUIDE_CLAUSE = (
     "write arrival steps), what the page they are on is for -- are answered by "
     "`get_app_guide`, never by `search_docs`: the docs describe the project the team "
     "works on, not this app. Call it before answering, even when you think you know, "
-    "and read \"this page\" or \"here\" as the page it says they are looking at.\n"
+    'and read "this page" or "here" as the page it says they are looking at.\n'
     "- Describe only the pages and buttons the guide names, in its words, and link a "
     "page as a Markdown link to its path, like [Team Management](/team-management). "
     "Never send somebody to a page the guide does not list as theirs to open: when it "
