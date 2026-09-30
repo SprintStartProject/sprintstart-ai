@@ -293,7 +293,27 @@ def test_team_mode_never_claims_to_have_made_a_change() -> None:
     persona = build_persona(_TEAM_TOOLS, team_mode=True)
 
     assert "You never make a change yourself" in persona
-    assert "confirms it outside this conversation" in persona
+    assert "never that a change is done, sent" in persona
+
+
+def test_team_mode_says_preparing_a_change_is_acting_for_the_manager() -> None:
+    """Seen live: told only that the manager confirms changes "outside this
+    conversation", the buddy said it could not answer escalations for them and never
+    looked for the tool that offers the answer."""
+    persona = build_persona(_TEAM_TOOLS, team_mode=True)
+
+    assert "You can act for the manager by preparing a change" in persona
+    assert "call that tool" in persona
+    assert "outside this conversation" not in persona
+
+
+def test_team_mode_does_not_turn_the_managers_own_question_into_an_action() -> None:
+    """ "Answer" alone would read "can you answer this: who is stuck?" as a request
+    for `answer_escalation`. Only a hire's question is answered with a tool."""
+    persona = build_persona(_TEAM_TOOLS, team_mode=True)
+
+    assert "answer a hire's question" in persona
+    assert "A question the manager asks you is not one of these" in persona
 
 
 def test_the_proposal_rule_holds_before_any_action_is_mounted() -> None:
@@ -312,6 +332,7 @@ def test_team_mode_explains_areas_only_when_open_area_is_mounted() -> None:
 
     assert "`open_area`" in with_areas
     assert "available on your *next* step" in with_areas
+    assert "before telling them it cannot be done" in with_areas
     assert "open_area" not in without
 
 

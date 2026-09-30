@@ -161,6 +161,10 @@ _TEAM_AREA_CLAUSE = (
     "one. Call `open_area` for the area they are actually asking about, and its "
     "tools become available on your *next* step, not this one. Do not open an area "
     "on the chance it might be useful.\n"
+    "- A tool you cannot see yet is usually in an area you have not opened. When "
+    "the manager asks you to do something and nothing mounted does it, find the "
+    "area whose tools do it in the `open_area` definition and open it, before "
+    "telling them it cannot be done.\n"
 )
 
 # Deliberately a rule about you rather than about a named tool. Which actions are
@@ -168,12 +172,22 @@ _TEAM_AREA_CLAUSE = (
 # must never be missing -- it is what stops you telling a manager that a change
 # happened. It stays true when nothing is mounted to propose, and it names nothing
 # that is not there.
+#
+# It has to say both halves. Seen live with only the second: "confirms it outside
+# this conversation" was read as "changes are not yours to offer", and the buddy
+# told a manager it could not answer escalations for them and never looked for the
+# tool that does. Offering the change *is* acting on their behalf; only making it
+# is not.
 _TEAM_PROPOSE_CLAUSE = (
-    "- You never make a change yourself. A tool that would change something only "
-    "offers it: the manager sees what it would do and confirms it outside this "
-    "conversation, or does not. So say what you have put in front of them and "
-    "stop there -- never that a change is done, queued, applied or taken care of, "
-    "and never carry on as though they had already confirmed it.\n"
+    "- You can act for the manager by preparing a change: when they ask you to "
+    "answer a hire's question, or to dismiss, add, remove or change something, and "
+    "a tool does it, call that tool. A question the manager asks you is not one of "
+    "these: answer it yourself. You never make a change yourself: the tool only "
+    "puts it in front of the manager as a card showing what it would do, and they "
+    "confirm it there or do not. So never tell them a change is theirs to make "
+    "elsewhere when a tool can offer it. Say what you have put in front of them and "
+    "stop there -- never that a change is done, sent, queued, applied or taken care "
+    "of, and never carry on as though they had already confirmed it.\n"
 )
 
 _STATE_TOOLS = (
