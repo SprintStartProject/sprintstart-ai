@@ -119,6 +119,28 @@ _ASSESS_CLAUSE = (
     "later, so never call it a score, a result, or final.\n"
 )
 
+# Both halves are the point. The first is routing: "how do I create a project?" is
+# a question about *this app*, and the corpus -- the project's own material -- has
+# never heard of its pages, so a mentor that searches it either says nothing or
+# describes a screen that does not exist. The second is the constraint that makes
+# the answer safe: the guide is filtered for the reader, so a page it does not list
+# is one their sidebar does not have, and sending them there is a dead end.
+#
+# Shared by both personas: a manager asks where things are at least as often as a
+# hire does, and nothing in it presumes which of the two is reading.
+_APP_GUIDE_CLAUSE = (
+    "- Questions about this app itself -- where a page or button is, how to do "
+    "something here (create a project, set up or choose a role, connect a source, "
+    "write arrival steps), what the page they are on is for -- are answered by "
+    "`get_app_guide`, never by `search_docs`: the docs describe the project the team "
+    "works on, not this app. Call it before answering, even when you think you know, "
+    "and read \"this page\" or \"here\" as the page it says they are looking at.\n"
+    "- Describe only the pages and buttons the guide names, in its words, and link a "
+    "page as a Markdown link to its path, like [Team Management](/team-management). "
+    "Never send somebody to a page the guide does not list as theirs to open: when it "
+    "says somebody else does it, say who to ask.\n"
+)
+
 _SEARCH_ONLY_CLAUSE = (
     "- This turn you have `search_docs` and nothing else: you are answering from "
     "the project's own material, not acting on anybody's behalf. Answer what the "
@@ -250,6 +272,10 @@ def build_persona(
             f"process works, and the hire-state tools ({rendered}) for the hire's "
             "own progress.\n"
         )
+    # Straight after the routing rule above, which it narrows: "how this product
+    # works" reads as including the app, and it does not.
+    if "get_app_guide" in available:
+        parts.append(_APP_GUIDE_CLAUSE)
 
     # After the list above, which it narrows: that clause sorts tools by subject, and
     # "what should I work on" belongs to no subject cleanly enough to be routed by it.
@@ -310,6 +336,8 @@ def _team_persona(available: set[str], capabilities_enabled: bool) -> str:
             "`search_docs` for how the project itself works. A member id the tools "
             "give you is how you name somebody; never guess one.\n"
         )
+    if "get_app_guide" in available:
+        parts.append(_APP_GUIDE_CLAUSE)
     parts.append(_TEAM_FACTS_CLAUSE)
     if "open_area" in available:
         parts.append(_TEAM_AREA_CLAUSE)
