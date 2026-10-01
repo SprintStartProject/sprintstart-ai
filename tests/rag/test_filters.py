@@ -4,9 +4,10 @@ from rag.filters import (
     decode_project_ids,
     encode_project_ids,
     matches_retrieval_filters,
+    normalize_source_system,
     where_filter_for_chroma,
 )
-from rag.types import Chunk, RetrievalFilters
+from rag.types import Chunk, RetrievalFilters, is_source_system
 
 
 def test_source_system_filter_matches_allowed_system() -> None:
@@ -52,6 +53,37 @@ def test_confluence_source_system_survives_ingest_and_filtering() -> None:
         chunk,
         RetrievalFilters(source_systems=["GITHUB"]),
     )
+
+
+def test_notion_source_system_survives_ingest_and_filtering() -> None:
+    # Without NOTION in the known systems the ingest silently tagged the chunk
+    # with no source system, so a Notion filter could never find it.
+    chunk = to_chunk(
+        ParsedChunk(
+            content="How we run the sprint review",
+            kind="text",
+            metadata={"filename": "page-4f2a.md"},
+        ),
+        artifact_id="notion:7c1d2b0e-1111-4222-8333-444455556666:page:4f2a",
+        embedding=[1.0, 0.0],
+        artifact_type="PAGE",
+        source_system="NOTION",
+    )
+
+    assert chunk.source_system == "NOTION"
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["NOTION"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB"]),
+    )
+
+
+def test_notion_source_system_is_recognised_case_insensitively() -> None:
+    assert normalize_source_system("notion") == "NOTION"
+    assert is_source_system("NOTION")
 
 
 def test_source_timestamp_preferred_over_indexed_at() -> None:
