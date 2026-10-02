@@ -178,7 +178,7 @@ def test_omitting_both_modes_is_the_hire_mentor(client: TestClient) -> None:
 
     assert response.status_code == 200
     persona = response.json()["messages"][0]["content"]
-    assert "the mentor who guides a new hire" in persona
+    assert "the tutor who guides a new hire" in persona
     assert "manager of one project" not in persona
 
 
