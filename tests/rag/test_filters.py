@@ -3,6 +3,7 @@ from ingestion.models import ParsedChunk
 from rag.filters import (
     decode_project_ids,
     encode_project_ids,
+    has_narrowing_filters,
     matches_retrieval_filters,
     where_filter_for_chroma,
 )
@@ -28,6 +29,16 @@ def test_source_system_filter_matches_allowed_system() -> None:
         chunk,
         RetrievalFilters(source_systems=["UPLOAD"]),
     )
+
+
+def test_only_a_caller_chosen_narrowing_counts_as_narrowing() -> None:
+    """The always-present project scope must never look like a narrowing."""
+    assert not has_narrowing_filters(None)
+    assert not has_narrowing_filters(RetrievalFilters(project_id="p1"))
+    assert not has_narrowing_filters(RetrievalFilters(source_systems=[]))
+    assert has_narrowing_filters(RetrievalFilters(source_systems=["JIRA"]))
+    assert has_narrowing_filters(RetrievalFilters(time_from="2025-01-01T00:00:00Z"))
+    assert has_narrowing_filters(RetrievalFilters(time_to="2025-12-31T00:00:00Z"))
 
 
 def test_confluence_source_system_survives_ingest_and_filtering() -> None:

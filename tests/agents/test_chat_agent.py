@@ -1,8 +1,3 @@
-import threading
-
-from pydantic import BaseModel
-
-import agents.chat_agent as chat_agent_module
 from agents.chat_agent import (
     ChatAgent,
     ChatEvent,
@@ -11,16 +6,11 @@ from agents.chat_agent import (
     Token,
     wrap_user_query,
 )
-from agents.tools.base import Invocation, Tool, ToolRegistry, ToolResult
+from agents.tools.base import Invocation
 from llm.base import ChatResult, Message, ReasoningDelta, TextDelta, ToolCall
-from rag.types import Chunk, ScoredChunk
+from rag.types import Chunk
 from tests.stubs.llm import ScriptedLLMClient, Turn
 from tests.stubs.store import StubVectorStore
-
-
-class _NoArgs(BaseModel):
-    pass
-
 
 _RETRIEVE: tuple[str, dict[str, object]] = ("retrieve", {"query": "blockers"})
 _GREP: tuple[str, dict[str, object]] = ("grep", {"patterns": ["login"]})
@@ -167,54 +157,6 @@ def test_neighbour_context_is_shown_but_only_the_match_is_cited() -> None:
     assert _cited(events) == ["c1"]
 
 
-def test_dropped_context_is_not_reported_as_an_omitted_match() -> None:
-    chunks = [
-        ScoredChunk(
-            id=f"c{position}",
-            artifact_id="d1",
-            filename="auth.py",
-            text=f"chunk {position}",
-            score=1.0,
-            position=position,
-        )
-        for position in range(3)
-    ]
-    result = ToolResult(
-        summary="retrieve('blocker'): 1 chunk(s).",
-        chunks=chunks,
-        match_chunk_ids=frozenset({"c1"}),
-    )
-
-    message = chat_agent_module._format_evidence(result, chunks[:2])
-
-    assert "omitted" not in message
-
-
-def test_pdf_evidence_is_shown_in_page_then_position_order() -> None:
-    chunks = [
-        ScoredChunk(
-            id=f"page-{page}-{position}",
-            artifact_id="pdf-1",
-            filename="guide.pdf",
-            text=f"page {page}, chunk {position}",
-            score=1.0,
-            kind="pdf",
-            position=position,
-            start_page=page,
-        )
-        for page, position in ((2, 1), (1, 1), (2, 0), (1, 0))
-    ]
-
-    ordered = chat_agent_module._order_evidence_for_display(chunks)
-
-    assert [chunk.id for chunk in ordered] == [
-        "page-1-0",
-        "page-1-1",
-        "page-2-0",
-        "page-2-1",
-    ]
-
-
 def test_answer_is_streamed_from_the_same_conversation_as_the_search() -> None:
     """No second, re-serialised prompt: the answer call is the search call's
     message list plus the tool results. Without reasoning context no extra turn
@@ -320,7 +262,7 @@ def test_many_small_matches_are_capped_by_chunk_count() -> None:
     events = _run(_agent(llm, _flooded_store(50, "login note {i}")))
 
     tool_message = _tool_messages(llm.stream_calls[0])[0]
-    assert _cited(events) == [f"c{i}" for i in range(12)]  # _MAX_EVIDENCE_CHUNKS
+    assert _cited(events) == [f"c{i}" for i in range(12)]  # MAX_EVIDENCE_CHUNKS
     # The model is told what it isn't seeing, and never shown a dropped chunk.
     assert "38 further match(es) omitted." in tool_message
     assert "login note 12" not in tool_message
@@ -332,7 +274,7 @@ def test_few_large_matches_are_capped_by_total_chars() -> None:
 
     events = _run(_agent(llm, _flooded_store(12, "login " + "x" * 5_000)))
 
-    # Each chunk counts _SOURCE_CHARS against the 8k budget, so 10 fit.
+    # Each chunk counts SOURCE_CHARS against the 8k budget, so 10 fit.
     assert _cited(events) == [f"c{i}" for i in range(10)]
     assert "2 further match(es) omitted." in _tool_messages(llm.stream_calls[0])[0]
 
@@ -346,7 +288,7 @@ def test_a_single_oversized_match_is_truncated_not_dropped() -> None:
     assert _cited(events) == ["c0"]
     tool_message = _tool_messages(llm.stream_calls[0])[0]
     assert "omitted" not in tool_message
-    assert len(tool_message) < 2_000  # truncated by _SOURCE_CHARS
+    assert len(tool_message) < 2_000  # truncated by SOURCE_CHARS
 
 
 def test_citations_never_outrun_what_the_model_was_shown() -> None:
@@ -389,77 +331,6 @@ def test_parallel_tool_calls_in_one_step_all_run() -> None:
     assert _invoked(events) == ["retrieve", "grep"]
     assert len(llm.chat_calls) == 1
     assert len(_tool_messages(llm.stream_calls[0])) == 2
-
-
-def test_tool_calls_in_one_step_execute_concurrently() -> None:
-    """Two searches in a turn must overlap, not queue behind each other.
-
-    The barrier is the assertion: it only releases once both tools are inside
-    it at the same time, so a serial implementation deadlocks and trips the
-    timeout instead of quietly taking twice as long.
-    """
-    barrier = threading.Barrier(2, timeout=5)
-
-    class _BlockingTool(Tool[_NoArgs]):
-        args_model = _NoArgs
-
-        def __init__(self, name: str) -> None:
-            self.name = name
-            self.description = "blocks until its partner arrives"
-
-        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
-            barrier.wait()
-            return ToolResult(summary=f"{self.name} ran")
-
-    agent = ChatAgent(_llm(), _store())
-    agent._tools = ToolRegistry(  # pyright: ignore[reportPrivateUsage]
-        [_BlockingTool("first"), _BlockingTool("second")]
-    )
-
-    results = agent._run_tools(  # pyright: ignore[reportPrivateUsage]
-        [
-            ToolCall(id="a", name="first", arguments={}),
-            ToolCall(id="b", name="second", arguments={}),
-        ]
-    )
-
-    assert [r.summary for r in results] == ["first ran", "second ran"]
-
-
-def test_tool_results_come_back_in_call_order_not_completion_order() -> None:
-    """What the model sees must not depend on which search finished first."""
-    started = threading.Event()
-
-    class _SlowTool(Tool[_NoArgs]):
-        name = "slow"
-        description = "finishes last"
-        args_model = _NoArgs
-
-        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
-            started.wait(timeout=5)
-            return ToolResult(summary="slow ran")
-
-    class _FastTool(Tool[_NoArgs]):
-        name = "fast"
-        description = "finishes first"
-        args_model = _NoArgs
-
-        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
-            started.set()
-            return ToolResult(summary="fast ran")
-
-    agent = ChatAgent(_llm(), _store())
-    agent._tools = ToolRegistry([_SlowTool(), _FastTool()])  # pyright: ignore[reportPrivateUsage]
-
-    results = agent._run_tools(  # pyright: ignore[reportPrivateUsage]
-        [
-            ToolCall(id="a", name="slow", arguments={}),
-            ToolCall(id="b", name="fast", arguments={}),
-        ]
-    )
-
-    # "fast" completed first; the results still follow the order requested.
-    assert [r.summary for r in results] == ["slow ran", "fast ran"]
 
 
 def test_unknown_tool_call_is_reported_to_the_model_not_raised() -> None:

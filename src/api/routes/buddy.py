@@ -25,6 +25,7 @@ from onboarding.buddy_agent import run_agent_turn
 from onboarding.buddy_compact import compact_memory
 from onboarding.buddy_open import stream_session
 from onboarding.vocabulary import Vocabulary
+from rag.types import RetrievalFilters
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,21 @@ def _to_toolspec(schema: BuddyToolSpecSchema) -> ToolSpec:
     )
 
 
+def _narrowing(body: BuddyAgentRequest) -> RetrievalFilters | None:
+    """The reader's source-system and time narrowing, if they chose any.
+
+    The project scope is not in here: it is ``project_ids`` and always applies.
+    An empty source-system list means "all", as it did for chat.
+    """
+    if body.filters is None:
+        return None
+    return RetrievalFilters(
+        source_systems=body.filters.source_systems or None,
+        time_from=body.filters.time_from,
+        time_to=body.filters.time_to,
+    )
+
+
 @router.post(
     "/onboarding/buddy/agent",
     response_model=BuddyAgentResponse,
@@ -81,7 +97,7 @@ def buddy_agent(
 ) -> BuddyAgentResponse:
     """One turn of the tool-using buddy.
 
-    Executes ``search_docs`` locally (retrieval + citations) and returns as soon as it
+    Executes the searches locally (retrieval + citations) and returns as soon as it
     either has a final answer or needs a backend-only tool run. The backend carries the
     ``messages`` list back verbatim, each pending tool's result appended as a ``tool``.
 
@@ -107,6 +123,7 @@ def buddy_agent(
             project_ids=frozenset(body.project_ids),
             capabilities_enabled=body.capabilities_enabled,
             team_mode=body.team_mode,
+            filters=_narrowing(body),
         )
     except LLMUnavailableError as exc:
         raise HTTPException(
@@ -131,6 +148,7 @@ def buddy_agent(
             )
             for cit in result.citations
         ],
+        reasoning=result.reasoning,
     )
 
 
