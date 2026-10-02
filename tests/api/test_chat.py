@@ -152,6 +152,66 @@ def test_filtered_chat_forwards_reasoning_without_mixing_it_into_tokens(
     ]
 
 
+@pytest.mark.parametrize("value", ["BITBUCKET", "bitbucket"])
+def test_chat_accepts_a_bitbucket_source_filter(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore], value: str
+) -> None:
+    http_client, _, store = client
+    embedding = [1.0] + [0.0] * 767
+
+    class AnsweringLLM(StubLLMClient):
+        def stream(self, messages: list[Message]) -> Iterator[LLMStreamEvent]:
+            yield TextDelta("From Bitbucket.")
+
+    app.dependency_overrides[get_llm] = lambda: AnsweringLLM(embedding=embedding)
+    store.add(
+        [
+            Chunk(
+                id="chunk-1",
+                artifact_id="doc-1",
+                filename="widgets.md",
+                text="The widgets service retries three times.",
+                embedding=embedding,
+                project_ids=(_PROJECT,),
+                source_system="BITBUCKET",
+            )
+        ]
+    )
+
+    response = http_client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "How does widgets retry?",
+            "projectId": _PROJECT,
+            "filters": {"source_systems": [value]},
+        },
+    )
+
+    # Before BITBUCKET was a known source system this was rejected with a 422.
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    assert [event["content"] for event in events if event["type"] == "token"] == [
+        "From Bitbucket."
+    ]
+
+
+def test_chat_still_rejects_an_unknown_source_filter(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    http_client, _, _ = client
+
+    response = http_client.post(
+        "/api/v1/chat",
+        json={
+            "prompt": "Anything?",
+            "projectId": _PROJECT,
+            "filters": {"source_systems": ["GITLAB"]},
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_chat_emits_citation_when_chunks_exist(
     client: tuple[TestClient, StubLLMClient, StubVectorStore],
 ) -> None:
