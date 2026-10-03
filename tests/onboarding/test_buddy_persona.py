@@ -710,7 +710,9 @@ def test_the_guide_rule_forbids_sending_somebody_to_a_page_they_cannot_open() ->
     assert "Never send somebody to a page the guide does not list" in persona
     assert "say who to ask" in persona
     # Root-relative, so the chat opens it in place rather than in a new tab.
-    assert "[Team Management](/team-management)" in persona
+    assert "[Team](/team-management)" in persona
+    # A how-to's own link opens the tab the steps talk about.
+    assert "[Roles](/team-management?tab=roles)" in persona
 
 
 def test_the_guide_rule_is_absent_without_the_tool() -> None:

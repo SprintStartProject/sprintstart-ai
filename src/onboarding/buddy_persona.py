@@ -166,7 +166,9 @@ _APP_GUIDE_CLAUSE = (
     "works on, not this app. Call it before answering, even when you think you know, "
     'and read "this page" or "here" as the page it says they are looking at.\n'
     "- Describe only the pages and buttons the guide names, in its words, and link a "
-    "page as a Markdown link to its path, like [Team Management](/team-management). "
+    "page as a Markdown link to its path, like [Team](/team-management) -- or, where "
+    "the guide gives a how-to its own link, to that one, which opens the right tab: "
+    "[Roles](/team-management?tab=roles). "
     "Never send somebody to a page the guide does not list as theirs to open: when it "
     "says somebody else does it, say who to ask.\n"
 )
