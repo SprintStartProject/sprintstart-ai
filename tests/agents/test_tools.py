@@ -1,11 +1,13 @@
 import json
+import threading
 
 import pytest
 from pydantic import BaseModel
 
-from agents.tools.base import Tool, ToolRegistry, ToolResult
+from agents.tools.base import Tool, ToolRegistry, ToolResult, run_tool_calls
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
+from llm.base import ToolCall
 from rag.source_filter import SourceExclusions
 from rag.types import Chunk, RetrievalFilters
 from tests.stubs.llm import StubLLMClient
@@ -259,6 +261,84 @@ def test_registry_unknown_tool_returns_empty_result() -> None:
 def test_registry_rejects_duplicate_names() -> None:
     with pytest.raises(ValueError, match="Duplicate tool name"):
         ToolRegistry([_FakeTool(), _FakeTool()])
+
+
+def test_a_call_that_never_ran_is_flagged_as_an_error() -> None:
+    """So no caller's "nothing matched" wording can hide why it did not run."""
+    registry = ToolRegistry([_FakeTool()])
+
+    assert registry.execute("missing", {}).is_error is True
+    assert GrepTool(StubVectorStore()).execute({"wrong": "field"}).is_error is True
+    assert _FakeTool().execute({}).is_error is False
+
+
+def test_tool_calls_in_one_step_execute_concurrently() -> None:
+    """Two searches in one step must overlap, not queue behind each other.
+
+    The barrier is the assertion: it only releases once both tools are inside
+    it at the same time, so a serial implementation deadlocks and trips the
+    timeout instead of quietly taking twice as long.
+    """
+    barrier = threading.Barrier(2, timeout=5)
+
+    class _BlockingTool(Tool[_NoArgs]):
+        args_model = _NoArgs
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.description = "blocks until its partner arrives"
+
+        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
+            barrier.wait()
+            return ToolResult(summary=f"{self.name} ran")
+
+    registry = ToolRegistry([_BlockingTool("first"), _BlockingTool("second")])
+
+    results = run_tool_calls(
+        registry,
+        [
+            ToolCall(id="a", name="first", arguments={}),
+            ToolCall(id="b", name="second", arguments={}),
+        ],
+    )
+
+    assert [r.summary for r in results] == ["first ran", "second ran"]
+
+
+def test_tool_results_come_back_in_call_order_not_completion_order() -> None:
+    """What the model sees must not depend on which search finished first."""
+    started = threading.Event()
+
+    class _SlowTool(Tool[_NoArgs]):
+        name = "slow"
+        description = "finishes last"
+        args_model = _NoArgs
+
+        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
+            started.wait(timeout=5)
+            return ToolResult(summary="slow ran")
+
+    class _FastTool(Tool[_NoArgs]):
+        name = "fast"
+        description = "finishes first"
+        args_model = _NoArgs
+
+        def run(self, args: _NoArgs) -> ToolResult:  # noqa: ARG002
+            started.set()
+            return ToolResult(summary="fast ran")
+
+    registry = ToolRegistry([_SlowTool(), _FastTool()])
+
+    results = run_tool_calls(
+        registry,
+        [
+            ToolCall(id="a", name="slow", arguments={}),
+            ToolCall(id="b", name="fast", arguments={}),
+        ],
+    )
+
+    # "fast" completed first; the results still follow the order requested.
+    assert [r.summary for r in results] == ["slow ran", "fast ran"]
 
 
 # --- project scoping ---------------------------------------------------------

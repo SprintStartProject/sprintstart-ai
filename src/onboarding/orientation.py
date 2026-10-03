@@ -53,6 +53,7 @@ _MAX_TASK_TEXT = 4000
 # the same packet. A packet is disposable, but a hire who reloads the page and
 # reads different instructions has no reason to trust either version.
 _TEMPERATURE = 0.0
+_MAX_GENERATION_ATTEMPTS = 2
 
 # What each step's retrieval is looking for. These are *queries*, not prose the
 # hire ever sees — they exist so the evidence pool spans the whole path to a PR
@@ -205,6 +206,25 @@ def _build_prompt(
     return [
         Message(role="system", content=system),
         Message(role="user", content=user),
+    ]
+
+
+def _correction_prompt(
+    messages: list[Message], raw: str, error: AssemblyError
+) -> list[Message]:
+    """Ask once for the same packet with only its JSON corrected."""
+    return [
+        *messages,
+        Message(role="assistant", content=raw),
+        Message(
+            role="user",
+            content=(
+                f"That response could not be validated: {error}. Return the same "
+                "grounded packet again as one valid JSON object matching the schema "
+                "exactly. Return JSON only, with all quotes escaped and all commas "
+                "present."
+            ),
+        ),
     ]
 
 
@@ -374,19 +394,38 @@ def stream_orientation(
     yield progress.stage(
         "generating", f"Writing the packet from {len(chunks)} source(s)"
     )
-    raw = llm.generate(
-        _build_prompt(task_title, task_body, labels or [], touched_paths or [], chunks),
-        temperature=_TEMPERATURE,
+    messages = _build_prompt(
+        task_title, task_body, labels or [], touched_paths or [], chunks
     )
-    try:
-        payload = _parse_payload(raw)
-    except AssemblyError as exc:
-        logger.warning("Orientation assembly failed for task %r: %s", task_title, exc)
+    # One correction round, as phase assembly has: a small local model breaks the
+    # JSON now and then, and one broken quote used to cost the hire the whole
+    # packet. Asked back for the same content, it usually fixes its own syntax.
+    parse_error: AssemblyError | None = None
+    payload: _GenPayload | None = None
+    for attempt in range(_MAX_GENERATION_ATTEMPTS):
+        raw = llm.generate(messages, temperature=_TEMPERATURE)
+        try:
+            payload = _parse_payload(raw)
+            break
+        except AssemblyError as exc:
+            parse_error = exc
+            logger.warning(
+                "Orientation assembly attempt %d failed for task %r: %s",
+                attempt + 1,
+                task_title,
+                exc,
+            )
+            if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
+                yield progress.stage("generating", "Correcting invalid generated JSON")
+                messages = _correction_prompt(messages, raw, exc)
+
+    if payload is None:
+        assert parse_error is not None
         outcome = OrientationOutcome(
             status="skipped",
             chunks_retrieved=len(chunks),
             chunks_collapsed=collapsed,
-            notes=[str(exc)],
+            notes=[str(parse_error)],
         )
         yield progress.warning("The generated packet could not be read")
         yield progress.done("No orientation could be assembled", _dump(outcome))
