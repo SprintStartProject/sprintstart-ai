@@ -694,3 +694,33 @@ def test_search_only_names_grep_only_when_it_is_mounted() -> None:
     assert "`grep` for an exact name" in with_grep
     assert "`grep` for an exact name" in team
     assert "grep" not in without
+
+
+def test_app_questions_are_routed_to_the_guide_not_the_corpus() -> None:
+    """The corpus is the project's material; it has never heard of this app's pages."""
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    assert "`get_app_guide`, never by `search_docs`" in persona
+    assert "create a project" in persona
+
+
+def test_the_guide_rule_forbids_sending_somebody_to_a_page_they_cannot_open() -> None:
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    assert "Never send somebody to a page the guide does not list" in persona
+    assert "say who to ask" in persona
+    # Root-relative, so the chat opens it in place rather than in a new tab.
+    assert "[Team](/team-management)" in persona
+    # A how-to's own link opens the tab the steps talk about.
+    assert "[Roles](/team-management?tab=roles)" in persona
+
+
+def test_the_guide_rule_is_absent_without_the_tool() -> None:
+    assert "get_app_guide" not in build_persona(_ALL_TOOLS)
+    assert "get_app_guide" not in build_persona(_TEAM_TOOLS, team_mode=True)
+
+
+def test_a_manager_is_given_the_guide_rule_too() -> None:
+    persona = build_persona([*_TEAM_TOOLS, "get_app_guide"], team_mode=True)
+
+    assert "`get_app_guide`, never by `search_docs`" in persona
