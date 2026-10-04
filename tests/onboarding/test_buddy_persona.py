@@ -694,3 +694,50 @@ def test_search_only_names_grep_only_when_it_is_mounted() -> None:
     assert "`grep` for an exact name" in with_grep
     assert "`grep` for an exact name" in team
     assert "grep" not in without
+
+
+def test_app_questions_are_routed_to_the_guide_not_the_corpus() -> None:
+    """The corpus is the project's material; it has never heard of this app's pages."""
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    assert "`get_app_guide`, never by `search_docs`" in persona
+    assert "create a project" in persona
+
+
+def test_the_guide_rule_forbids_sending_somebody_to_a_page_they_cannot_open() -> None:
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    assert "Never send somebody to a page the guide does not list" in persona
+    assert "say who to ask" in persona
+    # Root-relative, so the chat opens it in place rather than in a new tab. A page
+    # everybody can open: an example is a temptation, so it must never be a dead end.
+    assert "[Board](/board)" in persona
+    # A how-to's own link opens the tab the steps talk about.
+    assert "gives a how-to its own link, to that one" in persona
+
+
+def test_the_guide_rule_frees_the_app_buttons_from_the_no_button_rule() -> None:
+    """'Never describe a button' is about chat proposals, not the app's own pages."""
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    assert "Never describe a button instead of making one" in persona
+    assert "not the chat buttons your tools make" in persona
+
+
+def test_the_guide_rule_follows_the_routing_rule_it_narrows() -> None:
+    """'How this product works' reads as including the app; the next rule says not."""
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    routing = persona.index("hire-state tools")
+    assert routing < persona.index("`get_app_guide`, never by")
+
+
+def test_the_guide_rule_is_absent_without_the_tool() -> None:
+    assert "get_app_guide" not in build_persona(_ALL_TOOLS)
+    assert "get_app_guide" not in build_persona(_TEAM_TOOLS, team_mode=True)
+
+
+def test_a_manager_is_given_the_guide_rule_too() -> None:
+    persona = build_persona([*_TEAM_TOOLS, "get_app_guide"], team_mode=True)
+
+    assert "`get_app_guide`, never by `search_docs`" in persona
