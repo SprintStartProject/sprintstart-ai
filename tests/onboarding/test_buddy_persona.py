@@ -709,10 +709,27 @@ def test_the_guide_rule_forbids_sending_somebody_to_a_page_they_cannot_open() ->
 
     assert "Never send somebody to a page the guide does not list" in persona
     assert "say who to ask" in persona
-    # Root-relative, so the chat opens it in place rather than in a new tab.
-    assert "[Team](/team-management)" in persona
+    # Root-relative, so the chat opens it in place rather than in a new tab. A page
+    # everybody can open: an example is a temptation, so it must never be a dead end.
+    assert "[Board](/board)" in persona
     # A how-to's own link opens the tab the steps talk about.
-    assert "[Roles](/team-management?tab=roles)" in persona
+    assert "gives a how-to its own link, to that one" in persona
+
+
+def test_the_guide_rule_frees_the_app_buttons_from_the_no_button_rule() -> None:
+    """'Never describe a button' is about chat proposals, not the app's own pages."""
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    assert "Never describe a button instead of making one" in persona
+    assert "not the chat buttons your tools make" in persona
+
+
+def test_the_guide_rule_follows_the_routing_rule_it_narrows() -> None:
+    """'How this product works' reads as including the app; the next rule says not."""
+    persona = build_persona([*_ALL_TOOLS, "get_app_guide"])
+
+    routing = persona.index("hire-state tools")
+    assert routing < persona.index("`get_app_guide`, never by")
 
 
 def test_the_guide_rule_is_absent_without_the_tool() -> None:
