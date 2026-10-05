@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏃 sprintstart-ai
+# 🚀 sprintstart-ai
 
 **Turn a project's scattered knowledge into onboarding that actually works.**
 
@@ -35,7 +35,7 @@ New hires spend their first weeks hunting through a repo, a tracker, a wiki and 
 
 **Fail-closed by project.** Retrieval is always scoped to a project, and a chunk with no project is invisible to everyone.
 
-## 🚀 Quick start
+## ⚡ Quick start
 
 You need Python 3.12+, [uv](https://docs.astral.sh/uv/) and an OpenAI API key.
 
