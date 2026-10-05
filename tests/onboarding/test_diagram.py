@@ -121,6 +121,35 @@ def test_assembles_a_diagram_with_the_sources_it_drew_on() -> None:
     assert outcome.provenance.corpus_fingerprint
 
 
+def test_broken_json_is_corrected_once_rather_than_losing_the_diagram() -> None:
+    store = _store(*_TWO_CHUNKS)
+    llm = _llm(
+        _payload(
+            [
+                _node("controller", "ReportController", ["c1"]),
+                _node("repo", "ReportRepository", ["c2"]),
+            ],
+            [_edge("controller", "repo")],
+        )
+    )
+    good = llm.generate
+    seen: list[list[object]] = []
+
+    def flaky(messages: list[object], **kwargs: object) -> str:
+        seen.append(messages)
+        if len(seen) == 1:
+            return '{"summary": "cut off'
+        return good(messages, **kwargs)  # type: ignore[arg-type]
+
+    llm.generate = flaky  # type: ignore[method-assign]
+
+    outcome = assemble_diagram(llm, store, subject=_SUBJECT, project_ids=_PIDS)
+
+    assert outcome.status == "assembled"
+    assert len(seen) == 2
+    assert "could not be validated" in str(seen[1][-1])
+
+
 def test_a_node_that_cites_nothing_is_dropped_and_takes_its_edges_with_it() -> None:
     """The grounding rule, and the reason it has to reach the edges too.
 

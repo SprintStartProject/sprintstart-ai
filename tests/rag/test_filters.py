@@ -3,6 +3,7 @@ from ingestion.models import ParsedChunk
 from rag.filters import (
     decode_project_ids,
     encode_project_ids,
+    has_narrowing_filters,
     matches_retrieval_filters,
     normalize_source_system,
     where_filter_for_chroma,
@@ -31,6 +32,16 @@ def test_source_system_filter_matches_allowed_system() -> None:
     )
 
 
+def test_only_a_caller_chosen_narrowing_counts_as_narrowing() -> None:
+    """The always-present project scope must never look like a narrowing."""
+    assert not has_narrowing_filters(None)
+    assert not has_narrowing_filters(RetrievalFilters(project_id="p1"))
+    assert not has_narrowing_filters(RetrievalFilters(source_systems=[]))
+    assert has_narrowing_filters(RetrievalFilters(source_systems=["JIRA"]))
+    assert has_narrowing_filters(RetrievalFilters(time_from="2025-01-01T00:00:00Z"))
+    assert has_narrowing_filters(RetrievalFilters(time_to="2025-12-31T00:00:00Z"))
+
+
 def test_confluence_source_system_survives_ingest_and_filtering() -> None:
     chunk = to_chunk(
         ParsedChunk(
@@ -48,6 +59,32 @@ def test_confluence_source_system_survives_ingest_and_filtering() -> None:
     assert matches_retrieval_filters(
         chunk,
         RetrievalFilters(source_systems=["CONFLUENCE"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB"]),
+    )
+
+
+def test_bitbucket_source_system_survives_ingest_and_filtering() -> None:
+    # Without BITBUCKET in the known systems the ingest silently tagged the chunk
+    # with no source system, so a Bitbucket filter could never find it.
+    chunk = to_chunk(
+        ParsedChunk(
+            content="Why the widgets service retries",
+            kind="text",
+            metadata={"filename": "widgets.md"},
+        ),
+        artifact_id="bitbucket:acme/widgets:FILE:widgets.md",
+        embedding=[1.0, 0.0],
+        artifact_type="FILE",
+        source_system="BITBUCKET",
+    )
+
+    assert chunk.source_system == "BITBUCKET"
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["BITBUCKET"]),
     )
     assert not matches_retrieval_filters(
         chunk,
@@ -81,9 +118,13 @@ def test_notion_source_system_survives_ingest_and_filtering() -> None:
     )
 
 
-def test_notion_source_system_is_recognised_case_insensitively() -> None:
+def test_source_system_is_recognised_case_insensitively() -> None:
+    assert normalize_source_system("bitbucket") == "BITBUCKET"
+    assert is_source_system("BITBUCKET")
     assert normalize_source_system("notion") == "NOTION"
     assert is_source_system("NOTION")
+    assert normalize_source_system("gitlab") is None
+    assert normalize_source_system(None) is None
 
 
 def test_source_timestamp_preferred_over_indexed_at() -> None:

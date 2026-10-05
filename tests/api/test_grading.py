@@ -158,6 +158,83 @@ def test_unparseable_llm_output_marks_ungraded_as_incorrect(
     assert result["correct"] is False
 
 
+def test_broken_json_is_corrected_once_before_an_answer_counts_as_wrong(
+    client: tuple[TestClient, StubLLMClient],
+):
+    """An unreadable reply used to record a right answer as wrong."""
+    http_client, _ = client
+    calls: list[list[Message]] = []
+
+    class FlakyLLM(StubLLMClient):
+        def generate(self, messages: list[Message]) -> str:
+            calls.append(messages)
+            if len(calls) == 1:
+                return '{"results": [{"id": "q1", "correct": true'
+            return '{"results": [{"id": "q1", "correct": true, "feedback": "Yes."}]}'
+
+    app.dependency_overrides[get_llm] = lambda: FlakyLLM()
+
+    response = http_client.post(
+        "/api/v1/grade-answers",
+        json={
+            "answers": [
+                {
+                    "id": "q1",
+                    "question": "Q1",
+                    "reference_answer": "a1",
+                    "user_answer": "a1",
+                }
+            ]
+        },
+    )
+
+    assert response.json()["results"][0]["correct"] is True
+    assert len(calls) == 2
+    assert "could not be validated" in str(calls[1][-1])
+
+
+_TWO_ANSWERS = {
+    "answers": [
+        {"id": "q1", "question": "Q1", "reference_answer": "a1", "user_answer": "a1"},
+        {"id": "q2", "question": "Q2", "reference_answer": "a2", "user_answer": "a2"},
+    ]
+}
+_BOTH_RIGHT = (
+    '{"results": [{"id": "q1", "correct": true}, {"id": "q2", "correct": true}]}'
+)
+
+
+@pytest.mark.parametrize(
+    "first_reply",
+    [
+        "{}",
+        '{"results": [{"id": "q1", "correct": true}]}',
+        '{"results": [{"id": "q1", "correct": true}, {"id": "q1", "correct": true}]}',
+        '{"results": [{"id": "q1", "correct": true}, {"id": "q9", "correct": true}]}',
+    ],
+    ids=["empty", "missing-id", "duplicate-id", "unexpected-id"],
+)
+def test_a_reply_that_does_not_grade_every_answer_is_corrected_first(
+    client: tuple[TestClient, StubLLMClient], first_reply: str
+):
+    """Valid JSON that leaves an answer ungraded used to record it as wrong."""
+    http_client, _ = client
+    calls: list[list[Message]] = []
+
+    class IncompleteLLM(StubLLMClient):
+        def generate(self, messages: list[Message]) -> str:
+            calls.append(messages)
+            return first_reply if len(calls) == 1 else _BOTH_RIGHT
+
+    app.dependency_overrides[get_llm] = lambda: IncompleteLLM()
+
+    response = http_client.post("/api/v1/grade-answers", json=_TWO_ANSWERS)
+
+    assert [r["correct"] for r in response.json()["results"]] == [True, True]
+    assert len(calls) == 2
+    assert "could not be validated" in str(calls[1][-1])
+
+
 def test_llm_failure_returns_503(client: tuple[TestClient, StubLLMClient]):
     http_client, _ = client
 
