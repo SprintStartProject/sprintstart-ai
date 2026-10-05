@@ -9,7 +9,7 @@
   <a href="https://github.com/SprintStartProject/sprintstart-ai/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/SprintStartProject/sprintstart-ai/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-blue">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-streaming%20SSE-009688">
-  <img alt="LLM backends" src="https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI--compatible%20%7C%20Anthropic-8A2BE2">
+  <img alt="LLM backends" src="https://img.shields.io/badge/LLM-OpenAI--compatible%20%7C%20Anthropic%20%7C%20Ollama-8A2BE2">
   <a href="https://sprintstart.readthedocs.io/en/latest/"><img alt="Docs" src="https://img.shields.io/badge/docs-readthedocs-informational"></a>
 </p>
 
@@ -57,9 +57,9 @@ flowchart LR
     AG --> LLM{{LLM client}}
     ON --> LLM
     ING --> LLM
-    LLM --> O[Ollama]
-    LLM --> OA[OpenAI-compatible]
+    LLM --> OA[OpenAI API / compatible]
     LLM --> AN[Anthropic]
+    LLM -.-> O[Ollama, local dev]
 ```
 
 **Two shapes of AI, on purpose:**
@@ -69,24 +69,30 @@ flowchart LR
 
 ## Quick start
 
-You need Python 3.12+, [uv](https://docs.astral.sh/uv/), and an LLM. The default is a local [Ollama](https://ollama.com/):
-
-```bash
-ollama pull llama3.2
-ollama pull nomic-embed-text
-ollama pull llava:7b          # optional: image captioning
-```
+You need Python 3.12+, [uv](https://docs.astral.sh/uv/), and an LLM provider. The default setup is the **OpenAI API**. Any OpenAI-compatible endpoint (Azure, LiteLLM, OpenRouter, vLLM) works the same way.
 
 ```bash
 uv sync
-cp .env.example .env          # fill in the values
+cp .env.example .env          # then set the values below
 uv run python -m src.main     # http://localhost:8000, interactive docs at /docs
 ```
 
-Or with Docker (`OLLAMA_BASE_URL` is rewritten to `host.docker.internal` for you):
+Minimal `.env`:
+
+```env
+LLM_BACKEND=openai            # required: unset falls back to Ollama
+OPENAI_API_KEY=sk-...
+OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_EMBED_MODEL=text-embedding-3-small   # no default, must be set for ingestion and retrieval
+CHROMA_PATH=./data/chroma     # unset means in-memory, data is lost on restart
+```
+
+`OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`. Point it at a proxy or another provider to use something else. Set `OPENAI_VISION_MODEL` to enable image captioning.
+
+Or with Docker:
 
 ```bash
-cp .env.example .env
+cp .env.example .env          # same values as above
 docker-compose up --build
 ```
 
@@ -96,18 +102,35 @@ Then check that it is alive:
 curl localhost:8000/api/v1/health      # 503 if the LLM backend is unreachable
 ```
 
-### Not using Ollama?
+### Other providers
 
-Chat and embeddings can run on different providers. For example, Claude for chat and an OpenAI-compatible endpoint for embeddings:
+**Anthropic** for chat has no embeddings API, so pair it with an OpenAI-compatible embedding backend:
 
 ```env
 LLM_BACKEND=anthropic
 ANTHROPIC_API_KEY=...
-EMBED_BACKEND=openai          # Anthropic has no embeddings API
-OPENAI_BASE_URL=...
+EMBED_BACKEND=openai
 OPENAI_API_KEY=...
 OPENAI_EMBED_MODEL=...
 ```
+
+`EMBED_BACKEND` can split embeddings off to a different provider with any backend. `OPENAI_EMBED_BASE_URL` and `OPENAI_EMBED_API_KEY` override the endpoint and key for embeddings only.
+
+**Ollama** is supported for small local experiments, but running it on consumer hardware does not hold up against a full project corpus. If you do use it:
+
+```bash
+ollama pull llama3.2 && ollama pull nomic-embed-text
+```
+
+```env
+LLM_BACKEND=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.2
+OLLAMA_EMBED_MODEL=nomic-embed-text
+OLLAMA_NUM_CTX=32768          # Ollama's default silently truncates large prompts
+```
+
+In Docker, set `OLLAMA_BASE_URL=http://host.docker.internal:11434` to reach Ollama on the host.
 
 ## Try it from the terminal
 
@@ -130,7 +153,7 @@ Everything lives under `/api/v1`. Streaming endpoints use Server-Sent Events. Fu
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/ingest` | Parse, chunk and embed one document. Text, code, PDF and images (base64, needs a vision model). Re-ingesting an `artifact_id` replaces its chunks. |
+| `POST` | `/ingest` | Parse, chunk and embed one document. Text, code, PDF and images (base64, needs a vision model; without one, images yield no chunks). Re-ingesting an `artifact_id` replaces its chunks. |
 | `POST` | `/ingest/sync` | Batch-ingest a completed GitHub ingestion run. |
 | `POST` | `/artifacts/projects/sync` | Rewrite which projects an indexed artifact belongs to. |
 | `DELETE` | `/projects/{project_id}/memberships` | Drop a deleted project from the whole corpus. |
@@ -247,11 +270,12 @@ A refresh is O(number of scopes): one hybrid retrieval and one LLM call per scop
 
 | Variable | Purpose |
 |---|---|
-| `LLM_BACKEND` / `EMBED_BACKEND` | `ollama`, `openai` (also LiteLLM/OpenRouter) or `anthropic`. `EMBED_BACKEND` is optional and splits embeddings off. |
-| `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_VISION_MODEL` | Ollama endpoint and models. Without a vision model, images are accepted but yield no chunks. |
-| `OLLAMA_NUM_CTX` | Context window. Ollama's default silently truncates large prompts and breaks onboarding synthesis, so set it (e.g. `32768`). |
+| `LLM_BACKEND` / `EMBED_BACKEND` | `openai` (also LiteLLM, OpenRouter, any compatible endpoint), `anthropic` or `ollama`. Set `LLM_BACKEND` explicitly. `EMBED_BACKEND` is optional and splits embeddings off. |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_CHAT_MODEL`, `OPENAI_EMBED_MODEL`, `OPENAI_VISION_MODEL` | OpenAI-compatible backend. Chat model defaults to `gpt-4o-mini`. The embedding model has no default. |
+| `OPENAI_MAX_TOKENS`, `OPENAI_REASONING_MAX_TOKENS` | Optional output limit and opt-in reasoning budget for streamed answers. The limit must exceed the reasoning budget. |
+| `OPENAI_EMBED_DIMENSIONS` | Fixed vector size for models that support it. Must match the existing Chroma collection, so changing it means re-creating the collection. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_CHAT_MODEL`, `ANTHROPIC_THINKING_BUDGET_TOKENS` | Anthropic backend and its opt-in reasoning budget. |
-| `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_CHAT_MODEL`, `OPENAI_EMBED_MODEL` | OpenAI-compatible backend. |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_VISION_MODEL`, `OLLAMA_NUM_CTX` | Ollama endpoint, models and context window. |
 | `CHROMA_PATH` | Persistent ChromaDB directory. Unset means in-memory, and data is lost on restart. |
 | `CHUNK_SIZE`, `CHUNK_OVERLAP` | Chunking. |
 | `INGEST_CONCURRENCY`, `INGEST_MAX_CONTENT_LENGTH`, `INGEST_MAX_BINARY_BYTES` | Ingest limits. Oversized payloads are skipped (`chunk_count=0`). |
@@ -270,7 +294,7 @@ src/
 ├── insights/     Knowledge gaps and FAQ grouping
 ├── skills/       Skill suggestion
 ├── projects/     Industry evaluation
-├── llm/          LLMClient protocol: Ollama, OpenAI-compatible, Anthropic, split client
+├── llm/          LLMClient protocol: OpenAI-compatible, Anthropic, Ollama, split client
 └── store/        VectorStore protocol and the ChromaDB implementation
 scripts/          Terminal client and chunk inspector
 tests/            Mirrors src/, with fakes in tests/stubs/
@@ -291,7 +315,7 @@ CI runs `gitleaks → ruff lint + format + pyright → pytest`, in that order. R
 A few conventions:
 
 - `src` is on the pytest path, so import `from agents.base import Agent`, never `from src.agents...`.
-- Do not assume Ollama. Go through the `LLMClient` protocol.
+- Do not assume a single provider. Go through the `LLMClient` protocol.
 - Tools must be read-only and thread-safe, and their results must carry the chunk text so the answer needs no second pass.
 - Reuse `StubLLMClient`, `ScriptedLLMClient` and `StubVectorStore` instead of hand-rolling mocks.
 - `data/` is gitignored. Do not commit local Chroma state.
