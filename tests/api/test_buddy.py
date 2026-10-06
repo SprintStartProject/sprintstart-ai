@@ -307,6 +307,67 @@ def test_empty_source_systems_mean_all_as_they_did_for_chat() -> None:
     assert [c["artifact_id"] for c in response.json()["citations"]] == ["a1"]
 
 
+def test_a_disabled_connector_is_neither_searched_nor_cited() -> None:
+    """Regression: disabled connectors/sources must not reach the buddy.
+
+    The route passes `source_state.get_exclusions()` into every turn, so a
+    disabled connector's chunks must be neither retrieved nor cited even when
+    the request carries no source/time narrowing of its own.
+    """
+    embedding = [1.0] + [0.0] * 767
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="chunk-excluded",
+                artifact_id="artifact-excluded",
+                filename="excluded.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                project_ids=("p1",),
+                connector_id="github",
+                connector_source_id="owner/repo",
+            ),
+            Chunk(
+                id="chunk-included",
+                artifact_id="artifact-included",
+                filename="included.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                project_ids=("p1",),
+                connector_id="jira",
+                connector_source_id="PROJ",
+            ),
+        ]
+    )
+
+    source_state = SourceStateStore(path=":memory:")
+    source_state.set_connector_enabled("github", enabled=False)
+
+    llm = ScriptedLLMClient(
+        turns=[[("search_docs", {"query": "blockers"})]], embedding=embedding
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_source_state_store] = lambda: source_state
+    try:
+        client = TestClient(app)
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "What were the blockers?"}],
+                "project_ids": ["p1"],
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [c["artifact_id"] for c in response.json()["citations"]] == [
+        "artifact-included"
+    ]
+
+
 def test_reasoning_is_returned_and_never_carried_in_messages() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login"]})]],

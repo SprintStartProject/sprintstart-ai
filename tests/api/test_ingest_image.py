@@ -7,8 +7,9 @@ from fastapi.testclient import TestClient
 from api.app import app
 from api.dependencies import get_llm, get_store
 from llm.errors import LLMUnavailableError
+from rag.retriever import retrieve
 from store.chroma_store import ChromaVectorStore
-from tests.conftest import llm_required, parse_sse_events, vision_required
+from tests.conftest import llm_required, vision_required
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
@@ -97,18 +98,22 @@ def test_ingest_image_vision_unavailable_returns_zero_chunks(
 
 
 @pytest.fixture
-def real_image_client() -> Generator[TestClient, Any, None]:
+def real_image_client() -> Generator[tuple[TestClient, ChromaVectorStore], Any, None]:
     store = ChromaVectorStore(collection_name="image-integration-test")
     app.dependency_overrides[get_store] = lambda: store
-    yield TestClient(app)
+    yield TestClient(app), store
     app.dependency_overrides.clear()
 
 
 @pytest.mark.integration
 @llm_required
 @vision_required
-def test_ingest_image_and_query_with_real_llm(real_image_client: TestClient) -> None:
-    response = real_image_client.post(
+def test_ingest_image_and_query_with_real_llm(
+    real_image_client: tuple[TestClient, ChromaVectorStore],
+) -> None:
+    http_client, store = real_image_client
+
+    response = http_client.post(
         "/api/v1/ingest",
         json={
             "artifact_id": "integration-image",
@@ -119,11 +124,10 @@ def test_ingest_image_and_query_with_real_llm(real_image_client: TestClient) -> 
     assert response.status_code == 200
     assert response.json()["chunk_count"] == 1
 
-    response = real_image_client.post(
-        "/api/v1/chat",
-        json={"prompt": "What does the uploaded image show?", "min_score": 0.1},
+    chunks = retrieve(
+        "What does the uploaded image show?",
+        get_llm(),
+        store,
+        min_score=0.1,
     )
-    assert response.status_code == 200
-    events = parse_sse_events(response.text)
-    cited = {e["filename"] for e in events if e["type"] == "citation"}
-    assert "test_diagram.png" in cited
+    assert "test_diagram.png" in {chunk.filename for chunk in chunks}
