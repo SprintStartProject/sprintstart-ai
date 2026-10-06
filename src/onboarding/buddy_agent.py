@@ -25,16 +25,28 @@ re-sent.
 Folding older turns into that summary is ``onboarding.buddy_compact``, on its own
 endpoint, which the backend runs after a turn rather than during one -- see
 ``run_agent_turn`` for what that cost while it lived here.
+
+The loop is ``stream_agent_turn``, a generator, so a reader sees the model think and
+write while the turn runs instead of after its last hop. ``run_agent_turn`` drains it
+for the callers that only want the outcome.
 """
 
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field, replace
 
 from agents.tools.base import ToolRegistry, ToolResult, run_tool_calls
 from agents.tools.evidence import format_evidence, limit_evidence
 from agents.tools.grep import GrepTool
 from agents.tools.retrieve import RetrieveTool
-from llm.base import ChatResult, LLMClient, Message, ToolCall, ToolSpec
+from llm.base import (
+    ChatResult,
+    LLMClient,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 from onboarding.buddy_persona import build_persona
 from onboarding.query_fence import QUERY_FENCE_NOTE, fence_user_messages
@@ -127,6 +139,56 @@ class AgentTurnResult:
     #: The model's reasoning, one entry per call that returned any. Display-only:
     #: it is never written into ``messages`` as text the caller carries back.
     reasoning: list[str] = field(default_factory=list[str])
+
+
+@dataclass(frozen=True)
+class AgentReasoning:
+    """A fragment of the model's reasoning, as it arrives."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class AgentToken:
+    """A fragment of the answer text, as it arrives."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class AgentToolUse:
+    """A search this loop is about to run itself (never a backend tool)."""
+
+    name: str
+    arguments: dict[str, object]
+
+
+type AgentStreamEvent = AgentReasoning | AgentToken | AgentToolUse | AgentTurnResult
+
+# Between the text of one hop and the text of the next. A hop that wrote something and
+# then searched leaves its text without a trailing break, and the next hop would run
+# straight on from it ("...let me check.The deploy runs on...").
+_HOP_SEPARATOR = "\n\n"
+
+
+class _HopText:
+    """Keeps the answer text of successive hops readable as one stream."""
+
+    def __init__(self) -> None:
+        self._emitted = False
+        self._owed = False
+
+    def begin_hop(self) -> None:
+        self._owed = self._emitted
+
+    def token(self, text: str) -> Iterator[AgentToken]:
+        if not text:
+            return
+        if self._owed:
+            self._owed = False
+            yield AgentToken(_HOP_SEPARATOR)
+        self._emitted = True
+        yield AgentToken(text)
 
 
 def _persona_prompt(
@@ -297,7 +359,7 @@ def _local_tools(
     )
 
 
-def run_agent_turn(
+def stream_agent_turn(
     messages: list[Message],
     backend_tools: list[ToolSpec],
     llm: LLMClient,
@@ -309,14 +371,20 @@ def run_agent_turn(
     capabilities_enabled: bool = True,
     team_mode: bool = False,
     filters: RetrievalFilters | None = None,
-) -> AgentTurnResult:
-    """Runs one agent turn: executes the searches locally, pauses on backend tools.
+) -> Iterator[AgentStreamEvent]:
+    """Runs one agent turn, yielding what the model does as it does it.
 
-    Loops internally while the model only asks for local searches (``search_docs``,
-    and ``grep`` when capabilities are off); returns as soon as it either produces a
-    final answer or requests a tool only the backend can run. A step budget bounds
-    the internal loop; if it's exhausted the model is asked once more with no tools,
-    forcing an answer.
+    Executes the searches locally and pauses on backend tools. Loops internally while
+    the model only asks for local searches (``search_docs``, and ``grep`` when
+    capabilities are off); finishes as soon as it either produces a final answer or
+    requests a tool only the backend can run. A step budget bounds the internal loop;
+    if it's exhausted the model is asked once more with no tools, forcing an answer.
+
+    Yields ``AgentReasoning`` and ``AgentToken`` fragments as the model produces them,
+    an ``AgentToolUse`` before each search this loop runs, and as the last event the
+    ``AgentTurnResult`` -- the same outcome ``run_agent_turn`` returns. Text from a
+    hop that went on to search is streamed like any other, and the next hop's text is
+    set apart from it by a blank line, written here and nowhere else.
 
     ``prior_summary`` stands in for everything older than ``messages``.
 
@@ -328,7 +396,10 @@ def run_agent_turn(
     are ignored, because the scope is ``project_ids``. When it narrows, this hop
     searched, nothing it found survived, and no backend tool is mounted to have
     supplied other evidence, the answer is ``NO_FILTERED_RESULTS_MESSAGE`` rather
-    than whatever the model composed from nothing.
+    than whatever the model composed from nothing. Whether a hop can end that way is
+    known before it starts, so such a hop's text is held back rather than streamed:
+    it is released if the hop goes on to search, and replaced by the message if it is
+    the answer.
 
     This turn does not fold anything, and used not to be able to say that. A
     ``summarize_upto`` argument asked it to compact the oldest window messages
@@ -378,12 +449,16 @@ def run_agent_turn(
     reasoning: list[str] = []
     searched = False
     found = False
+    text_out = _HopText()
+
+    # Nothing matched under an explicit narrowing: the reader chose the filter, so an
+    # answer composed from no sources is the one thing not to give.
+    def _overridable() -> bool:
+        narrowed = has_narrowing_filters(filters)
+        return narrowed and searched and not found and not backend_names
 
     def _answer(text: str) -> AgentTurnResult:
-        # Nothing matched under an explicit narrowing: the reader chose the filter,
-        # so an answer composed from no sources is the one thing not to give.
-        narrowed = has_narrowing_filters(filters)
-        if narrowed and searched and not found and not backend_names:
+        if _overridable():
             text = NO_FILTERED_RESULTS_MESSAGE
         return AgentTurnResult(
             final=True,
@@ -394,15 +469,42 @@ def run_agent_turn(
         )
 
     for _ in range(_MAX_STEPS):
-        result = llm.chat(work, tools)
+        text_out.begin_hop()
+        # A hop that can end as the filter message must not have shown the model's
+        # own text first, so it is held until the hop says which it is.
+        hold = _overridable()
+        held: list[str] = []
+        result: ChatResult | None = None
+        for event in llm.chat_stream(work, tools):
+            if isinstance(event, ReasoningDelta):
+                if event.text:
+                    yield AgentReasoning(event.text)
+            elif isinstance(event, TextDelta):
+                if hold:
+                    held.append(event.text)
+                else:
+                    yield from text_out.token(event.text)
+            else:
+                result = event
+        if result is None:
+            raise LLMUnavailableError("The model ended its reply without a result.")
         if result.reasoning and result.reasoning.strip():
             reasoning.append(result.reasoning)
 
         if not result.tool_calls:
-            return _answer(result.text)
+            answer = _answer(result.text)
+            if hold:
+                yield from text_out.token(answer.text)
+            yield answer
+            return
+        # Not the answer after all: the held text was narration before a search.
+        for fragment in held:
+            yield from text_out.token(fragment)
         work = [*work, _assistant_message(result)]
 
         local_calls = [c for c in result.tool_calls if c.name in local_names]
+        for call in local_calls:
+            yield AgentToolUse(call.name, dict(call.arguments))
         outcomes = dict(
             zip(
                 (c.id for c in local_calls),
@@ -440,7 +542,7 @@ def run_agent_turn(
         # in this same turn already have their results appended above, so the message
         # list stays well-formed.
         if pending:
-            return AgentTurnResult(
+            yield AgentTurnResult(
                 final=False,
                 text=result.text,
                 messages=work,
@@ -448,23 +550,84 @@ def run_agent_turn(
                 citations=citations,
                 reasoning=reasoning,
             )
+            return
         # Only local searches this turn -- loop and let the model reason over them.
 
     # Step budget spent: force a final answer with no tools rather than loop forever.
     #
     # The notice goes to the model, not into the returned conversation: a final turn's
     # messages are discarded by the caller, and a transcript carrying instructions about
-    # a budget nobody can see would be a strange thing to keep. `generate` returns
-    # text only, so this call adds nothing to ``reasoning``.
-    return _answer(
-        llm.generate([*work, Message(role="system", content=_NO_TOOLS_THIS_TURN)])
-    )
+    # a budget nobody can see would be a strange thing to keep.
+    text_out.begin_hop()
+    hold = _overridable()
+    forced = ""
+    forced_reasoning = ""
+    notice = Message(role="system", content=_NO_TOOLS_THIS_TURN)
+    for event in llm.stream([*work, notice]):
+        if isinstance(event, ReasoningDelta):
+            if event.text:
+                forced_reasoning += event.text
+                yield AgentReasoning(event.text)
+        else:
+            forced += event.text
+            if not hold:
+                yield from text_out.token(event.text)
+    if forced_reasoning.strip():
+        reasoning.append(forced_reasoning)
+    answer = _answer(forced)
+    if hold:
+        yield from text_out.token(answer.text)
+    yield answer
+
+
+def run_agent_turn(
+    messages: list[Message],
+    backend_tools: list[ToolSpec],
+    llm: LLMClient,
+    store: VectorStore,
+    exclusions: SourceExclusions | None = None,
+    prior_summary: str | None = None,
+    vocabulary: Vocabulary = DEFAULT_VOCABULARY,
+    project_ids: frozenset[str] | None = None,
+    capabilities_enabled: bool = True,
+    team_mode: bool = False,
+    filters: RetrievalFilters | None = None,
+) -> AgentTurnResult:
+    """Runs one agent turn to its outcome; see ``stream_agent_turn`` for the rules.
+
+    Same turn, same arguments, with the fragments discarded: what the buffered
+    endpoint and the tests want is the ``AgentTurnResult``.
+    """
+    outcome: AgentTurnResult | None = None
+    for event in stream_agent_turn(
+        messages,
+        backend_tools,
+        llm,
+        store,
+        exclusions=exclusions,
+        prior_summary=prior_summary,
+        vocabulary=vocabulary,
+        project_ids=project_ids,
+        capabilities_enabled=capabilities_enabled,
+        team_mode=team_mode,
+        filters=filters,
+    ):
+        if isinstance(event, AgentTurnResult):
+            outcome = event
+    if outcome is None:
+        raise LLMUnavailableError("The agent turn ended without an outcome.")
+    return outcome
 
 
 __all__ = [
+    "AgentReasoning",
+    "AgentStreamEvent",
+    "AgentToken",
+    "AgentToolUse",
     "AgentTurnResult",
     "GREP",
     "LLMUnavailableError",
     "run_agent_turn",
     "SEARCH_DOCS",
+    "stream_agent_turn",
 ]

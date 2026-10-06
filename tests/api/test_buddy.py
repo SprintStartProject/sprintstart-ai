@@ -12,6 +12,7 @@ from ingestion.source_state_store import SourceStateStore
 from llm.errors import LLMUnavailableError
 from rag.filters import NO_FILTERED_RESULTS_MESSAGE
 from rag.types import Chunk
+from tests.conftest import parse_sse_events
 from tests.stubs.llm import ScriptedLLMClient, StubLLMClient
 from tests.stubs.store import StubVectorStore
 
@@ -502,3 +503,103 @@ def test_a_caller_that_sends_no_filters_gets_todays_turn(client: TestClient) -> 
 
     assert response.status_code == 200
     assert response.json()["reasoning"] == []
+
+
+# --- streaming agent turn -----------------------------------------------------
+
+_STREAM_URL = "/api/v1/onboarding/buddy/agent/stream"
+
+
+def test_the_stream_endpoint_emits_progress_then_the_buffered_response() -> None:
+    llm = ScriptedLLMClient(
+        turns=[[("grep", {"patterns": ["login"]})]], answer="In auth.py."
+    )
+    payload = {
+        "messages": [{"role": "user", "content": "where is login?"}],
+        "capabilities_enabled": False,
+        "project_ids": ["p1"],
+    }
+    for client in _scripted_client(llm):
+        streamed = client.post(_STREAM_URL, json=payload)
+    llm_again = ScriptedLLMClient(
+        turns=[[("grep", {"patterns": ["login"]})]], answer="In auth.py."
+    )
+    for client in _scripted_client(llm_again):
+        buffered = client.post(_URL, json=payload)
+
+    assert streamed.status_code == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    events = parse_sse_events(streamed.text)
+    kinds = [e["type"] for e in events]
+    assert kinds == ["tool_use", "token", "result"]
+    assert events[0]["name"] == "grep"
+    assert events[0]["arguments"] == {"patterns": ["login"]}
+    assert events[1]["content"] == "In auth.py."
+    result = {k: v for k, v in events[-1].items() if k != "type"}
+    # The terminal event is the buffered endpoint's response, field for field.
+    assert result == buffered.json()
+    assert result["citations"] == [
+        {"artifact_id": "a1", "start_line": None, "start_page": None}
+    ]
+
+
+def test_the_stream_endpoint_emits_reasoning_deltas() -> None:
+    llm = ScriptedLLMClient(
+        turns=[[("grep", {"patterns": ["login"]})]], reasoning="grep for it"
+    )
+    for client in _scripted_client(llm):
+        response = client.post(
+            _STREAM_URL,
+            json={
+                "messages": [{"role": "user", "content": "login?"}],
+                "capabilities_enabled": False,
+            },
+        )
+
+    events = parse_sse_events(response.text)
+    assert {"type": "reasoning", "content": "grep for it"} in events
+    assert events[-1]["reasoning"] == ["grep for it"]
+
+
+def test_the_stream_endpoint_reports_an_unavailable_model_as_an_error_event() -> None:
+    class _Down(StubLLMClient):
+        def chat_stream(self, *args: Any, **kwargs: Any) -> Any:
+            raise LLMUnavailableError("model down")
+
+    app.dependency_overrides[get_llm] = lambda: _Down()
+    app.dependency_overrides[get_store] = lambda: StubVectorStore()
+    app.dependency_overrides[get_source_state_store] = lambda: SourceStateStore(
+        ":memory:"
+    )
+    try:
+        response = TestClient(app).post(
+            _STREAM_URL, json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    events = parse_sse_events(response.text)
+    assert [e["type"] for e in events] == ["error"]
+    assert "model down" in events[0]["message"]
+
+
+def test_the_stream_endpoint_applies_the_filters_to_its_answer() -> None:
+    llm = ScriptedLLMClient(
+        turns=[[("grep", {"patterns": ["login handler"]})]], answer="ungrounded"
+    )
+    for client in _scripted_client(llm):
+        response = client.post(
+            _STREAM_URL,
+            json={
+                "messages": [{"role": "user", "content": "where is login?"}],
+                "capabilities_enabled": False,
+                "filters": {"source_systems": ["jira"]},
+                "project_ids": ["p1"],
+            },
+        )
+
+    events = parse_sse_events(response.text)
+    streamed = "".join(e["content"] for e in events if e["type"] == "token")
+    assert streamed == NO_FILTERED_RESULTS_MESSAGE
+    assert events[-1]["text"] == NO_FILTERED_RESULTS_MESSAGE
