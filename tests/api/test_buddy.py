@@ -288,7 +288,7 @@ def test_filters_reach_the_searches_and_an_empty_result_is_said_plainly() -> Non
     assert response.json()["text"] == NO_FILTERED_RESULTS_MESSAGE
 
 
-def test_empty_source_systems_mean_all_as_they_did_for_chat() -> None:
+def test_empty_source_systems_mean_all() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login handler"]})]], answer="In auth.py."
     )
