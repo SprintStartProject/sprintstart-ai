@@ -175,7 +175,7 @@ def test_user_content_keeps_one_shape_whatever_its_position() -> None:
 
 
 def test_breakpoint_lands_on_the_tool_result_of_the_answer_call() -> None:
-    """The chat agent's answer call ends on tool results; the breakpoint there
+    """The buddy agent's answer call ends on tool results; the breakpoint there
     means the next request re-reads everything up to and including them."""
     _, converted = _to_anthropic_messages(
         [

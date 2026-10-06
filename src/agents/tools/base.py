@@ -135,8 +135,8 @@ def run_tool_calls(
 ) -> list[ToolResult]:
     """Run a step's tool calls, together when there is more than one.
 
-    Shared by every agent loop (the chat agent and the onboarding buddy), so
-    the two cannot drift on how a step's calls are executed. Both prompts ask
+    Shared by every tool-calling agent loop (the onboarding buddy's turn), so
+    call sites cannot drift on how a step's calls are executed. The prompt asks
     the model to request every search it needs in one step, which only pays off
     if the calls overlap: each search is a network round-trip (an embedding
     call) plus a corpus scan, so running three serially costs three times what

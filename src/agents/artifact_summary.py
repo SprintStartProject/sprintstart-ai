@@ -70,8 +70,8 @@ class ArtifactSummaryAgent:
         )
         summary_parts: list[str] = []
         for event in self._llm.stream(messages):
-            # Reasoning is live-only chat metadata. Summaries persist only the
-            # final user-visible text.
+            # Reasoning is live-only streaming metadata. Summaries persist
+            # only the final user-visible text.
             if isinstance(event, TextDelta):
                 summary_parts.append(event.text)
                 yield event.text

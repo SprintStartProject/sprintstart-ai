@@ -298,7 +298,7 @@ class TestStreamHappyPath:
         assert result == [ReasoningDelta("Checking evidence."), TextDelta("Answer.")]
 
     def test_tool_messages_are_converted_to_the_ollama_schema(self) -> None:
-        """Regression: the chat agent streams the post-tool conversation.
+        """Regression: the buddy agent streams the post-tool conversation.
 
         `stream` used to hand the daemon our internal shape — `ToolCall`
         objects and `tool_call_id` — which Ollama neither validates nor

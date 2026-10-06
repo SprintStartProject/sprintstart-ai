@@ -1,8 +1,11 @@
 """End-to-end golden question / trick prompt test harness.
 
-Ingests the demo corpus against a real Ollama instance, then:
-- Asserts each golden question cites the expected source file.
-- Asserts each trick prompt produces no citations (nothing relevant retrieved).
+Ingests the demo corpus against a real Ollama instance, then drives the
+retrieval layer directly (``rag.retriever.retrieve``) — the layer the corpus
+actually pins:
+
+- Asserts each golden question retrieves the expected source file.
+- Asserts each trick prompt retrieves nothing (nothing relevant found).
 
 Marked pytest.mark.integration — skipped automatically when Ollama is not
 reachable, so offline CI stays green.
@@ -17,9 +20,10 @@ import yaml
 from fastapi.testclient import TestClient
 
 from api.app import app
-from api.dependencies import get_store
+from api.dependencies import get_llm, get_store
+from rag.retriever import retrieve
 from store.chroma_store import ChromaVectorStore
-from tests.conftest import llm_required, parse_sse_events
+from tests.conftest import llm_required
 
 CORPUS_DIR = Path(__file__).parent / "demo-corpus"
 GOLDEN_QUESTIONS_FILE = Path(__file__).parent / "golden_questions.yaml"
@@ -30,11 +34,13 @@ _TRICK_MIN_SCORE = 0.65
 
 
 @pytest.fixture(scope="module")
-def ingested_client() -> Generator[TestClient, Any, None]:
+def ingested_store() -> Generator[ChromaVectorStore, Any, None]:
     """Ingest the full demo corpus once per module against a real LLM.
 
     Uses a fresh in-memory ChromaDB store so tests are isolated from any
-    persistent data directory on the developer's machine.
+    persistent data directory on the developer's machine. The assertions below
+    retrieve from this store directly; the app's dependency override just keeps
+    the ingestion requests on the same one.
     """
     store = ChromaVectorStore(collection_name="golden-test-chunks")
     app.dependency_overrides[get_store] = lambda: store
@@ -54,15 +60,15 @@ def ingested_client() -> Generator[TestClient, Any, None]:
             f"Corpus ingestion failed for {doc_file.name}: {response.text}"
         )
 
-    yield client
+    yield store
 
     app.dependency_overrides.clear()
 
 
 @pytest.mark.integration
 @llm_required
-def test_golden_questions(ingested_client: TestClient) -> None:
-    """Every golden question must produce at least one citation from the
+def test_golden_questions(ingested_store: ChromaVectorStore) -> None:
+    """Every golden question must retrieve at least one chunk from the
     expected file.
     """
     cases: list[dict[str, str]] = yaml.safe_load(GOLDEN_QUESTIONS_FILE.read_text())
@@ -72,20 +78,16 @@ def test_golden_questions(ingested_client: TestClient) -> None:
         question = case["question"]
         expected = case["expected_citation_filename"]
 
-        response = ingested_client.post(
-            "/api/v1/chat",
-            json={"prompt": question, "min_score": _GOLDEN_MIN_SCORE},
+        chunks = retrieve(
+            question, get_llm(), ingested_store, min_score=_GOLDEN_MIN_SCORE
         )
-        events = parse_sse_events(response.text)
-        cited = {e["filename"] for e in events if e["type"] == "citation"}
+        retrieved = {chunk.filename for chunk in chunks}
 
-        if expected not in cited:
-            answer = "".join(e["content"] for e in events if e["type"] == "token")
+        if expected not in retrieved:
             failures.append(
-                f"\nQuestion : {question!r}"
-                f"\nExpected : {expected}"
-                f"\nCited    : {cited or '(none)'}"
-                f"\nAnswer   : {answer!r}\n"
+                f"\nQuestion  : {question!r}"
+                f"\nExpected  : {expected}"
+                f"\nRetrieved : {retrieved or '(none)'}\n"
             )
 
     assert not failures, "Golden question assertion(s) failed:\n" + "".join(failures)
@@ -93,31 +95,24 @@ def test_golden_questions(ingested_client: TestClient) -> None:
 
 @pytest.mark.integration
 @llm_required
-def test_trick_prompts_return_no_citations(ingested_client: TestClient) -> None:
-    """Trick prompts about absent content must produce no citations."""
+def test_trick_prompts_retrieve_nothing(ingested_store: ChromaVectorStore) -> None:
+    """Trick prompts about absent content must retrieve nothing."""
     cases: list[dict[str, str]] = yaml.safe_load(TRICK_PROMPTS_FILE.read_text())
 
     failures: list[str] = []
     for case in cases:
         prompt = case["prompt"]
 
-        response = ingested_client.post(
-            "/api/v1/chat",
-            json={"prompt": prompt, "min_score": _TRICK_MIN_SCORE},
-        )
-        events = parse_sse_events(response.text)
-        citation_events = [e for e in events if e["type"] == "citation"]
+        chunks = retrieve(prompt, get_llm(), ingested_store, min_score=_TRICK_MIN_SCORE)
 
-        if citation_events:
-            cited = {e["filename"] for e in citation_events}
-            answer = "".join(e["content"] for e in events if e["type"] == "token")
+        if chunks:
+            retrieved = {chunk.filename for chunk in chunks}
             failures.append(
-                f"\nPrompt : {prompt!r}"
-                f"\nExpected : no citations"
-                f"\nGot      : {cited}"
-                f"\nAnswer   : {answer!r}\n"
+                f"\nPrompt    : {prompt!r}"
+                f"\nExpected  : no chunks"
+                f"\nRetrieved : {retrieved}\n"
             )
 
-    assert not failures, "Trick prompt(s) unexpectedly returned citations:\n" + "".join(
+    assert not failures, "Trick prompt(s) unexpectedly retrieved chunks:\n" + "".join(
         failures
     )

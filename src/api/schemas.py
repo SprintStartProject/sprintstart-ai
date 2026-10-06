@@ -7,7 +7,6 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
-    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -71,7 +70,7 @@ class IngestRequest(BaseModel):
         description=(
             "Projects this artifact belongs to. Retrieval is project-scoped: an "
             "artifact ingested without project ids is not reachable from any "
-            "project-scoped request (chat, onboarding, insights) until it is "
+            "project-scoped request (buddy, onboarding, insights) until it is "
             "re-ingested with them."
         ),
         examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
@@ -233,20 +232,6 @@ class IngestResponse(BaseModel):
     }
 
 
-class HistoryEntry(BaseModel):
-    role: Literal["user", "assistant"] = Field(description="Who produced this message.")
-    content: str = Field(description="Text content of the message.")
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "role": "user",
-                "content": "What were the main blockers in sprint 42?",
-            }
-        }
-    }
-
-
 SourceSystemValue = Literal[
     "GITHUB", "BITBUCKET", "JIRA", "CONFLUENCE", "NOTION", "UPLOAD"
 ]
@@ -255,7 +240,7 @@ SourceSystemValue = Literal[
 class ProjectScopedRequest(BaseModel):
     """Base for requests that may only ever see one project's material.
 
-    Every RAG-backed endpoint (chat, onboarding, blueprint generation,
+    Every RAG-backed endpoint (buddy, onboarding, blueprint generation,
     insights) is project-scoped: the backend knows which projects an artifact
     belongs to and which project the caller is authorized for, and passes that
     project down. Without it the service cannot tell one project's corpus from
@@ -272,10 +257,6 @@ class ProjectScopedRequest(BaseModel):
         ),
         examples=["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
     )
-
-
-def _empty_history() -> list[HistoryEntry]:
-    return []
 
 
 class ChatFilters(BaseModel):
@@ -303,32 +284,6 @@ class ChatFilters(BaseModel):
 
         items = cast(list[object], value)
         return [str(item).upper() for item in items]
-
-
-class ChatRequest(ProjectScopedRequest):
-    question: str = Field(examples=["What changed in the auth implementation?"])
-    history: list[HistoryEntry] = Field(default_factory=_empty_history)
-    filters: ChatFilters | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_chat_fields(cls, data: object) -> object:
-        if not isinstance(data, dict):
-            return data
-
-        raw_data = cast(dict[object, object], data)
-        updated: dict[str, object] = {}
-
-        for key, value in raw_data.items():
-            updated[str(key)] = value
-
-        if "question" not in updated and "prompt" in updated:
-            updated["question"] = updated["prompt"]
-
-        if "history" not in updated and "context" in updated:
-            updated["history"] = updated["context"]
-
-        return updated
 
 
 class HealthResponse(BaseModel):

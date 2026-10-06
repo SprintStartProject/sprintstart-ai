@@ -3,7 +3,6 @@
 A single entrypoint over the running service with subcommands that share one
 HTTP client (`_client.ServiceClient`):
 
-    sprintstart chat                       interactive Q&A over the corpus
     sprintstart ingest <path> [id]         ingest a file or directory
     sprintstart onboard -a backend -e junior   generate an onboarding path
     sprintstart corpus                     show what's ingested (status + artifacts)
@@ -22,14 +21,12 @@ from __future__ import annotations
 
 import argparse
 
-import chat_cli
 import corpus_cli
 import ingest_cli
 import onboarding_cli
 from _client import add_base_url_arg
 
 _COMMANDS = {
-    "chat": chat_cli,
     "ingest": ingest_cli,
     "onboard": onboarding_cli,
     "corpus": corpus_cli,
@@ -45,7 +42,7 @@ def main() -> int:
 
     for name, module in _COMMANDS.items():
         sub = subparsers.add_parser(name, help=module.__doc__)
-        # --base-url goes after the subcommand: `sprintstart chat --base-url ...`.
+        # --base-url goes after the subcommand: `sprintstart ingest --base-url ...`.
         add_base_url_arg(sub)
         module.add_arguments(sub)
         sub.set_defaults(func=module.run)

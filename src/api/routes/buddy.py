@@ -71,7 +71,7 @@ def _narrowing(body: BuddyAgentRequest) -> RetrievalFilters | None:
     """The reader's source-system and time narrowing, if they chose any.
 
     The project scope is not in here: it is ``project_ids`` and always applies.
-    An empty source-system list means "all", as it did for chat.
+    An empty source-system list means "all".
     """
     if body.filters is None:
         return None

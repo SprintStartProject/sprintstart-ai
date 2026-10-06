@@ -288,7 +288,7 @@ def test_filters_reach_the_searches_and_an_empty_result_is_said_plainly() -> Non
     assert response.json()["text"] == NO_FILTERED_RESULTS_MESSAGE
 
 
-def test_empty_source_systems_mean_all_as_they_did_for_chat() -> None:
+def test_empty_source_systems_mean_all() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login handler"]})]], answer="In auth.py."
     )
@@ -305,6 +305,170 @@ def test_empty_source_systems_mean_all_as_they_did_for_chat() -> None:
 
     assert response.json()["text"] == "In auth.py."
     assert [c["artifact_id"] for c in response.json()["citations"]] == ["a1"]
+
+
+def test_a_disabled_connector_is_neither_searched_nor_cited() -> None:
+    """Regression: disabled connectors/sources must not reach the buddy.
+
+    The route passes `source_state.get_exclusions()` into every turn, so a
+    disabled connector's chunks must be neither retrieved nor cited even when
+    the request carries no source/time narrowing of its own.
+    """
+    embedding = [1.0] + [0.0] * 767
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id="chunk-excluded",
+                artifact_id="artifact-excluded",
+                filename="excluded.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                project_ids=("p1",),
+                connector_id="github",
+                connector_source_id="owner/repo",
+            ),
+            Chunk(
+                id="chunk-included",
+                artifact_id="artifact-included",
+                filename="included.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                project_ids=("p1",),
+                connector_id="jira",
+                connector_source_id="PROJ",
+            ),
+        ]
+    )
+
+    source_state = SourceStateStore(path=":memory:")
+    source_state.set_connector_enabled("github", enabled=False)
+
+    llm = ScriptedLLMClient(
+        turns=[[("search_docs", {"query": "blockers"})]], embedding=embedding
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_source_state_store] = lambda: source_state
+    try:
+        client = TestClient(app)
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "What were the blockers?"}],
+                "project_ids": ["p1"],
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [c["artifact_id"] for c in response.json()["citations"]] == [
+        "artifact-included"
+    ]
+
+
+def _project_scoped_client(llm: ScriptedLLMClient) -> Generator[TestClient, Any, None]:
+    """Three identical chunks: this project's, another project's, and no project's."""
+    embedding = [1.0] + [0.0] * 767
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{name}",
+                artifact_id=f"artifact-{name}",
+                filename=f"{name}-retro.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                source_system="GITHUB",
+                project_ids=project_ids,
+            )
+            for name, project_ids in (
+                ("own", ("p1",)),
+                ("foreign", ("p2",)),
+                ("orphan", ()),
+            )
+        ]
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_source_state_store] = lambda: SourceStateStore(
+        ":memory:"
+    )
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+_SEARCH_DOCS_CALL = ("search_docs", {"query": "blockers"})
+_GREP_CALL = ("grep", {"patterns": ["Missing designs"]})
+
+
+@pytest.mark.parametrize(
+    ("call", "capabilities_enabled"),
+    [(_SEARCH_DOCS_CALL, True), (_GREP_CALL, False)],
+    ids=["search_docs", "grep"],
+)
+@pytest.mark.parametrize(
+    "filters", [None, {"source_systems": ["github"]}], ids=["unfiltered", "filtered"]
+)
+def test_a_turn_stays_inside_the_requested_projects(
+    call: tuple[str, dict[str, Any]],
+    capabilities_enabled: bool,
+    filters: dict[str, Any] | None,
+) -> None:
+    """Regression: another project's material, and material belonging to no
+    project, must neither reach the model nor be cited.
+
+    The scope is the route's to forward: `run_agent_turn` without `project_ids`
+    searches everything, so a route that dropped it would leak every project.
+    """
+    llm = ScriptedLLMClient(turns=[[call]], embedding=[1.0] + [0.0] * 767)
+    for client in _project_scoped_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "What were the blockers?"}],
+                "capabilities_enabled": capabilities_enabled,
+                "filters": filters,
+                "project_ids": ["p1"],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [c["artifact_id"] for c in body["citations"]] == ["artifact-own"]
+    seen = " ".join(m["content"] for m in body["messages"] if m["role"] == "tool")
+    assert "own-retro.md" in seen
+    assert "foreign-retro.md" not in seen
+    assert "orphan-retro.md" not in seen
+
+
+@pytest.mark.parametrize(
+    ("call", "capabilities_enabled"),
+    [(_SEARCH_DOCS_CALL, True), (_GREP_CALL, False)],
+    ids=["search_docs", "grep"],
+)
+def test_an_empty_project_scope_admits_nothing(
+    call: tuple[str, dict[str, Any]], capabilities_enabled: bool
+) -> None:
+    llm = ScriptedLLMClient(turns=[[call]], embedding=[1.0] + [0.0] * 767)
+    for client in _project_scoped_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "What were the blockers?"}],
+                "capabilities_enabled": capabilities_enabled,
+                "project_ids": [],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["citations"] == []
+    seen = " ".join(m["content"] for m in body["messages"] if m["role"] == "tool")
+    assert "retro.md" not in seen
 
 
 def test_reasoning_is_returned_and_never_carried_in_messages() -> None:

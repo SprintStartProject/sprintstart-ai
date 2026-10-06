@@ -42,7 +42,7 @@ def _get_persistent_client(path: str) -> chromadb.api.ClientAPI:
         return client
 
     # FastAPI resolves synchronous dependencies in a thread pool, so the first
-    # chat and its asynchronous analytics fan-out can arrive here together.
+    # buddy turn and its asynchronous analytics fan-out can arrive here together.
     # Chroma's PersistentClient instances share process-wide, refcounted state;
     # constructing two for one path concurrently can make one failed init tear
     # down the other's system. Re-check inside the lock so exactly one thread

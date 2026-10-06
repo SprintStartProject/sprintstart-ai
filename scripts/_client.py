@@ -1,6 +1,6 @@
 """Shared HTTP client for the SprintStart AI terminal tools.
 
-All the subcommands (chat, ingest, onboard, corpus) talk to the same running
+All the subcommands (ingest, onboard, corpus) talk to the same running
 service, so the connection handling, health check, SSE decoding, error
 reporting, and document ingestion live here once. The offline chunk inspector
 (`chunk_inspector_cli.py`) intentionally does not use this — it parses local
@@ -183,7 +183,7 @@ class ServiceClient:
         except (json.JSONDecodeError, ValueError):
             return response.text
 
-    # --- ingestion (shared by the chat REPL and the ingest subcommand) ----
+    # --- ingestion (used by the ingest subcommand) -----------------------
 
     def ingest_path(self, raw_path: str, artifact_id: str | None) -> None:
         path = Path(raw_path).expanduser()

@@ -55,7 +55,7 @@ def test_openai_reasoning_settings_apply_only_to_chat_client(
 
 
 def test_onboarding_orchestrator_shares_the_process_wide_bm25_cache() -> None:
-    """Regression test for issue #129 #8: chat/agent retrieval and onboarding
+    """Regression test for issue #129 #8: agent retrieval and onboarding
     generation must tokenize the corpus once, not maintain independent caches.
     """
     orchestrator = get_onboarding_orchestrator(
