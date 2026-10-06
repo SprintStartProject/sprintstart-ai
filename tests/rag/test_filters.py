@@ -92,9 +92,37 @@ def test_bitbucket_source_system_survives_ingest_and_filtering() -> None:
     )
 
 
+def test_notion_source_system_survives_ingest_and_filtering() -> None:
+    # Without NOTION in the known systems the ingest silently tagged the chunk
+    # with no source system, so a Notion filter could never find it.
+    chunk = to_chunk(
+        ParsedChunk(
+            content="How we run the sprint review",
+            kind="text",
+            metadata={"filename": "page-4f2a.md"},
+        ),
+        artifact_id="notion:7c1d2b0e-1111-4222-8333-444455556666:page:4f2a",
+        embedding=[1.0, 0.0],
+        artifact_type="PAGE",
+        source_system="NOTION",
+    )
+
+    assert chunk.source_system == "NOTION"
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["NOTION"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB"]),
+    )
+
+
 def test_source_system_is_recognised_case_insensitively() -> None:
     assert normalize_source_system("bitbucket") == "BITBUCKET"
     assert is_source_system("BITBUCKET")
+    assert normalize_source_system("notion") == "NOTION"
+    assert is_source_system("NOTION")
     assert normalize_source_system("gitlab") is None
     assert normalize_source_system(None) is None
 
