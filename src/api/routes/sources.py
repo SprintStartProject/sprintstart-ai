@@ -23,7 +23,7 @@ router = APIRouter()
     summary="Enable or disable a connector",
     description=(
         "Enables or disables an entire connector (e.g. 'github'). Disabled "
-        "connectors are excluded from chat retrieval."
+        "connectors are excluded from retrieval."
     ),
 )
 def configure_connector(
@@ -42,7 +42,7 @@ def configure_connector(
     description=(
         "Enables or disables individual sources of a connector (e.g. one "
         "GitHub repo, keyed by 'owner/repo'). Disabled sources are excluded "
-        "from chat retrieval."
+        "from retrieval."
     ),
 )
 def patch_sources(

@@ -13,7 +13,6 @@ from api.routes import (  # noqa: E402
     artifact_projects,
     blueprints,
     buddy,
-    chat,
     diagram,
     grading,
     health,
@@ -48,10 +47,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except LLMUnavailableError as exc:
         logger.warning("LLM backend unreachable at startup: %s", exc)
 
-    # Construct Chroma before requests can fan out into chat and asynchronous
-    # analytics on separate worker threads. The adapter also serialises cold
-    # cache misses, but warming here removes that latency and race window from
-    # the first user request altogether.
+    # Construct Chroma before requests can fan out into retrieval-backed
+    # endpoints and asynchronous analytics on separate worker threads. The
+    # adapter also serialises cold cache misses, but warming here removes that
+    # latency and race window from the first user request altogether.
     try:
         get_store()
     except Exception as exc:
@@ -66,8 +65,8 @@ app = FastAPI(
     title="SprintStart AI Service",
     version="0.1.0",
     description=(
-        "RAG-based AI service. Exposes document ingestion and streaming chat. "
-        "All streaming responses use Server-Sent Events (SSE)."
+        "RAG-based AI service. Exposes document ingestion and retrieval-backed "
+        "onboarding endpoints. Streaming responses use Server-Sent Events (SSE)."
     ),
     lifespan=lifespan,
 )
@@ -81,7 +80,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router)
-api_router.include_router(chat.router)
 api_router.include_router(buddy.router)
 api_router.include_router(ingest.router)
 api_router.include_router(ingest_run.router)

@@ -37,16 +37,16 @@ Run lint + type-check + tests before considering a change done.
 `src/` layout, by subpackage:
 
 - **`api/`** — FastAPI app (`app.py`), DI (`dependencies.py`), `schemas.py`,
-  and routes: `health`, `ingest`, `chat`, `title`, `vector_db`, plus
+  and routes: `health`, `ingest`, `buddy`, `title`, `vector_db`, plus
   `onboarding` and `blueprints` (from #98).
-- **`agents/`** — `ChatAgent` (`chat_agent.py`) runs one flat tool loop over a
-  single message list, capped by `_MAX_STEPS`: it searches while the model
-  asks for searches, then streams the answer from that same conversation.
-  Tool results carry the retrieved text, so the loop that searched is also the
-  loop that answers — there is no separate gather and answer phase.
-  `ChatOrchestrator` (`orchestrator.py`) maps the run's events into the SSE
-  stream consumed by `/api/v1/chat`. Tools live in `agents/tools/`, registered
-  via `ToolRegistry`.
+- **`agents/`** — the buddy's tool-loop building blocks: tools live in
+  `agents/tools/` (retrieval, grep, evidence helpers), registered via
+  `ToolRegistry`, and `artifact_summary.py` backs the summaries endpoint. The
+  conversation engine itself is `onboarding/buddy_agent.py`: one flat tool
+  loop over a single message list, capped by `_MAX_STEPS` — it searches while
+  the model asks for searches, then answers from that same conversation. Tool
+  results carry the retrieved text, so the loop that searched is also the loop
+  that answers — there is no separate gather and answer phase.
 - **`ingestion/`** — per-filetype parsers (`text_parser`, `pdf_parser`,
   `code_parser`, `image_parser`) behind `parser.py`, then `chunker.py` and
   `metadata_store.py`.
@@ -54,8 +54,8 @@ Run lint + type-check + tests before considering a change done.
   `citation.py`, `prompt.py`.
 - **`llm/`** — `LLMClient` interface (`base.py`), implemented by
   `ollama_client.py`, `openai_client.py`, `anthropic_client.py`.
-  `split_client.py` lets chat and embeddings use different backends
-  (`LLM_BACKEND` for chat/generate/vision, `EMBED_BACKEND` for embeddings).
+  `split_client.py` lets generation and embeddings use different backends
+  (`LLM_BACKEND` for generate/chat/vision, `EMBED_BACKEND` for embeddings).
   Every backend takes a request timeout (`LLM_TIMEOUT_SECONDS`, default 600).
   The Anthropic client sets prompt-cache breakpoints on the system prompt and
   the last message — see `anthropic_client._user_message` before changing how
@@ -79,15 +79,15 @@ Run lint + type-check + tests before considering a change done.
 - Don't assume Ollama-only: check `llm/base.py`'s `LLMClient` interface when
   touching anything that calls an LLM, since backend is configurable per
   deployment (`LLM_BACKEND` / `EMBED_BACKEND`).
-- Chat is one agent running one loop. Extend it with a new `Tool` in
+- The buddy is one agent running one loop. Extend it with a new `Tool` in
   `agents/tools/` rather than a sub-agent to delegate to: every tier costs a
   serialized round-trip ahead of the user's first token, which is what the
   previous orchestrator/synthesis split cost. Tool results must carry their
   chunk text — a count-only summary forces a second pass to write the answer.
 - **Tools must be read-only and thread-safe.** A turn's tool calls run
-  concurrently (`ChatAgent._run_tools`), so a tool that mutates shared state
-  would race. Anything cached across calls needs its own lock, the way
-  `rag.hybrid.BM25IndexCache` guards its rebuild.
+  concurrently (`agents.tools.base.run_tool_calls`), so a tool that mutates
+  shared state would race. Anything cached across calls needs its own lock,
+  the way `rag.hybrid.BM25IndexCache` guards its rebuild.
 - `AGENT_DEBUG=1` logs each agent's reasoning (LLM text + tool calls) to
   stderr — useful when debugging agent behavior.
 - The onboarding pipeline is intentionally deterministic/staged rather than

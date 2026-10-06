@@ -1,8 +1,8 @@
 """How a search tool's result is budgeted, ordered and shown to the model.
 
-Shared by every agent loop that runs ``retrieve``/``grep`` (the chat agent and
-the onboarding buddy), so the two cannot drift on how much evidence one call
-may return or how it reads. It lives beside the tools rather than in ``rag``
+Shared by every agent loop that runs ``retrieve``/``grep`` (the onboarding
+buddy's turn), pinning how much evidence one call may return and how it
+reads. It lives beside the tools rather than in ``rag``
 because it formats a ``ToolResult``, and ``rag`` must not import ``agents``.
 """
 

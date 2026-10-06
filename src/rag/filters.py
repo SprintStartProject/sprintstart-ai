@@ -85,8 +85,8 @@ def has_narrowing_filters(filters: RetrievalFilters | None) -> bool:
     """Whether ``filters`` narrows the corpus beyond the always-present scope.
 
     Only a caller-chosen narrowing counts. The project scope is on nearly every
-    request and must never look like one: /chat switches off its agentic path
-    on this answer, and the buddy turn's canned reply below is guarded by it.
+    request and must never look like one: the buddy turn's canned reply below
+    is guarded by it.
     """
     if filters is None:
         return False
@@ -96,10 +96,9 @@ def has_narrowing_filters(filters: RetrievalFilters | None) -> bool:
     )
 
 
-# The reply a narrowed search gets when nothing under the narrowing matched.
-# Shared by /chat's single-shot path and the buddy turn so the two cannot
-# drift: answering from no sources under a filter the reader chose themselves
-# is the one thing not to do.
+# The reply a narrowed search gets when nothing under the narrowing matched:
+# answering from no sources under a filter the reader chose themselves is the
+# one thing not to do.
 NO_FILTERED_RESULTS_MESSAGE = (
     "I could not find any matching sources for the selected filters, "
     "so I cannot answer this reliably."

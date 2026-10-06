@@ -1,10 +1,9 @@
 """SSE orchestrator for onboarding-path generation.
 
-Mirrors :class:`agents.orchestrator.ChatOrchestrator`: a generator that streams
-Server-Sent Events. Path generation is multi-step, so each pipeline stage is
-emitted as a ``stage`` event, followed by a single ``path`` event (structured
-path + YAML + quality report) and a ``done`` event. Errors collapse to one
-``error`` event, consistent with the chat endpoint.
+A generator that streams Server-Sent Events. Path generation is multi-step, so
+each pipeline stage is emitted as a ``stage`` event, followed by a single
+``path`` event (structured path + YAML + quality report) and a ``done`` event.
+Errors collapse to one ``error`` event.
 """
 
 import logging
