@@ -368,6 +368,109 @@ def test_a_disabled_connector_is_neither_searched_nor_cited() -> None:
     ]
 
 
+def _project_scoped_client(llm: ScriptedLLMClient) -> Generator[TestClient, Any, None]:
+    """Three identical chunks: this project's, another project's, and no project's."""
+    embedding = [1.0] + [0.0] * 767
+    store = StubVectorStore()
+    store.add(
+        [
+            Chunk(
+                id=f"chunk-{name}",
+                artifact_id=f"artifact-{name}",
+                filename=f"{name}-retro.md",
+                text="Missing designs blocked the auth feature.",
+                embedding=embedding,
+                source_system="GITHUB",
+                project_ids=project_ids,
+            )
+            for name, project_ids in (
+                ("own", ("p1",)),
+                ("foreign", ("p2",)),
+                ("orphan", ()),
+            )
+        ]
+    )
+    app.dependency_overrides[get_llm] = lambda: llm
+    app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_source_state_store] = lambda: SourceStateStore(
+        ":memory:"
+    )
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+_SEARCH_DOCS_CALL = ("search_docs", {"query": "blockers"})
+_GREP_CALL = ("grep", {"patterns": ["Missing designs"]})
+
+
+@pytest.mark.parametrize(
+    ("call", "capabilities_enabled"),
+    [(_SEARCH_DOCS_CALL, True), (_GREP_CALL, False)],
+    ids=["search_docs", "grep"],
+)
+@pytest.mark.parametrize(
+    "filters", [None, {"source_systems": ["github"]}], ids=["unfiltered", "filtered"]
+)
+def test_a_turn_stays_inside_the_requested_projects(
+    call: tuple[str, dict[str, Any]],
+    capabilities_enabled: bool,
+    filters: dict[str, Any] | None,
+) -> None:
+    """Regression: another project's material, and material belonging to no
+    project, must neither reach the model nor be cited.
+
+    The scope is the route's to forward: `run_agent_turn` without `project_ids`
+    searches everything, so a route that dropped it would leak every project.
+    """
+    llm = ScriptedLLMClient(turns=[[call]], embedding=[1.0] + [0.0] * 767)
+    for client in _project_scoped_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "What were the blockers?"}],
+                "capabilities_enabled": capabilities_enabled,
+                "filters": filters,
+                "project_ids": ["p1"],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [c["artifact_id"] for c in body["citations"]] == ["artifact-own"]
+    seen = " ".join(m["content"] for m in body["messages"] if m["role"] == "tool")
+    assert "own-retro.md" in seen
+    assert "foreign-retro.md" not in seen
+    assert "orphan-retro.md" not in seen
+
+
+@pytest.mark.parametrize(
+    ("call", "capabilities_enabled"),
+    [(_SEARCH_DOCS_CALL, True), (_GREP_CALL, False)],
+    ids=["search_docs", "grep"],
+)
+def test_an_empty_project_scope_admits_nothing(
+    call: tuple[str, dict[str, Any]], capabilities_enabled: bool
+) -> None:
+    llm = ScriptedLLMClient(turns=[[call]], embedding=[1.0] + [0.0] * 767)
+    for client in _project_scoped_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [{"role": "user", "content": "What were the blockers?"}],
+                "capabilities_enabled": capabilities_enabled,
+                "project_ids": [],
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["citations"] == []
+    seen = " ".join(m["content"] for m in body["messages"] if m["role"] == "tool")
+    assert "retro.md" not in seen
+
+
 def test_reasoning_is_returned_and_never_carried_in_messages() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login"]})]],
