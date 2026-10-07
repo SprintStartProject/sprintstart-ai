@@ -1303,6 +1303,22 @@ class BuddyAgentMessageSchema(BaseModel):
         default=None,
         description="On a tool-result turn, the id of the call it answers.",
     )
+    reasoning: str | None = Field(
+        default=None,
+        description=(
+            "On an assistant turn, the model's plain-text reasoning. Opaque to the "
+            "caller; carry it back verbatim."
+        ),
+    )
+    reasoning_details: list[dict[str, object]] = Field(
+        default_factory=list[dict[str, object]],
+        description=(
+            "On an assistant turn, the provider's structured (possibly signed) "
+            "reasoning blocks. Opaque to the caller; carry them back verbatim, "
+            "because a provider with extended thinking rejects a resumed tool turn "
+            "that lost them."
+        ),
+    )
 
 
 class BuddyToolSpecSchema(BaseModel):

@@ -252,9 +252,10 @@ def _assistant_message(result: ChatResult) -> Message:
     msg = Message(role="assistant", content=result.text)
     if result.tool_calls:
         msg["tool_calls"] = result.tool_calls
-    # Kept for the next internal hop, as the chat agent does: a reasoning provider
-    # continues a tool-using thought from these. They never reach the caller --
-    # the wire message has no field for them (``api.routes.buddy._from_message``).
+    # Kept for the next hop: a reasoning provider continues a tool-using thought
+    # from these, and one with extended thinking rejects the turn without them.
+    # They also go out on the wire message (``api.routes.buddy._from_message``),
+    # so the hop after a backend tool gets them back from the caller.
     if result.reasoning:
         msg["reasoning"] = result.reasoning
     if result.reasoning_details:

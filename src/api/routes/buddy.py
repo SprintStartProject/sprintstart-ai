@@ -49,10 +49,17 @@ def _to_message(schema: BuddyAgentMessageSchema) -> Message:
         ]
     if schema.tool_call_id is not None:
         msg["tool_call_id"] = schema.tool_call_id
+    if schema.reasoning:
+        msg["reasoning"] = schema.reasoning
+    if schema.reasoning_details:
+        msg["reasoning_details"] = [dict(d) for d in schema.reasoning_details]
     return msg
 
 
 def _from_message(msg: Message) -> BuddyAgentMessageSchema:
+    # The reasoning rides along so the hop after a backend tool can hand it back:
+    # a provider with extended thinking rejects a tool turn that lost its signed
+    # thinking blocks.
     return BuddyAgentMessageSchema(
         role=msg["role"],
         content=msg.get("content") or "",
@@ -63,6 +70,8 @@ def _from_message(msg: Message) -> BuddyAgentMessageSchema:
             for call in msg.get("tool_calls") or []
         ],
         tool_call_id=msg.get("tool_call_id"),
+        reasoning=msg.get("reasoning"),
+        reasoning_details=list(msg.get("reasoning_details") or []),
     )
 
 

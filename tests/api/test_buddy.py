@@ -472,28 +472,67 @@ def test_an_empty_project_scope_admits_nothing(
     assert "retro.md" not in seen
 
 
-def test_reasoning_is_returned_and_never_carried_in_messages() -> None:
+_SIGNED_DETAILS: list[dict[str, Any]] = [
+    {"type": "reasoning.text", "text": "check the board", "signature": "sig-1"}
+]
+
+_READ_BOARD_SPEC = {
+    "name": "read_board",
+    "description": "Reads the hire's board.",
+    "parameters": {"type": "object", "properties": {}},
+}
+
+
+def test_a_turn_waiting_on_a_backend_tool_carries_its_reasoning() -> None:
     llm = ScriptedLLMClient(
-        turns=[[("grep", {"patterns": ["login"]})]],
-        reasoning="grep for it",
-        reasoning_details=[{"type": "reasoning.text", "text": "grep for it"}],
+        turns=[[("read_board", {})]],
+        reasoning="check the board",
+        reasoning_details=_SIGNED_DETAILS,
     )
     for client in _scripted_client(llm):
         response = client.post(
             _URL,
             json={
-                "messages": [{"role": "user", "content": "login?"}],
-                "capabilities_enabled": False,
+                "messages": [{"role": "user", "content": "what is next?"}],
+                "backend_tools": [_READ_BOARD_SPEC],
             },
         )
 
     body = response.json()
-    assert body["reasoning"] == ["grep for it"]
-    assert all(
-        set(m) <= {"role", "content", "tool_calls", "tool_call_id"}
-        for m in body["messages"]
-    )
-    assert "grep for it" not in str(body["messages"])
+    assert body["final"] is False
+    assert body["reasoning"] == ["check the board"]
+    waiting = next(m for m in body["messages"] if m["tool_calls"])
+    assert waiting["reasoning"] == "check the board"
+    assert waiting["reasoning_details"] == _SIGNED_DETAILS
+
+
+def test_a_resumed_turn_hands_the_carried_reasoning_back_to_the_model() -> None:
+    llm = ScriptedLLMClient(turns=[], answer="Your next step is the setup.")
+    for client in _scripted_client(llm):
+        response = client.post(
+            _URL,
+            json={
+                "messages": [
+                    {"role": "user", "content": "what is next?"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"id": "call_0", "name": "read_board", "arguments": {}}
+                        ],
+                        "reasoning": "check the board",
+                        "reasoning_details": _SIGNED_DETAILS,
+                    },
+                    {"role": "tool", "content": "setup", "tool_call_id": "call_0"},
+                ],
+                "backend_tools": [_READ_BOARD_SPEC],
+            },
+        )
+
+    assert response.status_code == 200
+    sent = next(m for m in llm.chat_calls[0] if m.get("tool_calls"))
+    assert sent.get("reasoning_details") == _SIGNED_DETAILS
+    assert sent.get("reasoning") == "check the board"
 
 
 def test_a_caller_that_sends_no_filters_gets_todays_turn(client: TestClient) -> None:
