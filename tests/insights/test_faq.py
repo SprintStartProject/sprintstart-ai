@@ -1,8 +1,10 @@
 import json
 from collections.abc import Callable
+from typing import cast
 
 from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
-from insights.faq import FaqDocument, FaqQuestionInput, group_faqs
+from insights.faq import NON_FAQ_KINDS, FaqDocument, FaqQuestionInput, group_faqs
+from llm.base import Message
 from rag.types import Chunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
@@ -420,3 +422,43 @@ def test_group_faqs_redacts_names_from_returned_questions() -> None:
     assert len(groups) == 1
     assert groups[0].question == "Ask [NAME] for VPN access"
     assert [q.text for q in groups[0].questions] == ["Ask [NAME] for VPN access"]
+
+
+def test_grouping_prompt_discards_every_kind_of_buddy_non_question() -> None:
+    """The rebuild names the same categories as the live classifier."""
+    prompts: list[str] = []
+
+    class _CapturingLLM(_ScriptedFaqLLM):
+        def generate(
+            self, messages: list[Message], *, temperature: float | None = None
+        ) -> str:
+            if not prompts:
+                prompts.append(str(messages[0].get("content") or ""))
+            return super().generate(cast("list[dict[str, object]]", messages))
+
+    llm = _CapturingLLM(groups=[["q1"]])
+    questions = [FaqQuestionInput(id="q1", text="How do I get VPN access?")]
+
+    group_faqs(questions, llm, StubVectorStore(), _metadata_store(), _PROJECT)
+
+    assert NON_FAQ_KINDS in prompts[0]
+    assert "discard_ids" in prompts[0]
+    assert "chatbot" not in prompts[0]
+    assert "the project's assistant" in prompts[0]
+
+
+def test_group_faqs_drops_buddy_requests_and_keeps_mentor_toned_doc_questions() -> None:
+    llm = _ScriptedFaqLLM(groups=[["q1"]], discard_ids=["q2", "q3", "q4"])
+    questions = [
+        FaqQuestionInput(id="q1", text="How do I get VPN access?"),
+        FaqQuestionInput(id="q2", text="move my card to done"),
+        FaqQuestionInput(id="q3", text="what should I work on next?"),
+        FaqQuestionInput(id="q4", text="and the second one?"),
+    ]
+
+    groups = group_faqs(
+        questions, llm, StubVectorStore(), _metadata_store(), project_id=_PROJECT
+    )
+
+    assert [g.question_ids for g in groups] == [["q1"]]
+    assert groups[0].question == "How do I get VPN access?"

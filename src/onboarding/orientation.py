@@ -40,7 +40,7 @@ from onboarding.orientation_models import (
 from onboarding.progress import ProgressEvent, ProgressStream, drain
 from onboarding.similarity import OVERLAP_THRESHOLD, text_overlap
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.types import ScoredChunk
+from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ _MAX_TASK_TEXT = 4000
 # the same packet. A packet is disposable, but a hire who reloads the page and
 # reads different instructions has no reason to trust either version.
 _TEMPERATURE = 0.0
+_MAX_GENERATION_ATTEMPTS = 2
 
 # What each step's retrieval is looking for. These are *queries*, not prose the
 # hire ever sees — they exist so the evidence pool spans the whole path to a PR
@@ -208,6 +209,25 @@ def _build_prompt(
     ]
 
 
+def _correction_prompt(
+    messages: list[Message], raw: str, error: AssemblyError
+) -> list[Message]:
+    """Ask once for the same packet with only its JSON corrected."""
+    return [
+        *messages,
+        Message(role="assistant", content=raw),
+        Message(
+            role="user",
+            content=(
+                f"That response could not be validated: {error}. Return the same "
+                "grounded packet again as one valid JSON object matching the schema "
+                "exactly. Return JSON only, with all quotes escaped and all commas "
+                "present."
+            ),
+        ),
+    ]
+
+
 def _parse_payload(raw: str) -> _GenPayload:
     try:
         return _GenPayload.model_validate_json(extract_json_object(raw))
@@ -300,6 +320,7 @@ def stream_orientation(
     store: VectorStore,
     *,
     task_title: str,
+    project_ids: frozenset[str],
     task_body: str = "",
     labels: list[str] | None = None,
     touched_paths: list[str] | None = None,
@@ -330,6 +351,7 @@ def stream_orientation(
         unchanged_label="Nothing changed — the cached packet is current",
         empty_warning_label="The project has no indexed material yet",
         empty_done_label="No orientation could be assembled",
+        project_ids=project_ids,
     )
     if early_outcome is not None:
         yield from early_events
@@ -350,6 +372,7 @@ def stream_orientation(
             min_score=_MIN_SCORE,
             bm25_cache=bm25_cache,
             exclude_roles=GROUNDING_EXCLUDED_ROLES,
+            filters=RetrievalFilters(project_ids=project_ids),
         ):
             # A chunk retrieved for two steps keeps its better score; the model
             # decides which step it belongs under, and it appears once either way.
@@ -371,19 +394,38 @@ def stream_orientation(
     yield progress.stage(
         "generating", f"Writing the packet from {len(chunks)} source(s)"
     )
-    raw = llm.generate(
-        _build_prompt(task_title, task_body, labels or [], touched_paths or [], chunks),
-        temperature=_TEMPERATURE,
+    messages = _build_prompt(
+        task_title, task_body, labels or [], touched_paths or [], chunks
     )
-    try:
-        payload = _parse_payload(raw)
-    except AssemblyError as exc:
-        logger.warning("Orientation assembly failed for task %r: %s", task_title, exc)
+    # One correction round, as phase assembly has: a small local model breaks the
+    # JSON now and then, and one broken quote used to cost the hire the whole
+    # packet. Asked back for the same content, it usually fixes its own syntax.
+    parse_error: AssemblyError | None = None
+    payload: _GenPayload | None = None
+    for attempt in range(_MAX_GENERATION_ATTEMPTS):
+        raw = llm.generate(messages, temperature=_TEMPERATURE)
+        try:
+            payload = _parse_payload(raw)
+            break
+        except AssemblyError as exc:
+            parse_error = exc
+            logger.warning(
+                "Orientation assembly attempt %d failed for task %r: %s",
+                attempt + 1,
+                task_title,
+                exc,
+            )
+            if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
+                yield progress.stage("generating", "Correcting invalid generated JSON")
+                messages = _correction_prompt(messages, raw, exc)
+
+    if payload is None:
+        assert parse_error is not None
         outcome = OrientationOutcome(
             status="skipped",
             chunks_retrieved=len(chunks),
             chunks_collapsed=collapsed,
-            notes=[str(exc)],
+            notes=[str(parse_error)],
         )
         yield progress.warning("The generated packet could not be read")
         yield progress.done("No orientation could be assembled", _dump(outcome))
@@ -452,6 +494,7 @@ def assemble_orientation(
     store: VectorStore,
     *,
     task_title: str,
+    project_ids: frozenset[str],
     task_body: str = "",
     labels: list[str] | None = None,
     touched_paths: list[str] | None = None,
@@ -476,6 +519,7 @@ def assemble_orientation(
             llm,
             store,
             task_title=task_title,
+            project_ids=project_ids,
             task_body=task_body,
             labels=labels,
             touched_paths=touched_paths,

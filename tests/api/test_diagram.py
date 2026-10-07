@@ -50,6 +50,7 @@ def _store() -> StubVectorStore:
                 text="ReportController receives the HTTP request and validates it",
                 embedding=_EMBED,
                 source_url="https://github.com/org/repo/blob/main/ReportController.kt",
+                project_ids=("p1",),
             ),
             Chunk(
                 id="c2",
@@ -57,6 +58,7 @@ def _store() -> StubVectorStore:
                 filename="ReportRepository.kt",
                 text="ReportRepository issues the SQL query against postgres",
                 embedding=_EMBED,
+                project_ids=("p1",),
             ),
         ]
     )
@@ -76,7 +78,7 @@ def client() -> Generator[TestClient, Any, None]:
 def test_assembles_a_diagram_whose_citations_survive_to_the_client(
     client: TestClient,
 ) -> None:
-    response = client.post(_URL, json={"subject": _SUBJECT})
+    response = client.post(_URL, json={"subject": _SUBJECT, "projectIds": ["p1"]})
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -95,7 +97,9 @@ def test_an_empty_corpus_answers_skipped_with_no_diagram() -> None:
     app.dependency_overrides[get_llm] = lambda: llm
     app.dependency_overrides[get_store] = StubVectorStore
     try:
-        response = TestClient(app).post(_URL, json={"subject": _SUBJECT})
+        response = TestClient(app).post(
+            _URL, json={"subject": _SUBJECT, "projectIds": ["p1"]}
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -105,16 +109,29 @@ def test_an_empty_corpus_answers_skipped_with_no_diagram() -> None:
 
 
 def test_a_diagram_needs_a_subject(client: TestClient) -> None:
-    response = client.post(_URL, json={"subject": "   "})
+    response = client.post(_URL, json={"subject": "   ", "projectIds": ["p1"]})
 
     assert response.status_code == 422
+
+
+def test_a_diagram_needs_project_ids(client: TestClient) -> None:
+    response = client.post(_URL, json={"subject": _SUBJECT})
+    assert response.status_code == 422
+
+
+def test_empty_project_ids_admits_no_material(client: TestClient) -> None:
+    response = client.post(_URL, json={"subject": _SUBJECT, "projectIds": []})
+    assert response.status_code == 200
+    assert response.json()["status"] == "skipped"
 
 
 def test_an_overlong_subject_is_clamped_rather_than_rejected(
     client: TestClient,
 ) -> None:
     """The subject is model-written; a rambling one is a bad question, not an error."""
-    response = client.post(_URL, json={"subject": "how does " + "x" * 5000})
+    response = client.post(
+        _URL, json={"subject": "how does " + "x" * 5000, "projectIds": ["p1"]}
+    )
 
     assert response.status_code == 200, response.text
 
@@ -129,7 +146,9 @@ def test_an_unavailable_llm_is_a_503_not_a_fabricated_diagram() -> None:
     app.dependency_overrides[get_llm] = lambda: llm
     app.dependency_overrides[get_store] = _store
     try:
-        response = TestClient(app).post(_URL, json={"subject": _SUBJECT})
+        response = TestClient(app).post(
+            _URL, json={"subject": _SUBJECT, "projectIds": ["p1"]}
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -139,7 +158,9 @@ def test_an_unavailable_llm_is_a_503_not_a_fabricated_diagram() -> None:
 def test_stream_yields_stages_items_and_a_done_matching_the_sync_endpoint(
     client: TestClient,
 ) -> None:
-    stream = client.post(f"{_URL}/stream", json={"subject": _SUBJECT})
+    stream = client.post(
+        f"{_URL}/stream", json={"subject": _SUBJECT, "projectIds": ["p1"]}
+    )
     assert stream.status_code == 200, stream.text
     assert stream.headers["content-type"].startswith("text/event-stream")
 
@@ -149,13 +170,15 @@ def test_stream_yields_stages_items_and_a_done_matching_the_sync_endpoint(
     assert "item" in types
     assert types[-1] == "done"
 
-    plain = client.post(_URL, json={"subject": _SUBJECT}).json()
+    plain = client.post(_URL, json={"subject": _SUBJECT, "projectIds": ["p1"]}).json()
     assert events[-1]["result"]["diagram"] == plain["diagram"]
     assert events[-1]["result"]["status"] == plain["status"] == "assembled"
 
 
 def test_stream_needs_a_subject(client: TestClient) -> None:
-    response = client.post(f"{_URL}/stream", json={"subject": "  "})
+    response = client.post(
+        f"{_URL}/stream", json={"subject": "  ", "projectIds": ["p1"]}
+    )
 
     assert response.status_code == 422
 
@@ -170,7 +193,9 @@ def test_stream_turns_an_llm_outage_into_a_terminal_error_event() -> None:
     app.dependency_overrides[get_llm] = lambda: llm
     app.dependency_overrides[get_store] = _store
     try:
-        response = TestClient(app).post(f"{_URL}/stream", json={"subject": _SUBJECT})
+        response = TestClient(app).post(
+            f"{_URL}/stream", json={"subject": _SUBJECT, "projectIds": ["p1"]}
+        )
     finally:
         app.dependency_overrides.clear()
 

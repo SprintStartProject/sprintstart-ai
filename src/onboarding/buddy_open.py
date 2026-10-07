@@ -17,6 +17,11 @@ The greeting comes first and is streamed. Nothing the hire never sees may be
 generated ahead of it — strict JSON cannot be streamed as prose, which is why this
 uses markers. A marker arrives one chunk at a time, so a partial one must be
 held back as a candidate, never matched early or emitted.
+
+A visit can also be opened by a project's manager in team mode, where the reader is
+responsible for the people the state describes rather than being one of them. That
+swaps the system prompt and the fallback greeting; the two-part format and
+everything that parses it are shared.
 """
 
 import json
@@ -27,6 +32,14 @@ from llm.base import LLMClient, Message, TextDelta
 from llm.errors import LLMUnavailableError
 
 _FALLBACK_GREETING = "Welcome back! How can I help with your onboarding today?"
+
+# A manager opening team mode is not coming back to their own onboarding, so the
+# hire's welcome is wrong in the one place it is guaranteed to be read: the model
+# is unavailable and this is the whole greeting.
+_TEAM_FALLBACK_GREETING = (
+    "You're in team mode. Ask me who needs your attention, or how somebody on the "
+    "team is getting on."
+)
 
 
 def _format_recent(recent: list[Message]) -> str:
@@ -66,12 +79,48 @@ _STREAM_SYSTEM = (
     "you only read from it."
 )
 
+# The same two-part shape, deliberately: the marker, the held-back suffix and the
+# done payload are parsed by one code path, so a team greeting that formatted itself
+# differently would be a second parser to keep in step. Only the reader changes.
+_TEAM_STREAM_SYSTEM = (
+    "You are a perceptive onboarding buddy greeting a project's manager as they "
+    "open the chat in team mode. They manage one project and are asking about that "
+    "project's team -- they are not being onboarded themselves. You keep a private, "
+    "durable memory note about your conversations with this manager, and you speak "
+    "to them directly.\n"
+    "You are given: your MEMORY of these conversations (may be empty on the first "
+    "visit), the RECENT conversation since you last updated that memory (may be "
+    "empty), and STATE: the team's current attention list -- who is waiting on "
+    "somebody else and who has stalled. STATE is about the team, never about the "
+    "manager reading you.\n"
+    "Write your reply in exactly two parts, in this order, with nothing before the "
+    "first part:\n"
+    "PART 1 -- the greeting, as plain prose with no label and no quotes: a short, "
+    "first-person opener (2-4 sentences) that greets the manager and says the one "
+    "thing most worth their attention right now, grounded only in the state and "
+    "the memory. Be specific, not generic. Never invent facts that are not in the "
+    "memory or the state. Never welcome them as a new hire, never describe their "
+    "own onboarding, and never suggest what they should work on. Describe a "
+    "person's situation as a fact about that situation, never as a judgment of the "
+    "person -- work waiting on a review is the reviewer's move, not a failing of "
+    "whoever is waiting on it. The manager reads this as you type it, so it must "
+    "come first.\n"
+    f"PART 2 -- the line {_ACTION_MARKER} on its own, then ONE suggested next step "
+    'as JSON {"label": short button text, "question": the message to send when the '
+    "manager clicks it}, or the word none when nothing fits. The question is one a "
+    'manager would ask about their team (for example "Who is blocked right now?" '
+    'or "How is the newest joiner getting on?"), never one about their own work.\n'
+    "Do not rewrite or restate your memory note. It is maintained separately; here "
+    "you only read from it."
+)
+
 
 def stream_session(
     memory: str | None,
     recent: list[Message],
     state: str,
     llm: LLMClient,
+    team_mode: bool = False,
 ) -> Iterator[dict[str, object]]:
     """Stream the greeting as the model writes it.
 
@@ -93,15 +142,28 @@ def stream_session(
     An unavailable model yields the plain welcome -- opening a visit must never fail
     the page.
 
+    ### Team mode
+
+    ``team_mode`` swaps the system prompt and the fallback, and nothing else. The
+    reader is a project's manager and ``state`` is their team's attention list, so a
+    hire's greeting would welcome them back to an onboarding that is not theirs and
+    describe their team's stalls as their own. The marker, the held-back suffix and
+    the ``done`` payload are the same code either way -- a second format here would
+    be a second parser to keep in step with this one.
+
     @param memory: The mentor's durable note, or None on a first visit. Read from,
         never rewritten here -- see the module docstring.
     @param recent: The window since the memory was last updated.
-    @param state: A snapshot of the hire's current state.
+    @param state: A snapshot of the hire's current state, or in team mode the team's
+        attention list.
+    @param team_mode: True when a project's manager is opening a team conversation.
     @return: ``token`` events carrying the greeting as it arrives, then one terminal
         ``done`` carrying the whole greeting and any action.
     """
+    system = _TEAM_STREAM_SYSTEM if team_mode else _STREAM_SYSTEM
+    fallback = _TEAM_FALLBACK_GREETING if team_mode else _FALLBACK_GREETING
     prompt = [
-        Message(role="system", content=_STREAM_SYSTEM),
+        Message(role="system", content=system),
         Message(
             role="user",
             content=(
@@ -155,7 +217,7 @@ def stream_session(
                 greeting += emit
                 yield {"type": "token", "content": emit}
     except LLMUnavailableError:
-        yield {"type": "done", "greeting": _FALLBACK_GREETING, "action": None}
+        yield {"type": "done", "greeting": fallback, "action": None}
         return
 
     # Whatever is still held back was never a marker after all, so it is prose.
@@ -169,7 +231,7 @@ def stream_session(
         # Byte-identical to the concatenated tokens, deliberately. The client renders
         # the tokens and the caller persists this; if they differed, the message a hire
         # watched arrive would not be the one they see after a reload.
-        "greeting": greeting if greeting.strip() else _FALLBACK_GREETING,
+        "greeting": greeting if greeting.strip() else fallback,
         "action": (
             {"label": label, "question": question} if label and question else None
         ),

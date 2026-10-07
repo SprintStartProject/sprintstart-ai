@@ -1,11 +1,9 @@
 import logging
 import os
-from collections.abc import Callable
 from functools import lru_cache
 
 from fastapi import Depends
 
-from agents.orchestrator import ChatOrchestrator
 from ingestion.metadata_store import IngestionMetadataStore
 from ingestion.source_state_store import SourceStateStore
 from llm.anthropic_client import AnthropicClient
@@ -15,7 +13,6 @@ from llm.openai_client import OpenAIClient
 from llm.split_client import SplitLLMClient
 from onboarding.orchestrator import OnboardingOrchestrator
 from rag.retriever import get_bm25_cache
-from rag.types import RetrievalFilters
 from store.base import VectorStore
 from store.chroma_store import ChromaVectorStore
 
@@ -64,8 +61,12 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
         raw_reasoning_budget = (
             os.getenv("OPENAI_REASONING_MAX_TOKENS", "").strip() if not is_embed else ""
         )
+        raw_embed_dimensions = (
+            os.getenv("OPENAI_EMBED_DIMENSIONS", "").strip() if is_embed else ""
+        )
         max_tokens = int(raw_max_tokens) if raw_max_tokens else 0
         reasoning_budget = int(raw_reasoning_budget) if raw_reasoning_budget else 0
+        embed_dimensions = int(raw_embed_dimensions) if raw_embed_dimensions else 0
         base_url = (
             (os.getenv("OPENAI_EMBED_BASE_URL") if is_embed else None)
             or os.getenv("OPENAI_BASE_URL")
@@ -85,6 +86,7 @@ def _build_client(backend: str, is_embed: bool = False) -> LLMClient:
             timeout=timeout,
             max_tokens=max_tokens if max_tokens > 0 else None,
             reasoning_max_tokens=(reasoning_budget if reasoning_budget > 0 else None),
+            embed_dimensions=(embed_dimensions if embed_dimensions > 0 else None),
         )
 
     if backend in {"anthropic", "claude"}:
@@ -127,7 +129,10 @@ def get_store() -> VectorStore:
             "CHROMA_PATH is not set — using ephemeral in-memory store, "
             "data will not persist"
         )
-    return ChromaVectorStore(path=path)
+    return ChromaVectorStore(
+        path=path,
+        revision_store=get_ingestion_metadata_store(),
+    )
 
 
 @lru_cache
@@ -140,28 +145,6 @@ def get_ingestion_metadata_store() -> IngestionMetadataStore:
 def get_source_state_store() -> SourceStateStore:
     path = os.getenv("APP_DB_PATH", "").strip() or "data/sprintstart.db"
     return SourceStateStore(path=path)
-
-
-OrchestratorFactory = Callable[[RetrievalFilters | None], ChatOrchestrator]
-
-
-def get_orchestrator_factory(
-    llm: LLMClient = Depends(get_llm),
-    store: VectorStore = Depends(get_store),
-    source_state: SourceStateStore = Depends(get_source_state_store),
-) -> OrchestratorFactory:
-    """Build chat orchestrators bound to a request's retrieval filters.
-
-    The filters (notably the project scope) come from the request body, which
-    a dependency cannot see, so the route gets a factory rather than a
-    ready-made orchestrator.
-    """
-    exclusions = source_state.get_exclusions()
-
-    def build(filters: RetrievalFilters | None) -> ChatOrchestrator:
-        return ChatOrchestrator(llm, store, exclusions, filters)
-
-    return build
 
 
 def get_onboarding_orchestrator(

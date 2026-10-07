@@ -1,11 +1,17 @@
 """Agentic onboarding buddy: one tool-using turn.
 
 The buddy reasons over the hire's question and calls tools -- some it runs itself,
-some only the backend can. ``search_docs`` is AI-local (it owns retrieval and
-citations) and is executed here, in an internal loop, so a question needing several
-searches is answered in one call. A tool only the backend can run
-(``get_my_metrics``) cannot be executed here: the turn stops and hands the pending
-call back, and the backend re-invokes this endpoint with the tool result appended.
+some only the backend can. ``search_docs`` (and ``grep``, when the reader asked the
+corpus rather than the mentor) are AI-local -- they own retrieval and citations --
+and are executed here, in an internal loop, so a question needing several searches
+is answered in one call. They are the chat agent's own tools and evidence budget
+(``agents.tools``), so answering from the buddy loses nothing chat had. A tool only
+the backend can run (``get_my_metrics``) cannot be executed here: the turn stops and
+hands the pending call back, and the backend re-invokes this endpoint with the tool
+result appended.
+
+Every user message is fenced off from the persona's rules (``onboarding.query_fence``)
+before the model sees it.
 
 Stateless like every other onboarding endpoint: the caller (backend) carries the
 running message list between invocations. Nothing about the hire lives here -- their
@@ -19,17 +25,35 @@ re-sent.
 Folding older turns into that summary is ``onboarding.buddy_compact``, on its own
 endpoint, which the backend runs after a turn rather than during one -- see
 ``run_agent_turn`` for what that cost while it lived here.
+
+The loop is ``stream_agent_turn``, a generator, so a reader sees the model think and
+write while the turn runs instead of after its last hop. ``run_agent_turn`` drains it
+for the callers that only want the outcome.
 """
 
-from collections.abc import Collection
-from dataclasses import dataclass, field
+from collections.abc import Collection, Iterator
+from dataclasses import dataclass, field, replace
 
-from llm.base import ChatResult, LLMClient, Message, ToolCall, ToolSpec
+from agents.tools.base import ToolRegistry, ToolResult, run_tool_calls
+from agents.tools.evidence import format_evidence, limit_evidence
+from agents.tools.grep import GrepTool
+from agents.tools.retrieve import RetrieveTool
+from llm.base import (
+    ChatResult,
+    LLMClient,
+    Message,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 from llm.errors import LLMUnavailableError
 from onboarding.buddy_persona import build_persona
+from onboarding.query_fence import QUERY_FENCE_NOTE, fence_user_messages
 from onboarding.vocabulary import DEFAULT_VOCABULARY, Vocabulary
 from rag.citation import build_citations
-from rag.retriever import retrieve
+from rag.filters import NO_FILTERED_RESULTS_MESSAGE, has_narrowing_filters
+from rag.prompt import chunk_header
 from rag.source_filter import SourceExclusions
 from rag.source_kind import is_test_chunk
 from rag.types import Citation, RetrievalFilters, ScoredChunk
@@ -64,11 +88,36 @@ _TOP_K = 5
 # Same retrieval floor / confidence line as the legacy buddy: `retrieve` drops
 # anything below it, so an empty result means nothing indexed answers with confidence.
 _MIN_SCORE = 0.3
-# Per-chunk cap on evidence returned to the model, consistent with the chat agent.
-_SOURCE_CHARS = 800
+
+GREP = "grep"
+
+# The persona's no-evidence path reacts to this wording; keep it.
+_NO_MATCH = "No indexed material matched this search."
+
 # How many internal search hops before we force a final answer, so a confused model
 # can't loop forever gathering evidence it never uses.
-_MAX_STEPS = 4
+#
+# Raised from 4 after a testing session: only *search-only* hops consume this budget (a
+# hop that asks for a backend tool returns immediately), and a model that searched four
+# times before deciding to act never got to act at all -- it hit the forced answer
+# below, which has no tools, and promised the hire a button that could not exist. Six
+# leaves room for a thorough answer and still bounds the loop.
+_MAX_STEPS = 6
+
+# What the model is told when the search budget is spent.
+#
+# It answers the hire's question with the persona still in front of it -- "offer
+# `add_path_step`", "offer to claim it" -- and without this it took those at face value
+# and told the hire to confirm something no tool call had produced. A model that knows
+# it has no tools this turn can only do the honest thing: answer with what it has and
+# leave the offer for the next turn.
+_NO_TOOLS_THIS_TURN = (
+    "You have no tools available for this reply and cannot do anything or offer "
+    "anything: no confirm button can appear. Answer with what you already have. Do not "
+    "say you have done something, do not tell the hire to confirm, click or check "
+    "anything, and do not claim anything is on their screen. If something still needs "
+    "doing, say what it is and that you can set it up when they reply."
+)
 
 
 @dataclass
@@ -87,14 +136,77 @@ class AgentTurnResult:
     messages: list[Message]
     pending_tool_calls: list[ToolCall] = field(default_factory=list[ToolCall])
     citations: list[Citation] = field(default_factory=list[Citation])
+    #: The model's reasoning, one entry per call that returned any. Display-only:
+    #: it is never written into ``messages`` as text the caller carries back.
+    reasoning: list[str] = field(default_factory=list[str])
+
+
+@dataclass(frozen=True)
+class AgentReasoning:
+    """A fragment of the model's reasoning, as it arrives."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class AgentToken:
+    """A fragment of the answer text, as it arrives."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class AgentToolUse:
+    """A search this loop is about to run itself (never a backend tool)."""
+
+    name: str
+    arguments: dict[str, object]
+
+
+type AgentStreamEvent = AgentReasoning | AgentToken | AgentToolUse | AgentTurnResult
+
+# Between the text of one hop and the text of the next. A hop that wrote something and
+# then searched leaves its text without a trailing break, and the next hop would run
+# straight on from it ("...let me check.The deploy runs on...").
+_HOP_SEPARATOR = "\n\n"
+
+
+class _HopText:
+    """Keeps the answer text of successive hops readable as one stream."""
+
+    def __init__(self) -> None:
+        self._emitted = False
+        self._owed = False
+
+    def begin_hop(self) -> None:
+        self._owed = self._emitted
+
+    def token(self, text: str) -> Iterator[AgentToken]:
+        if not text:
+            return
+        if self._owed:
+            self._owed = False
+            yield AgentToken(_HOP_SEPARATOR)
+        self._emitted = True
+        yield AgentToken(text)
 
 
 def _persona_prompt(
     summary: str | None,
     tool_names: Collection[str],
     vocabulary: Vocabulary,
+    capabilities_enabled: bool,
+    team_mode: bool,
 ) -> str:
-    persona = build_persona(tool_names, vocabulary)
+    persona = build_persona(
+        tool_names,
+        vocabulary,
+        capabilities_enabled=capabilities_enabled,
+        team_mode=team_mode,
+    )
+    # Every mode and every hop: the fence is applied to every user message, so the
+    # rule for reading it has to be in front of the model whenever one is.
+    persona = persona.rstrip("\n") + "\n" + QUERY_FENCE_NOTE
     if not summary:
         return persona
     return persona + _SUMMARY_HEADER + summary
@@ -111,7 +223,12 @@ def _ensure_persona(
     summary: str | None,
     tool_names: Collection[str],
     vocabulary: Vocabulary,
+    capabilities_enabled: bool,
+    team_mode: bool,
 ) -> list[Message]:
+    # The system message a resume carries is replaced, not kept: only its summary
+    # survives. So both modes have to arrive on every hop -- a hop that dropped one
+    # would rebuild the default persona mid-turn and answer a manager as a hire.
     effective_summary = summary
     rest = messages
     if messages and messages[0]["role"] == "system":
@@ -120,7 +237,13 @@ def _ensure_persona(
         rest = messages[1:]
     persona_msg = Message(
         role="system",
-        content=_persona_prompt(effective_summary, tool_names, vocabulary),
+        content=_persona_prompt(
+            effective_summary,
+            tool_names,
+            vocabulary,
+            capabilities_enabled,
+            team_mode,
+        ),
     )
     return [persona_msg, *rest]
 
@@ -129,6 +252,14 @@ def _assistant_message(result: ChatResult) -> Message:
     msg = Message(role="assistant", content=result.text)
     if result.tool_calls:
         msg["tool_calls"] = result.tool_calls
+    # Kept for the next hop: a reasoning provider continues a tool-using thought
+    # from these, and one with extended thinking rejects the turn without them.
+    # They also go out on the wire message (``api.routes.buddy._from_message``),
+    # so the hop after a backend tool gets them back from the caller.
+    if result.reasoning:
+        msg["reasoning"] = result.reasoning
+    if result.reasoning_details:
+        msg["reasoning_details"] = result.reasoning_details
     return msg
 
 
@@ -165,24 +296,71 @@ def drop_test_material(chunks: list[ScoredChunk]) -> list[ScoredChunk]:
 def _chunk_header(chunk: ScoredChunk) -> str:
     # Anything reaching here already survived `drop_test_material`, so this only
     # fires for a file no signal marked -- it is the belt to that braces.
+    header = chunk_header(chunk)
     if is_test_chunk(chunk.filename, chunk.source_url, chunk.source_role):
         return (
-            f"[{chunk.filename}] (test/fixture file -- example or sample data, "
+            f"{header} (test/fixture file -- example or sample data, "
             "not the team's real documentation or process)"
         )
-    return f"[{chunk.filename}]"
+    return header
 
 
-def _format_chunks(chunks: list[ScoredChunk]) -> str:
-    if not chunks:
-        return "No indexed material matched this search."
-    parts = [
-        f"{_chunk_header(chunk)}\n{chunk.text[:_SOURCE_CHARS]}" for chunk in chunks
-    ]
-    return "\n\n---\n\n".join(parts)
+def _without_test_material(result: ToolResult) -> ToolResult:
+    """``result`` with test material dropped from its chunks *and* its matches.
+
+    Both, so a dropped fixture is neither quoted nor counted as an omitted match
+    ("3 further matches omitted") the model would go looking for.
+    """
+    kept = drop_test_material(result.chunks)
+    if len(kept) == len(result.chunks):
+        return result
+    match_ids = result.match_chunk_ids
+    if match_ids is not None:
+        match_ids = frozenset(chunk.id for chunk in kept if chunk.id in match_ids)
+    return ToolResult(summary=result.summary, chunks=kept, match_chunk_ids=match_ids)
 
 
-def run_agent_turn(
+def _format_result(result: ToolResult, chunks: list[ScoredChunk]) -> str:
+    return format_evidence(result, chunks, header=_chunk_header, empty=_NO_MATCH)
+
+
+class _SearchDocsTool(RetrieveTool):
+    """Chat's ``retrieve`` under the name the buddy's persona and backend know.
+
+    Reused rather than re-implemented so the buddy gets what chat had: each hit
+    arrives with its neighbouring chunks, and only the hits are cited.
+    """
+
+    name = SEARCH_DOCS
+    description = _SEARCH_TOOL["description"]
+
+    def tool_spec(self) -> ToolSpec:
+        return _SEARCH_TOOL
+
+
+def _local_tools(
+    llm: LLMClient,
+    store: VectorStore,
+    exclusions: SourceExclusions,
+    filters: RetrievalFilters,
+    with_grep: bool,
+) -> ToolRegistry:
+    search = _SearchDocsTool(
+        llm,
+        store,
+        top_k=_TOP_K,
+        min_score=_MIN_SCORE,
+        exclusions=exclusions,
+        filters=filters,
+    )
+    if not with_grep:
+        return ToolRegistry([search])
+    return ToolRegistry(
+        [search, GrepTool(store, exclusions=exclusions, filters=filters)]
+    )
+
+
+def stream_agent_turn(
     messages: list[Message],
     backend_tools: list[ToolSpec],
     llm: LLMClient,
@@ -191,15 +369,38 @@ def run_agent_turn(
     prior_summary: str | None = None,
     vocabulary: Vocabulary = DEFAULT_VOCABULARY,
     project_ids: frozenset[str] | None = None,
-) -> AgentTurnResult:
-    """Runs one agent turn: executes ``search_docs`` locally, pauses on backend tools.
+    capabilities_enabled: bool = True,
+    team_mode: bool = False,
+    filters: RetrievalFilters | None = None,
+) -> Iterator[AgentStreamEvent]:
+    """Runs one agent turn, yielding what the model does as it does it.
 
-    Loops internally while the model only asks for local searches; returns as soon as
-    it either produces a final answer or requests a tool only the backend can run. A
-    step budget bounds the internal loop; if it's exhausted the model is asked once
-    more with no tools, forcing an answer.
+    Executes the searches locally and pauses on backend tools. Loops internally while
+    the model only asks for local searches (``search_docs``, and ``grep`` when
+    capabilities are off); finishes as soon as it either produces a final answer or
+    requests a tool only the backend can run. A step budget bounds the internal loop;
+    if it's exhausted the model is asked once more with no tools, forcing an answer.
+
+    Yields ``AgentReasoning`` and ``AgentToken`` fragments as the model produces them,
+    an ``AgentToolUse`` before each search this loop runs, and as the last event the
+    ``AgentTurnResult`` -- the same outcome ``run_agent_turn`` returns. Text from a
+    hop that went on to search is streamed like any other, and the next hop's text is
+    set apart from it by a blank line, written here and nowhere else.
 
     ``prior_summary`` stands in for everything older than ``messages``.
+
+    ``capabilities_enabled`` and ``team_mode`` choose the persona and must be passed
+    on every hop, because the persona is rebuilt on every hop: a resume that lost
+    either would answer the rest of the turn as the default mentor.
+
+    ``filters`` narrows every search by source system and time; its project fields
+    are ignored, because the scope is ``project_ids``. When it narrows, this hop
+    searched, nothing it found survived, and no backend tool is mounted to have
+    supplied other evidence, the answer is ``NO_FILTERED_RESULTS_MESSAGE`` rather
+    than whatever the model composed from nothing. Whether a hop can end that way is
+    known before it starts, so such a hop's text is held back rather than streamed:
+    it is released if the hop goes on to search, and replaced by the message if it is
+    the answer.
 
     This turn does not fold anything, and used not to be able to say that. A
     ``summarize_upto`` argument asked it to compact the oldest window messages
@@ -209,60 +410,127 @@ def run_agent_turn(
     ahead of the answer, to compress a single exchange. Folding is
     ``POST /onboarding/buddy/compact``, which the backend runs afterwards.
     """
-    window = list(messages)
+    window = fence_user_messages(list(messages))
     summary = prior_summary
+    with_grep = not capabilities_enabled
+    scope = replace(
+        filters if filters is not None else RetrievalFilters(),
+        project_id=None,
+        # Scoped to the projects this hire is on, so the mentor cannot quote
+        # another team's material as this team's -- and cannot hide the hire's
+        # own second project either. Fail-closed, like every project scope:
+        # material belonging to no project matches none (`rag.filters`).
+        project_ids=project_ids,
+    )
+    registry = _local_tools(
+        llm,
+        store,
+        exclusions if exclusions is not None else SourceExclusions(),
+        scope,
+        with_grep,
+    )
+    local_names = registry.names()
 
-    tools = [_SEARCH_TOOL, *[t for t in backend_tools if t["name"] != SEARCH_DOCS]]
-    backend_names = {
-        tool["name"] for tool in backend_tools if tool["name"] != SEARCH_DOCS
-    }
+    backend = [t for t in backend_tools if t["name"] not in local_names]
+    backend_names = {tool["name"] for tool in backend}
+    tools = [*registry.specs(), *backend]
     # The persona describes exactly the tools this hire was mounted, never a fixed
     # catalogue: the backend decides what a given role can even have, and a mentor
     # told about a tool it does not have will offer the hire something impossible.
-    work = _ensure_persona(window, summary, {SEARCH_DOCS, *backend_names}, vocabulary)
-    resolved_exclusions = exclusions if exclusions is not None else SourceExclusions()
+    work = _ensure_persona(
+        window,
+        summary,
+        {*local_names, *backend_names},
+        vocabulary,
+        capabilities_enabled,
+        team_mode,
+    )
     citations: list[Citation] = []
     seen_chunk_ids: set[str] = set()
+    reasoning: list[str] = []
+    searched = False
+    found = False
+    text_out = _HopText()
+
+    # Nothing matched under an explicit narrowing: the reader chose the filter, so an
+    # answer composed from no sources is the one thing not to give.
+    def _overridable() -> bool:
+        narrowed = has_narrowing_filters(filters)
+        return narrowed and searched and not found and not backend_names
+
+    def _answer(text: str) -> AgentTurnResult:
+        if _overridable():
+            text = NO_FILTERED_RESULTS_MESSAGE
+        return AgentTurnResult(
+            final=True,
+            text=text,
+            messages=[*work, Message(role="assistant", content=text)],
+            citations=citations,
+            reasoning=reasoning,
+        )
 
     for _ in range(_MAX_STEPS):
-        result = llm.chat(work, tools)
-        work = [*work, _assistant_message(result)]
+        text_out.begin_hop()
+        # A hop that can end as the filter message must not have shown the model's
+        # own text first, so it is held until the hop says which it is.
+        hold = _overridable()
+        held: list[str] = []
+        result: ChatResult | None = None
+        for event in llm.chat_stream(work, tools):
+            if isinstance(event, ReasoningDelta):
+                if event.text:
+                    yield AgentReasoning(event.text)
+            elif isinstance(event, TextDelta):
+                if hold:
+                    held.append(event.text)
+                else:
+                    yield from text_out.token(event.text)
+            else:
+                result = event
+        if result is None:
+            raise LLMUnavailableError("The model ended its reply without a result.")
+        if result.reasoning and result.reasoning.strip():
+            reasoning.append(result.reasoning)
 
         if not result.tool_calls:
-            return AgentTurnResult(
-                final=True,
-                text=result.text,
-                messages=work,
-                citations=citations,
+            answer = _answer(result.text)
+            if hold:
+                yield from text_out.token(answer.text)
+            yield answer
+            return
+        # Not the answer after all: the held text was narration before a search.
+        for fragment in held:
+            yield from text_out.token(fragment)
+        work = [*work, _assistant_message(result)]
+
+        local_calls = [c for c in result.tool_calls if c.name in local_names]
+        for call in local_calls:
+            yield AgentToolUse(call.name, dict(call.arguments))
+        outcomes = dict(
+            zip(
+                (c.id for c in local_calls),
+                run_tool_calls(registry, local_calls) if local_calls else [],
+                strict=True,
             )
+        )
+        searched = searched or bool(local_calls)
 
         pending: list[ToolCall] = []
         for call in result.tool_calls:
-            if call.name == SEARCH_DOCS:
-                query = str(call.arguments.get("query", "")).strip()
-                chunks = drop_test_material(
-                    retrieve(
-                        query,
-                        llm,
-                        store,
-                        top_k=_TOP_K,
-                        min_score=_MIN_SCORE,
-                        exclusions=resolved_exclusions,
-                        # Scoped to the projects this hire is on, so the mentor
-                        # cannot quote another team's material as this team's --
-                        # and cannot hide the hire's own second project either.
-                        # Material belonging to no project stays searchable; see
-                        # `matches_retrieval_filters`.
-                        filters=RetrievalFilters(project_ids=project_ids),
-                    )
-                )
-                # Cited after the drop, so nothing the mentor may not quote is
-                # offered to the hire as a source either. Deduped by chunk id.
-                fresh = [c for c in chunks if c.id not in seen_chunk_ids]
-                for chunk in fresh:
-                    seen_chunk_ids.add(chunk.id)
+            outcome = outcomes.get(call.id)
+            if outcome is not None:
+                screened = _without_test_material(outcome)
+                chunks = limit_evidence(screened.chunks)
+                # Cited after the drop and the budget, and only the direct matches:
+                # nothing the model was not shown, and no context-only neighbour,
+                # is offered to the hire as a source. Deduped by chunk id.
+                matched = screened.matched_chunks(chunks)
+                found = found or bool(matched)
+                fresh = [c for c in matched if c.id not in seen_chunk_ids]
+                seen_chunk_ids.update(c.id for c in fresh)
                 citations.extend(build_citations(fresh))
-                work = [*work, _tool_result_message(call.id, _format_chunks(chunks))]
+                content = _format_result(screened, chunks)
+                work = [*work, _tool_result_message(call.id, content)]
             elif call.name in backend_names:
                 pending.append(call)
             else:
@@ -275,23 +543,92 @@ def run_agent_turn(
         # in this same turn already have their results appended above, so the message
         # list stays well-formed.
         if pending:
-            return AgentTurnResult(
+            yield AgentTurnResult(
                 final=False,
                 text=result.text,
                 messages=work,
                 pending_tool_calls=pending,
                 citations=citations,
+                reasoning=reasoning,
             )
+            return
         # Only local searches this turn -- loop and let the model reason over them.
 
     # Step budget spent: force a final answer with no tools rather than loop forever.
-    forced = llm.generate(work)
-    return AgentTurnResult(
-        final=True,
-        text=forced,
-        messages=[*work, Message(role="assistant", content=forced)],
-        citations=citations,
-    )
+    #
+    # The notice goes to the model, not into the returned conversation: a final turn's
+    # messages are discarded by the caller, and a transcript carrying instructions about
+    # a budget nobody can see would be a strange thing to keep.
+    text_out.begin_hop()
+    hold = _overridable()
+    forced = ""
+    forced_reasoning = ""
+    notice = Message(role="system", content=_NO_TOOLS_THIS_TURN)
+    for event in llm.stream([*work, notice]):
+        if isinstance(event, ReasoningDelta):
+            if event.text:
+                forced_reasoning += event.text
+                yield AgentReasoning(event.text)
+        else:
+            forced += event.text
+            if not hold:
+                yield from text_out.token(event.text)
+    if forced_reasoning.strip():
+        reasoning.append(forced_reasoning)
+    answer = _answer(forced)
+    if hold:
+        yield from text_out.token(answer.text)
+    yield answer
 
 
-__all__ = ["AgentTurnResult", "LLMUnavailableError", "run_agent_turn", "SEARCH_DOCS"]
+def run_agent_turn(
+    messages: list[Message],
+    backend_tools: list[ToolSpec],
+    llm: LLMClient,
+    store: VectorStore,
+    exclusions: SourceExclusions | None = None,
+    prior_summary: str | None = None,
+    vocabulary: Vocabulary = DEFAULT_VOCABULARY,
+    project_ids: frozenset[str] | None = None,
+    capabilities_enabled: bool = True,
+    team_mode: bool = False,
+    filters: RetrievalFilters | None = None,
+) -> AgentTurnResult:
+    """Runs one agent turn to its outcome; see ``stream_agent_turn`` for the rules.
+
+    Same turn, same arguments, with the fragments discarded: what the buffered
+    endpoint and the tests want is the ``AgentTurnResult``.
+    """
+    outcome: AgentTurnResult | None = None
+    for event in stream_agent_turn(
+        messages,
+        backend_tools,
+        llm,
+        store,
+        exclusions=exclusions,
+        prior_summary=prior_summary,
+        vocabulary=vocabulary,
+        project_ids=project_ids,
+        capabilities_enabled=capabilities_enabled,
+        team_mode=team_mode,
+        filters=filters,
+    ):
+        if isinstance(event, AgentTurnResult):
+            outcome = event
+    if outcome is None:
+        raise LLMUnavailableError("The agent turn ended without an outcome.")
+    return outcome
+
+
+__all__ = [
+    "AgentReasoning",
+    "AgentStreamEvent",
+    "AgentToken",
+    "AgentToolUse",
+    "AgentTurnResult",
+    "GREP",
+    "LLMUnavailableError",
+    "run_agent_turn",
+    "SEARCH_DOCS",
+    "stream_agent_turn",
+]

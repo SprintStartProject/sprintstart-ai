@@ -21,6 +21,8 @@ SEMANTIC_ONLY_CHUNK_LIMIT = 10_000
 # Chroma 1.5.x can exceed SQLite's bind-variable ceiling when a widening
 # request asks it to hydrate tens of thousands of results at once.
 _MAX_QUERY_N = 10_000
+# A continually changing revision must not make retrieval rebuild forever.
+_MAX_BM25_REBUILD_ATTEMPTS = 3
 
 # First-guess over-fetch when a role, source, or attribute filter is active.
 # This is a round-trip optimisation only: both retrievers drop ineligible
@@ -212,37 +214,48 @@ class BM25Index:
 
 class BM25IndexCache:
     def __init__(self) -> None:
-        # The fingerprint and its index are stored together as one immutable
-        # tuple so the fast path reads a single reference. Reading the id-set and
-        # the index separately would let a concurrent rebuild swap them mid-check
-        # and return an index that doesn't match the fingerprint we validated.
-        self._snapshot: tuple[frozenset[str], BM25Index] | None = None
+        # The datastore revision and its index are stored together as one
+        # immutable tuple so the fast path reads a single reference. The
+        # revision is shared by every service instance using the same metadata
+        # database, unlike an in-process invalidation flag.
+        self._snapshot: tuple[int, BM25Index] | None = None
         self._lock = threading.Lock()
 
     def get(self, store: VectorStore) -> BM25Index:
-        # Fingerprint over ids *and* the metadata the index filters on (project
-        # membership, source role, connector, source system, timestamp), but not
-        # text or embeddings, so a cache hit stays cheap. Chunk ids are
-        # content-hashed and therefore cover the text; they do not cover
-        # membership, so an ids-only fingerprint would let an artifact moved
-        # from project A to project B keep serving BM25 hits to project A for as
-        # long as the cached index lived.
-        current_fingerprints = store.retrieval_fingerprints()
+        # One scalar SQLite read replaces the previous metadata scan over every
+        # Chroma chunk. Any instance that changes retrieval-visible state bumps
+        # this shared revision through ChromaVectorStore.
+        current_revision = store.corpus_revision()
 
         snapshot = self._snapshot
-        if snapshot is not None and snapshot[0] == current_fingerprints:
+        if snapshot is not None and snapshot[0] == current_revision:
             return snapshot[1]
 
         with self._lock:
-            # Another thread may have rebuilt for this exact corpus state while
-            # we were computing the fingerprint above; avoid rebuilding twice.
+            # Re-read after acquiring the lock: another thread may have rebuilt,
+            # or an ingest may have advanced the datastore revision while this
+            # caller was waiting.
+            current_revision = store.corpus_revision()
             snapshot = self._snapshot
-            if snapshot is not None and snapshot[0] == current_fingerprints:
+            if snapshot is not None and snapshot[0] == current_revision:
                 return snapshot[1]
 
-            index = BM25Index(store.all_chunks_without_embeddings())
-            self._snapshot = (current_fingerprints, index)
-            return index
+            for _ in range(_MAX_BM25_REBUILD_ATTEMPTS):
+                rebuild_revision = current_revision
+                index = BM25Index(store.all_chunks_without_embeddings())
+                current_revision = store.corpus_revision()
+
+                # Do not publish an index built across a completed mutation.
+                # Rebuild against the new revision instead.
+                if current_revision == rebuild_revision:
+                    self._snapshot = (current_revision, index)
+                    return index
+
+            # Sustained ingestion can change the revision after every hydration.
+            # Returning an uncached empty index keeps retrieval bounded and
+            # fail-closed; the semantic half remains available, and a later
+            # stable request can rebuild BM25 normally.
+            return BM25Index([])
 
 
 def hybrid_retrieve(

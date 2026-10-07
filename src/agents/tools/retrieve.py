@@ -2,6 +2,7 @@ from pydantic import BaseModel
 
 from agents.tools.base import Tool, ToolResult
 from llm.base import LLMClient
+from rag.context_window import expand_context_window
 from rag.retriever import retrieve
 from rag.source_filter import SourceExclusions
 from rag.types import RetrievalFilters
@@ -41,7 +42,7 @@ class RetrieveTool(Tool[RetrieveArgs]):
         self._filters = filters
 
     def run(self, args: RetrieveArgs) -> ToolResult:
-        chunks = retrieve(
+        hits = retrieve(
             args.query,
             self._llm,
             self._store,
@@ -50,7 +51,14 @@ class RetrieveTool(Tool[RetrieveArgs]):
             self._exclusions,
             self._filters,
         )
+        chunks = expand_context_window(
+            hits,
+            self._store,
+            filters=self._filters,
+            exclusions=self._exclusions,
+        )
         return ToolResult(
-            summary=f"retrieve({args.query!r}): {len(chunks)} chunk(s).",
+            summary=f"retrieve({args.query!r}): {len(hits)} chunk(s).",
             chunks=chunks,
+            match_chunk_ids=frozenset(chunk.id for chunk in hits),
         )

@@ -43,12 +43,14 @@ triggers Docker image publish to `ghcr.io/sprintstartproject/sprintstart-ai`.
 
 - **`api/`** — FastAPI app (`app.py`), DI (`dependencies.py`), `schemas.py`,
   SSE helpers (`sse.py`), and route modules under `routes/`.
-- **`agents/`** — `ChatAgent` (`chat_agent.py`) runs one flat tool loop over a
-  single message list: it searches while the model asks, then streams the
-  answer from that same conversation. Tool results carry the retrieved text,
-  so the loop that searched is the loop that answers. Tools live in
-  `agents/tools/`, registered via `ToolRegistry`. `ChatOrchestrator`
-  (`orchestrator.py`) maps the run's events to SSE for `/api/v1/chat`.
+- **`agents/`** — the buddy's tool-loop building blocks: tools live in
+  `agents/tools/` (retrieval, grep, evidence helpers), registered via
+  `ToolRegistry`, and `artifact_summary.py` backs the summaries endpoint. The
+  conversation engine itself is `onboarding/buddy_agent.py`
+  (`run_agent_turn`): one flat tool loop over a single message list — it
+  searches while the model asks, then answers from that same conversation.
+  Tool results carry the retrieved text, so the loop that searched is the
+  loop that answers. `api/routes/buddy.py` serves it.
 - **`ingestion/`** — Per-filetype parsers (`text_parser`, `pdf_parser`,
   `code_parser`, `image_parser`) behind `parser.py`, then `chunker.py` and
   `metadata_store.py`.
@@ -56,7 +58,7 @@ triggers Docker image publish to `ghcr.io/sprintstartproject/sprintstart-ai`.
   with RRF fusion), `citation.py`, `prompt.py`.
 - **`llm/`** — `LLMClient` protocol (`base.py`) with implementations:
   `ollama_client.py`, `openai_client.py`, `anthropic_client.py`.
-  `SplitLLMClient` lets chat and embeddings use different backends
+  `SplitLLMClient` lets generation and embeddings use different backends
   (`LLM_BACKEND` vs `EMBED_BACKEND`). All three take a request timeout
   (`LLM_TIMEOUT_SECONDS`, default 600). The Anthropic client sets
   prompt-cache breakpoints; caching matches on exact bytes, so read
@@ -76,10 +78,14 @@ scoping is **fail-closed** — a chunk with no project association is invisible
 to all projects rather than visible to all of them. When touching retrieval,
 ingest, or an endpoint, keep that property:
 
-- `project_id` is required on `ChatRequest`, `OnboardingPathRequest`,
+- `project_id` is required on `OnboardingPathRequest`,
   `GenerateBlueprintsRequest`, `KnowledgeGapsRequest` and `FaqGroupRequest`
   (all inherit `ProjectScopedRequest` in `api/schemas.py`).
-- `RetrievalFilters.project_id` is enforced in **both** halves of hybrid
+  `project_ids` (plural, required) is enforced on `AssembleOrientationRequest`,
+  `AssembleDiagramRequest`, and `MineStarterWorkRequest` for multi-project
+  scoping; `BuddyAgentRequest.project_ids` scopes the buddy's searches the
+  same way (empty admits nothing).
+- `RetrievalFilters.project_id` / `project_ids` is enforced in **both** halves of hybrid
   retrieval — `where_filter_for_chroma()` for the vector side and
   `matches_retrieval_filters()` for the BM25/in-memory side (`rag/filters.py`).
   Anything that scans `all_chunks_without_embeddings()` directly (the `grep`
@@ -100,13 +106,13 @@ ingest, or an endpoint, keep that property:
 - Don't assume Ollama-only: check `llm/base.py`'s `LLMClient` protocol when
   touching LLM calls. Backend is configurable per deployment via
   `LLM_BACKEND` / `EMBED_BACKEND`.
-- Chat is one agent, one loop. Give it a new `Tool` in `agents/tools/` rather
-  than a sub-agent to delegate to: every tier costs a serialized round-trip
-  ahead of the user's first token. Tool results must carry their chunk text —
-  a count-only summary forces a second pass to write the answer.
+- The buddy is one agent, one loop. Give it a new `Tool` in `agents/tools/`
+  rather than a sub-agent to delegate to: every tier costs a serialized
+  round-trip ahead of the user's first token. Tool results must carry their
+  chunk text — a count-only summary forces a second pass to write the answer.
 - Tools must be read-only and thread-safe: a turn's tool calls run
-  concurrently (`ChatAgent._run_tools`). Cache across calls only behind a lock,
-  as `rag.hybrid.BM25IndexCache` does.
+  concurrently (`agents.tools.base.run_tool_calls`). Cache across calls only
+  behind a lock, as `rag.hybrid.BM25IndexCache` does.
 - `AGENT_DEBUG=1` logs each agent's reasoning (LLM text + tool calls) to
   stderr — useful when debugging agent behavior.
 - The onboarding pipeline is intentionally deterministic/staged rather than

@@ -5,7 +5,7 @@ import pytest
 from api.schemas import SkillCatalogItem
 from llm.base import Message
 from llm.errors import LLMUnavailableError
-from rag.types import Chunk
+from rag.types import Chunk, ScoredChunk
 from skills.suggestion import _build_prompt, suggest_skills
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
@@ -386,3 +386,110 @@ def test_build_prompt_structure() -> None:
     assert "Role: Fullstack Developer" in messages[1]["content"]
     assert "Description: Works on backend and frontend" in messages[1]["content"]
     assert "Project industry/domain: Fintech" in messages[1]["content"]
+
+
+def test_suggest_skills_without_project_id_skips_retrieval() -> None:
+    store = _make_store_with_chunks()
+    catalog = [
+        SkillCatalogItem(
+            id="s1", name="React", category="Frontend & UI", universal=False
+        ),
+        SkillCatalogItem(
+            id="s2", name="Communication", category="Soft Skills", universal=True
+        ),
+    ]
+
+    llm_payload = {
+        "suggestions": [
+            {
+                "name": "React",
+                "category": "Frontend & UI",
+                "reason": "React components found",
+                "confidence": "high",
+                "universal": False,
+                "isNew": False,
+                "chunkIds": ["c-react"],
+            },
+            {
+                "name": "Communication",
+                "category": "Soft Skills",
+                "reason": "Essential for teamwork",
+                "confidence": "high",
+                "universal": True,
+                "isNew": False,
+                "chunkIds": [],
+            },
+        ]
+    }
+    llm = StubLLMClient(generate_response=json.dumps(llm_payload))
+    llm.embedding = _EMBED
+
+    # project_id is omitted / None
+    result = suggest_skills(
+        llm=llm,
+        store=store,
+        project_id=None,
+        role_name="Developer",
+        project_industry="Banking",
+        available_skills=catalog,
+    )
+
+    # React is dropped because no retrieval occurred; Communication passes
+    assert len(result.suggestions) == 1
+    assert result.suggestions[0].name == "Communication"
+    assert result.suggestions[0].chunk_ids == []
+
+
+def test_suggest_skills_without_project_id_does_not_query_store() -> None:
+    class QueryCountingStore(StubVectorStore):
+        query_count = 0
+
+        def query(self, *args: object, **kwargs: object) -> list[ScoredChunk]:
+            self.query_count += 1
+            return super().query(*args, **kwargs)
+
+    store = QueryCountingStore()
+    store.add(
+        [
+            Chunk(
+                id="c1",
+                artifact_id="a1",
+                filename="README.md",
+                text="project info",
+                embedding=_EMBED,
+                project_ids=("proj-1",),
+            )
+        ]
+    )
+    catalog = [
+        SkillCatalogItem(
+            id="s1", name="Teamwork", category="Soft Skills", universal=True
+        )
+    ]
+    llm_payload = {
+        "suggestions": [
+            {
+                "name": "Teamwork",
+                "category": "Soft Skills",
+                "reason": "Team collaboration",
+                "confidence": "high",
+                "universal": True,
+                "isNew": False,
+                "chunkIds": [],
+            }
+        ]
+    }
+    llm = StubLLMClient(generate_response=json.dumps(llm_payload))
+    llm.embedding = _EMBED
+
+    result = suggest_skills(
+        llm=llm,
+        store=store,
+        project_id=None,
+        role_name="Developer",
+        available_skills=catalog,
+    )
+
+    assert store.query_count == 0
+    assert len(result.suggestions) == 1
+    assert result.suggestions[0].name == "Teamwork"

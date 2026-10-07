@@ -1,9 +1,9 @@
 """Streaming tool-decision tests: `chat_stream` across all three LLM clients.
 
-These pin the contract the chat agent now relies on: reasoning and answer
-deltas arrive live during a tool-decision turn, tool calls are assembled from
-fragments (or recovered from leaked markup), and the stream always ends with a
-terminal `ChatResult` that mirrors what was streamed.
+These pin the streaming contract itself: reasoning and answer deltas arrive
+live during a tool-decision turn, tool calls are assembled from fragments (or
+recovered from leaked markup), and the stream always ends with a terminal
+`ChatResult` that mirrors what was streamed.
 """
 
 import json
@@ -153,8 +153,8 @@ class TestOpenAIChatStream:
         """The details a provider streams must arrive on the terminal result as
         whole blocks, not as the fragments they were streamed in: OpenRouter
         rejects the post-tool turn unless the exact structured sequence comes
-        back (the hotfix #170 bug class), and `chat_agent` gates its final
-        answer turn on that context being present."""
+        back (the hotfix #170 bug class), so a caller re-sends the terminal
+        result's blocks verbatim."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

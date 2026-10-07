@@ -13,16 +13,17 @@ from api.routes import (  # noqa: E402
     artifact_projects,
     blueprints,
     buddy,
-    chat,
     diagram,
     grading,
     health,
     ingest,
     ingest_run,
+    ingest_status,
     insights,
     knowledge_gaps,
     onboarding,
     orientation,
+    phase,
     projects,
     skills,
     sources,
@@ -46,10 +47,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except LLMUnavailableError as exc:
         logger.warning("LLM backend unreachable at startup: %s", exc)
 
-    # Construct Chroma before requests can fan out into chat and asynchronous
-    # analytics on separate worker threads. The adapter also serialises cold
-    # cache misses, but warming here removes that latency and race window from
-    # the first user request altogether.
+    # Construct Chroma before requests can fan out into retrieval-backed
+    # endpoints and asynchronous analytics on separate worker threads. The
+    # adapter also serialises cold cache misses, but warming here removes that
+    # latency and race window from the first user request altogether.
     try:
         get_store()
     except Exception as exc:
@@ -64,8 +65,8 @@ app = FastAPI(
     title="SprintStart AI Service",
     version="0.1.0",
     description=(
-        "RAG-based AI service. Exposes document ingestion and streaming chat. "
-        "All streaming responses use Server-Sent Events (SSE)."
+        "RAG-based AI service. Exposes document ingestion and retrieval-backed "
+        "onboarding endpoints. Streaming responses use Server-Sent Events (SSE)."
     ),
     lifespan=lifespan,
 )
@@ -79,15 +80,16 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router)
-api_router.include_router(chat.router)
 api_router.include_router(buddy.router)
 api_router.include_router(ingest.router)
 api_router.include_router(ingest_run.router)
+api_router.include_router(ingest_status.router)
 api_router.include_router(artifact_projects.router)
 api_router.include_router(title.router)
 api_router.include_router(vector_db.router)
 api_router.include_router(onboarding.router)
 api_router.include_router(orientation.router)
+api_router.include_router(phase.router)
 api_router.include_router(diagram.router)
 api_router.include_router(starter_work.router)
 api_router.include_router(blueprints.router)

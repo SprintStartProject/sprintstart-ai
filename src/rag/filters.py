@@ -81,6 +81,30 @@ def _parse_timestamp(value: str | None) -> float | None:
         return None
 
 
+def has_narrowing_filters(filters: RetrievalFilters | None) -> bool:
+    """Whether ``filters`` narrows the corpus beyond the always-present scope.
+
+    Only a caller-chosen narrowing counts. The project scope is on nearly every
+    request and must never look like one: the buddy turn's canned reply below
+    is guarded by it.
+    """
+    if filters is None:
+        return False
+
+    return bool(filters.source_systems) or (
+        filters.time_from is not None or filters.time_to is not None
+    )
+
+
+# The reply a narrowed search gets when nothing under the narrowing matched:
+# answering from no sources under a filter the reader chose themselves is the
+# one thing not to do.
+NO_FILTERED_RESULTS_MESSAGE = (
+    "I could not find any matching sources for the selected filters, "
+    "so I cannot answer this reliably."
+)
+
+
 def matches_retrieval_filters(
     chunk: Chunk | ScoredChunk,
     filters: RetrievalFilters | None,
@@ -139,6 +163,7 @@ def where_filter_for_chroma(
     filters: RetrievalFilters | None,
     exclude_roles: frozenset[SourceRole] = frozenset(),
     exclusions: SourceExclusions = SourceExclusions(),
+    revoked_artifact_ids: frozenset[str] = frozenset(),
 ) -> Any | None:
     """Translate every eligibility constraint into a Chroma ``where`` clause.
 
@@ -192,6 +217,9 @@ def where_filter_for_chroma(
             conditions.append(
                 {"created_at_ts": {"$lte": timestamp_from_iso(filters.time_to)}}
             )
+
+    if revoked_artifact_ids:
+        conditions.append({"artifact_id": {"$nin": sorted(revoked_artifact_ids)}})
 
     if exclude_roles:
         conditions.append({"source_role": {"$nin": sorted(exclude_roles)}})

@@ -141,11 +141,46 @@ def test_suggest_skills_api_degradation_on_parse_error(
     assert response.json() == {"suggestions": []}
 
 
+def test_suggest_skills_api_200_without_project_id(
+    client: tuple[TestClient, StubLLMClient, StubVectorStore],
+) -> None:
+    http, _, _ = client
+
+    # projectId omitted from request
+    payload = {
+        "roleName": "Frontend Developer",
+        "roleDescription": "Builds user interfaces",
+        "projectIndustry": "Healthcare",
+        "availableSkills": [
+            {
+                "id": "s1",
+                "name": "React",
+                "category": "Frontend & UI",
+                "universal": False,
+            },
+            {
+                "id": "s2",
+                "name": "Communication",
+                "category": "Soft Skills",
+                "universal": True,
+            },
+        ],
+    }
+
+    response = http.post(f"{_BASE}/suggest", json=payload)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert "suggestions" in data
+    # Only universal skill survives grounding without project context
+    assert len(data["suggestions"]) == 1
+    assert data["suggestions"][0]["name"] == "Communication"
+
+
 def test_suggest_skills_api_422_missing_fields(
     client: tuple[TestClient, StubLLMClient, StubVectorStore],
 ) -> None:
     http, _, _ = client
 
-    # Missing roleName and projectId
+    # Missing required roleName
     response = http.post(f"{_BASE}/suggest", json={})
     assert response.status_code == 422

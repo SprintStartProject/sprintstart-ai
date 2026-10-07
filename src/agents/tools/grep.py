@@ -1,9 +1,11 @@
 from pydantic import BaseModel, field_validator
 
 from agents.tools.base import Tool, ToolResult
+from rag.context_window import expand_context_window
 from rag.filters import matches_retrieval_filters
+from rag.hybrid import to_scored_chunk
 from rag.source_filter import SourceExclusions, is_excluded
-from rag.types import RetrievalFilters, ScoredChunk
+from rag.types import RetrievalFilters
 from store.base import VectorStore
 
 _GREP_SCORE = 1.0
@@ -39,19 +41,8 @@ class GrepTool(Tool[GrepArgs]):
 
     def run(self, args: GrepArgs) -> ToolResult:
         needles = [p.lower() for p in args.patterns]
-        results = [
-            ScoredChunk(
-                id=chunk.id,
-                artifact_id=chunk.artifact_id,
-                filename=chunk.filename,
-                text=chunk.text,
-                score=_GREP_SCORE,
-                position=chunk.position,
-                kind=chunk.kind,
-                start_line=chunk.start_line,
-                start_page=chunk.start_page,
-                project_ids=chunk.project_ids,
-            )
+        hits = [
+            to_scored_chunk(chunk, _GREP_SCORE)
             # This tool scans the whole corpus in memory rather than going
             # through the vector store's query path, so the retrieval filters
             # (notably the project scope) have to be applied here explicitly.
@@ -60,7 +51,14 @@ class GrepTool(Tool[GrepArgs]):
             and not is_excluded(chunk, self._exclusions)
             and any(needle in chunk.text.lower() for needle in needles)
         ]
+        chunks = expand_context_window(
+            hits,
+            self._store,
+            filters=self._filters,
+            exclusions=self._exclusions,
+        )
         return ToolResult(
-            summary=f"grep({args.patterns}): {len(results)} match(es).",
-            chunks=results,
+            summary=f"grep({args.patterns}): {len(hits)} match(es).",
+            chunks=chunks,
+            match_chunk_ids=frozenset(chunk.id for chunk in hits),
         )

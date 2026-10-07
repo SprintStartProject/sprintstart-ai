@@ -228,3 +228,95 @@ def test_the_done_greeting_is_exactly_what_was_streamed() -> None:
     events = list(stream_session(None, [], "", llm))
 
     assert _done(events)["greeting"] == _tokens(events)
+
+
+# --- Team mode -------------------------------------------------------------
+#
+# The reader is a project's manager and STATE is their team's attention list. What
+# must not change is everything that parses the model's reply: one format, one
+# parser, whoever is reading.
+
+
+def _system_of(prompt: list[Message] | None) -> str:
+    assert prompt is not None
+    return str(prompt[0]["content"])
+
+
+def test_team_mode_greets_a_manager_about_their_team() -> None:
+    llm = _StreamingStubLLM(["hi"])
+
+    list(stream_session(memory=None, recent=[], state="", llm=llm, team_mode=True))
+
+    system = _system_of(llm.last_prompt)
+    assert "project's manager" in system
+    assert "the team's current attention list" in system
+    assert "Never welcome them as a new hire" in system
+
+
+def test_the_hire_greeting_is_untouched_by_default() -> None:
+    llm = _StreamingStubLLM(["hi"])
+
+    list(stream_session(memory=None, recent=[], state="", llm=llm))
+
+    system = _system_of(llm.last_prompt)
+    assert "greeting a new hire" in system
+    assert "project's manager" not in system
+
+
+def test_the_team_suggestion_is_a_question_about_the_team() -> None:
+    llm = _StreamingStubLLM(["hi"])
+
+    list(stream_session(memory=None, recent=[], state="", llm=llm, team_mode=True))
+
+    assert "never one about their own work" in _system_of(llm.last_prompt)
+
+
+def test_an_unavailable_model_falls_back_per_mode() -> None:
+    """The fallback is the one greeting guaranteed to be read in full, so a hire's
+    welcome would be wrong exactly where it is least recoverable."""
+    team = _StreamingStubLLM(LLMUnavailableError("down"))
+    hire = _StreamingStubLLM(LLMUnavailableError("down"))
+
+    team_done = _done(list(stream_session(None, [], "", team, team_mode=True)))
+    hire_done = _done(list(stream_session(None, [], "", hire)))
+
+    assert team_done["greeting"] == (
+        "You're in team mode. Ask me who needs your attention, or how somebody on "
+        "the team is getting on."
+    )
+    assert hire_done["greeting"] == (
+        "Welcome back! How can I help with your onboarding today?"
+    )
+
+
+def test_a_blank_team_greeting_falls_back_to_the_team_welcome() -> None:
+    llm = _StreamingStubLLM(["\n<<<ACTION>>>\n" + _ACTION])
+
+    done = _done(list(stream_session(None, [], "", llm, team_mode=True)))
+
+    assert "team mode" in str(done["greeting"])
+
+
+def test_the_marker_and_the_done_payload_are_identical_in_team_mode() -> None:
+    llm = _StreamingStubLLM(
+        ["Two people ", "are waiting on a review.", "\n<<<ACTION>>>\n", _ACTION]
+    )
+
+    events = list(stream_session(None, [], "", llm, team_mode=True))
+
+    assert _tokens(events) == "Two people are waiting on a review."
+    done = _done(events)
+    assert done["greeting"] == _tokens(events)
+    assert done["action"] == {
+        "label": "What next?",
+        "question": "What should I work on?",
+    }
+
+
+def test_a_team_marker_split_across_chunks_is_still_found() -> None:
+    llm = _StreamingStubLLM(["Nobody is blocked.", "\n<<<ACT", "ION>>>\n", _ACTION])
+
+    events = list(stream_session(None, [], "", llm, team_mode=True))
+
+    assert _tokens(events).strip() == "Nobody is blocked."
+    assert _done(events)["action"] is not None

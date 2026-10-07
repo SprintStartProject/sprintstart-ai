@@ -7,7 +7,6 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
-    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -71,7 +70,7 @@ class IngestRequest(BaseModel):
         description=(
             "Projects this artifact belongs to. Retrieval is project-scoped: an "
             "artifact ingested without project ids is not reachable from any "
-            "project-scoped request (chat, onboarding, insights) until it is "
+            "project-scoped request (buddy, onboarding, insights) until it is "
             "re-ingested with them."
         ),
         examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
@@ -233,27 +232,15 @@ class IngestResponse(BaseModel):
     }
 
 
-class HistoryEntry(BaseModel):
-    role: Literal["user", "assistant"] = Field(description="Who produced this message.")
-    content: str = Field(description="Text content of the message.")
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "role": "user",
-                "content": "What were the main blockers in sprint 42?",
-            }
-        }
-    }
-
-
-SourceSystemValue = Literal["GITHUB", "JIRA", "CONFLUENCE", "UPLOAD"]
+SourceSystemValue = Literal[
+    "GITHUB", "BITBUCKET", "JIRA", "CONFLUENCE", "NOTION", "UPLOAD"
+]
 
 
 class ProjectScopedRequest(BaseModel):
     """Base for requests that may only ever see one project's material.
 
-    Every RAG-backed endpoint (chat, onboarding, blueprint generation,
+    Every RAG-backed endpoint (buddy, onboarding, blueprint generation,
     insights) is project-scoped: the backend knows which projects an artifact
     belongs to and which project the caller is authorized for, and passes that
     project down. Without it the service cannot tell one project's corpus from
@@ -270,10 +257,6 @@ class ProjectScopedRequest(BaseModel):
         ),
         examples=["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
     )
-
-
-def _empty_history() -> list[HistoryEntry]:
-    return []
 
 
 class ChatFilters(BaseModel):
@@ -301,32 +284,6 @@ class ChatFilters(BaseModel):
 
         items = cast(list[object], value)
         return [str(item).upper() for item in items]
-
-
-class ChatRequest(ProjectScopedRequest):
-    question: str = Field(examples=["What changed in the auth implementation?"])
-    history: list[HistoryEntry] = Field(default_factory=_empty_history)
-    filters: ChatFilters | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_chat_fields(cls, data: object) -> object:
-        if not isinstance(data, dict):
-            return data
-
-        raw_data = cast(dict[object, object], data)
-        updated: dict[str, object] = {}
-
-        for key, value in raw_data.items():
-            updated[str(key)] = value
-
-        if "question" not in updated and "prompt" in updated:
-            updated["question"] = updated["prompt"]
-
-        if "history" not in updated and "context" in updated:
-            updated["history"] = updated["context"]
-
-        return updated
 
 
 class HealthResponse(BaseModel):
@@ -908,6 +865,41 @@ class RunArtifactsSyncResponse(BaseModel):
     )
 
 
+# What the knowledge base shows as an artifact's AI index state. ``indexed``
+# is the metadata store's ``completed``, renamed for the reader: it means the
+# chatbot can answer from the artifact. ``unknown`` means this service holds
+# no record of the id at all.
+ArtifactIndexStatus = Literal["indexed", "processing", "failed", "deindexed", "unknown"]
+
+# One requested id. Non-empty so that a stray ``artifact_ids=`` is a client
+# error rather than a lookup that can only ever answer ``unknown``.
+StatusArtifactId = Annotated[str, StringConstraints(min_length=1)]
+
+
+class ArtifactIngestStatusResponse(BaseModel):
+    """One artifact's index state, as the AI service recorded it."""
+
+    artifact_id: str = Field(description="The requested artifact id, verbatim.")
+    status: ArtifactIndexStatus
+    updated_at: str | None = Field(
+        default=None,
+        description="ISO timestamp of the last recorded change; null if unknown.",
+    )
+    chunk_count: int | None = Field(
+        default=None,
+        description="Chunks recorded for the artifact; null if unknown.",
+    )
+
+
+class IngestStatusResponse(BaseModel):
+    items: list[ArtifactIngestStatusResponse] = Field(
+        description=(
+            "One entry per distinct requested id, in the order the ids were "
+            "first requested. An id this service never saw is 'unknown'."
+        ),
+    )
+
+
 # ── Connector / source enable-disable ───────────────────────────────────────
 
 
@@ -1135,6 +1127,16 @@ class FaqGroupResponse(BaseModel):
 
 
 class MineStarterWorkRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_ids: ProjectIds = Field(
+        alias="projectIds",
+        description=(
+            "Projects this request is scoped to. Multi-project scoping is supported; "
+            "an empty list scopes to no projects (admitting no material)."
+        ),
+        examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
+    )
     active_source_ids: list[str] = Field(
         default=[],
         description=(
@@ -1160,6 +1162,16 @@ class MineStarterWorkRequest(BaseModel):
 
 
 class AssembleOrientationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_ids: ProjectIds = Field(
+        alias="projectIds",
+        description=(
+            "Projects this request is scoped to. Multi-project scoping is supported; "
+            "an empty list scopes to no projects (admitting no material)."
+        ),
+        examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
+    )
     task_title: str = Field(description="The task the packet orients somebody for.")
     task_body: str = ""
     labels: list[str] = Field(default_factory=list)
@@ -1182,6 +1194,16 @@ class AssembleOrientationRequest(BaseModel):
 
 
 class AssembleDiagramRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_ids: ProjectIds = Field(
+        alias="projectIds",
+        description=(
+            "Projects this request is scoped to. Multi-project scoping is supported; "
+            "an empty list scopes to no projects (admitting no material)."
+        ),
+        examples=[["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"]],
+    )
     subject: str = Field(
         description=(
             "The question the diagram answers -- 'how a request reaches the "
@@ -1200,6 +1222,40 @@ class AssembleDiagramRequest(BaseModel):
             "-- which is what keeps a card that hydrates on every board load "
             "from costing an LLM call every time."
         ),
+    )
+
+
+class AssemblePhaseRequest(BaseModel):
+    phase_title: str = Field(
+        description="The blueprint phase whose content is being filled."
+    )
+    phase_description: str = Field(default="")
+    phase_prompt: str = Field(
+        description=(
+            "The author's prompt prescribing what the phase should teach. The "
+            "assembled steps/questions must cover what it asks for, grounded in "
+            "evidence -- an instruction the corpus cannot support is left as an "
+            "honest gap, not invented content."
+        )
+    )
+    project_id: ProjectId = Field(
+        description=(
+            "Scopes retrieval to this project's corpus. Chunks without this "
+            "project's membership are invisible, so a phase can never cite "
+            "another project's material."
+        )
+    )
+    last_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "The corpus fingerprint recorded when this phase was last assembled, "
+            "if any. Idempotency is per phase: an unchanged corpus yields "
+            "`unchanged` so cached content can be served without regeneration."
+        ),
+    )
+    industry: str | None = Field(
+        default=None,
+        description="Optional detected or user-specified project industry/domain.",
     )
 
 
@@ -1246,6 +1302,22 @@ class BuddyAgentMessageSchema(BaseModel):
     tool_call_id: str | None = Field(
         default=None,
         description="On a tool-result turn, the id of the call it answers.",
+    )
+    reasoning: str | None = Field(
+        default=None,
+        description=(
+            "On an assistant turn, the model's plain-text reasoning. Opaque to the "
+            "caller; carry it back verbatim."
+        ),
+    )
+    reasoning_details: list[dict[str, object]] = Field(
+        default_factory=list[dict[str, object]],
+        description=(
+            "On an assistant turn, the provider's structured (possibly signed) "
+            "reasoning blocks. Opaque to the caller; carry them back verbatim, "
+            "because a provider with extended thinking rejects a resumed tool turn "
+            "that lost them."
+        ),
     )
 
 
@@ -1331,6 +1403,38 @@ class BuddyAgentRequest(BaseModel):
             "to no projects (admitting no material)."
         ),
     )
+    capabilities_enabled: bool = Field(
+        default=True,
+        description=(
+            "False when the reader asked the corpus rather than the mentor: the "
+            "persona then says it is answering from the project's material only "
+            "and offers to do nothing. Send it on every hop — the persona is "
+            "rebuilt on each one, so a hop that drops it changes mode mid-turn."
+        ),
+    )
+    team_mode: bool = Field(
+        default=False,
+        description=(
+            "True when the reader is a project's manager asking about that "
+            "project's team, rather than a hire asking about their own "
+            "onboarding. The persona then addresses a manager, states team "
+            "members' situations as facts rather than judgments, and offers "
+            "changes for the manager to confirm instead of claiming to have made "
+            "them. Send it on every hop, for the same reason as "
+            "`capabilities_enabled`."
+        ),
+    )
+    filters: ChatFilters | None = Field(
+        default=None,
+        description=(
+            "Narrows every search this turn runs (`search_docs` and `grep`) to "
+            "some source systems and/or a time window, on top of the project "
+            "scope in `project_ids`. When at least one search ran and every one "
+            "came back empty under these filters, the turn answers with a fixed "
+            "notice instead of letting the model answer from nothing. Send it "
+            "on every hop -- searches run on resume hops too."
+        ),
+    )
 
 
 class BuddyAgentResponse(BaseModel):
@@ -1355,6 +1459,17 @@ class BuddyAgentResponse(BaseModel):
         default_factory=list[BuddyCitationSchema],
         description="Sources the grounded searches drew on.",
     )
+    reasoning: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "The model's reasoning on this hop, one entry per model call that "
+            "returned any, oldest first. Display-only: never part of "
+            "`messages`, so it is not carried back and never re-enters the "
+            "model's context. Each hop returns only its own; a caller showing "
+            "a whole turn concatenates the hops. Empty when the provider "
+            "exposes none."
+        ),
+    )
 
 
 class BuddyOpenRequest(BaseModel):
@@ -1377,7 +1492,17 @@ class BuddyOpenRequest(BaseModel):
         default="",
         description=(
             "A plain-text snapshot of the hire's current state (pull requests, tasks, "
-            "competencies) for the greeting to ground itself in."
+            "competencies) for the greeting to ground itself in. In team mode this is "
+            "the team's attention list instead."
+        ),
+    )
+    team_mode: bool = Field(
+        default=False,
+        description=(
+            "True when a project's manager is opening a team conversation. The "
+            "greeting then addresses a manager about their team — `state` is the "
+            "team's attention list, not the reader's own onboarding — and the "
+            "suggested next step is a question about the team."
         ),
     )
 
@@ -1430,7 +1555,9 @@ class FaqGroupRefSchema(BaseModel):
 
 
 class FaqClassifyRequest(ProjectScopedRequest):
-    question: str = Field(description="The question a user just asked in the chat.")
+    question: str = Field(
+        description="The question a user just asked the project's assistant."
+    )
     groups: list[FaqGroupRefSchema] = Field(
         default_factory=list[FaqGroupRefSchema],
         description=(
@@ -1465,7 +1592,10 @@ class FaqClassifyResponse(BaseModel):
 
     relevant: bool = Field(
         description=(
-            "False for greetings, smalltalk and other non-questions. The "
+            "False for anything that is not a documentation question: "
+            "greetings and smalltalk, requests for the assistant to act, "
+            "questions about the asker's own onboarding state, and follow-ups "
+            "that only make sense inside their conversation. The "
             "backend drops those instead of surfacing them as an FAQ."
         )
     )
@@ -1533,9 +1663,20 @@ class SkillCatalogItem(BaseModel):
     )
 
 
-class SkillSuggestionRequest(ProjectScopedRequest):
+class SkillSuggestionRequest(BaseModel):
     """Request to suggest skills for a role in a project."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: ProjectId | None = Field(
+        alias="projectId",
+        default=None,
+        description=(
+            "Optional project this request is scoped to. When absent, retrieval "
+            "is skipped and only universal/role-typical skills are suggested."
+        ),
+        examples=["3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11"],
+    )
     role_name: str = Field(
         alias="roleName",
         min_length=1,

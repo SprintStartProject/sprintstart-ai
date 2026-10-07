@@ -47,7 +47,7 @@ from onboarding.diagram_models import (
 from onboarding.progress import ProgressEvent, ProgressStream, drain
 from onboarding.similarity import OVERLAP_THRESHOLD, text_overlap
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.types import ScoredChunk
+from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,7 @@ _MIN_NODES = 2
 # page load, so a diagram that churns between loads would read as the system
 # changing its mind about the codebase.
 _TEMPERATURE = 0.0
+_MAX_GENERATION_ATTEMPTS = 2
 
 # Delimiter for the model-authored subject in the prompt. Same device the
 # artifact judge uses for hire-authored pull request text, for the same reason,
@@ -230,6 +231,24 @@ def _build_prompt(subject: str, chunks: list[ScoredChunk]) -> list[Message]:
     return [
         Message(role="system", content=system),
         Message(role="user", content=user),
+    ]
+
+
+def _correction_prompt(
+    messages: list[Message], raw: str, error: AssemblyError
+) -> list[Message]:
+    """Ask once for the same diagram with only its JSON corrected."""
+    return [
+        *messages,
+        Message(role="assistant", content=raw),
+        Message(
+            role="user",
+            content=(
+                f"That response could not be validated: {error}. Return the same "
+                "grounded diagram again as one valid JSON object matching the "
+                "schema exactly. Return JSON only."
+            ),
+        ),
     ]
 
 
@@ -405,6 +424,7 @@ def stream_diagram(
     store: VectorStore,
     *,
     subject: str,
+    project_ids: frozenset[str],
     last_fingerprint: str | None = None,
 ) -> Generator[ProgressEvent, None, DiagramOutcome]:
     """Assemble a diagram, yielding live progress and returning the final outcome.
@@ -430,6 +450,7 @@ def stream_diagram(
         unchanged_label="Nothing changed — the cached diagram is current",
         empty_warning_label="The project has no indexed material yet",
         empty_done_label="No diagram could be assembled",
+        project_ids=project_ids,
     )
     if early_outcome is not None:
         yield from early_events
@@ -449,6 +470,7 @@ def stream_diagram(
             min_score=_MIN_SCORE,
             bm25_cache=bm25_cache,
             exclude_roles=GROUNDING_EXCLUDED_ROLES,
+            filters=RetrievalFilters(project_ids=project_ids),
         ):
             existing = by_id.get(chunk.id)
             if existing is None or chunk.score > existing.score:
@@ -467,16 +489,35 @@ def stream_diagram(
         return outcome
 
     yield progress.stage("generating", f"Drawing it from {len(chunks)} source(s)")
-    raw = llm.generate(_build_prompt(subject, chunks), temperature=_TEMPERATURE)
-    try:
-        payload = _parse_payload(raw)
-    except AssemblyError as exc:
-        logger.warning("Diagram assembly failed for subject %r: %s", subject, exc)
+    messages = _build_prompt(subject, chunks)
+    # One correction round, as phase assembly and orientation have: a small local
+    # model breaks the JSON now and then, and asked back it usually fixes it.
+    parse_error: AssemblyError | None = None
+    payload: _GenPayload | None = None
+    for attempt in range(_MAX_GENERATION_ATTEMPTS):
+        raw = llm.generate(messages, temperature=_TEMPERATURE)
+        try:
+            payload = _parse_payload(raw)
+            break
+        except AssemblyError as exc:
+            parse_error = exc
+            logger.warning(
+                "Diagram assembly attempt %d failed for subject %r: %s",
+                attempt + 1,
+                subject,
+                exc,
+            )
+            if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
+                yield progress.stage("generating", "Correcting invalid generated JSON")
+                messages = _correction_prompt(messages, raw, exc)
+
+    if payload is None:
+        assert parse_error is not None
         outcome = DiagramOutcome(
             status="skipped",
             chunks_retrieved=len(chunks),
             chunks_collapsed=collapsed,
-            notes=[str(exc)],
+            notes=[str(parse_error)],
         )
         yield progress.warning("The generated diagram could not be read")
         yield progress.done("No diagram could be assembled", _dump(outcome))
@@ -554,6 +595,7 @@ def assemble_diagram(
     store: VectorStore,
     *,
     subject: str,
+    project_ids: frozenset[str],
     last_fingerprint: str | None = None,
 ) -> DiagramOutcome:
     """Assemble a diagram of one subject from the project's own material.
@@ -581,6 +623,7 @@ def assemble_diagram(
             llm,
             store,
             subject=subject,
+            project_ids=project_ids,
             last_fingerprint=last_fingerprint,
         )
     )

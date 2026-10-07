@@ -22,24 +22,21 @@ from onboarding.progress import ProgressEvent, ProgressStream
 from store.base import VectorStore
 
 
-def corpus_fingerprint(
+def _compute_fingerprint(
     store: VectorStore,
+    project_ids: frozenset[str] | None = None,
     extra_fingerprint_material: Iterable[str] | None = None,
-) -> str:
-    """Stable hash of the corpus contents; changes iff the corpus changes.
-
-    Ordered by chunk id and folded over both id and text, so it is the *content*
-    that is fingerprinted — re-ingesting the same material unchanged produces the
-    same value, and a caller's cache survives a crawl that found nothing new.
-
-    Optional ``extra_fingerprint_material`` allows caller jobs (e.g. starter-work
-    mining) to include non-chunk metadata (such as issue states or pool ids) that
-    influence eligibility. When omitted or empty, the base corpus hash is identical.
-    """
+) -> tuple[str, int]:
     digest = hashlib.sha256()
-    chunk_fields = (
-        (chunk.id, chunk.text) for chunk in store.iter_chunks_without_embeddings()
-    )
+    scoped_count = 0
+    chunk_fields: list[tuple[str, str]] = []
+    for chunk in store.iter_chunks_without_embeddings():
+        if project_ids is not None:
+            if not any(pid in project_ids for pid in chunk.project_ids):
+                continue
+        scoped_count += 1
+        chunk_fields.append((chunk.id, chunk.text))
+
     for chunk_id, text in sorted(chunk_fields):
         digest.update(chunk_id.encode("utf-8"))
         digest.update(b"\0")
@@ -49,7 +46,34 @@ def corpus_fingerprint(
         for item in sorted(extra_fingerprint_material):
             digest.update(item.encode("utf-8"))
             digest.update(b"\0")
-    return digest.hexdigest()
+    return digest.hexdigest(), scoped_count
+
+
+def corpus_fingerprint(
+    store: VectorStore,
+    extra_fingerprint_material: Iterable[str] | None = None,
+    *,
+    project_ids: frozenset[str] | None = None,
+) -> str:
+    """Stable hash of the corpus contents; changes iff the corpus changes.
+
+    Ordered by chunk id and folded over both id and text, so it is the *content*
+    that is fingerprinted — re-ingesting the same material unchanged produces the
+    same value, and a caller's cache survives a crawl that found nothing new.
+
+    Optional ``project_ids`` scopes the fingerprint to only chunks belonging to
+    those projects.
+
+    Optional ``extra_fingerprint_material`` allows caller jobs (e.g. starter-work
+    mining) to include non-chunk metadata (such as issue states or pool ids) that
+    influence eligibility. When omitted or empty, the base corpus hash is identical.
+    """
+    digest, _ = _compute_fingerprint(
+        store,
+        project_ids=project_ids,
+        extra_fingerprint_material=extra_fingerprint_material,
+    )
+    return digest
 
 
 def fingerprint_gate[T: BaseModel](
@@ -63,6 +87,7 @@ def fingerprint_gate[T: BaseModel](
     empty_warning_label: str,
     empty_done_label: str,
     extra_fingerprint_material: Iterable[str] | None = None,
+    project_ids: frozenset[str] | None = None,
 ) -> tuple[str | None, list[ProgressEvent], T | None]:
     """Shared short-circuit gate for generator jobs.
 
@@ -72,8 +97,10 @@ def fingerprint_gate[T: BaseModel](
     is the outcome to return. Otherwise, ``fingerprint`` is the computed hash,
     ``early_events`` is empty, and ``early_outcome`` is None.
     """
-    fingerprint = corpus_fingerprint(
-        store, extra_fingerprint_material=extra_fingerprint_material
+    fingerprint, scoped_count = _compute_fingerprint(
+        store,
+        project_ids=project_ids,
+        extra_fingerprint_material=extra_fingerprint_material,
     )
     if last_fingerprint is not None and last_fingerprint == fingerprint:
         outcome = make_unchanged()
@@ -88,7 +115,8 @@ def fingerprint_gate[T: BaseModel](
             outcome,
         )
 
-    if store.count() == 0:
+    is_empty = scoped_count == 0 if project_ids is not None else store.count() == 0
+    if is_empty:
         outcome = make_empty()
         return (
             None,

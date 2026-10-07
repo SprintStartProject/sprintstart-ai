@@ -137,7 +137,7 @@ def suggest_skills(
     llm: LLMClient,
     store: VectorStore,
     *,
-    project_id: str,
+    project_id: str | None = None,
     role_name: str,
     role_description: str = "",
     project_industry: str | None = None,
@@ -164,7 +164,7 @@ def suggest_skills(
     cache = bm25_cache if bm25_cache is not None else get_bm25_cache()
 
     chunks: list[ScoredChunk] = []
-    if store.count() > 0:
+    if project_id is not None and store.count() > 0:
         chunks = hybrid_retrieve(
             question=query,
             llm=llm,
