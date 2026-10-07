@@ -231,20 +231,6 @@ def test_a_deployment_serving_one_project_scopes_to_nothing(
     assert [getattr(f, "project_ids", None) for f in seen] == [None]
 
 
-class _RecordingForcedAnswer(ScriptedLLMClient):
-    """Records what the forced, tool-less final answer was asked with."""
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
-        self.generate_calls: list[list[Message]] = []
-
-    def generate(
-        self, messages: list[Message], *, temperature: float | None = None
-    ) -> str:
-        self.generate_calls.append(messages)
-        return self.answer
-
-
 def test_a_spent_search_budget_tells_the_model_it_has_no_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -252,15 +238,15 @@ def test_a_spent_search_budget_tells_the_model_it_has_no_tools(
     # with the persona still saying "offer X", and told the hire to confirm a button
     # no tool call had produced.
     monkeypatch.setattr("agents.tools.retrieve.retrieve", lambda *a, **k: [])
-    llm = _RecordingForcedAnswer(
+    llm = ScriptedLLMClient(
         turns=[[(SEARCH_DOCS, {"query": "again"})]] * 20, answer="Here is what I know."
     )
 
     result = run_agent_turn([_user("hi")], [_GET_MY_METRICS], llm, StubVectorStore())
 
     assert result.final is True
-    assert len(llm.generate_calls) == 1
-    notice = llm.generate_calls[0][-1]
+    assert len(llm.stream_calls) == 1
+    notice = llm.stream_calls[0][-1]
     assert notice["role"] == "system"
     assert "no confirm button can appear" in (notice.get("content") or "")
     # The notice is for the model only; it is not kept in the conversation.

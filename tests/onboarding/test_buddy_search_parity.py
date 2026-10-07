@@ -5,11 +5,11 @@ brought into the buddy's turn. Each test pins one thing chat had that a reader
 moving to the buddy must not lose.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import pytest
 
-from llm.base import ChatResult, Message, ToolSpec
+from llm.base import ChatResult, LLMChatStreamEvent, Message, ToolSpec
 from onboarding.buddy_agent import (
     GREP,
     SEARCH_DOCS,
@@ -43,11 +43,11 @@ class _RecordingLLM(ScriptedLLMClient):
         super().__init__(turns, answer=answer, reasoning=reasoning)
         self.offered: list[list[str]] = []
 
-    def chat(
+    def chat_stream(
         self, messages: list[Message], tools: list[ToolSpec] | None = None
-    ) -> ChatResult:
+    ) -> Iterator[LLMChatStreamEvent]:
         self.offered.append([tool["name"] for tool in tools or []])
-        return super().chat(messages, tools)
+        return super().chat_stream(messages, tools)
 
 
 def _user(text: str) -> Message:
@@ -347,13 +347,14 @@ def test_several_searches_in_one_step_all_run_and_answer_in_call_order() -> None
 class _ReasonsEveryStep(ScriptedLLMClient):
     """Returns reasoning on the final step too, which the base stub does not."""
 
-    def chat(
+    def chat_stream(
         self, messages: list[Message], tools: list[ToolSpec] | None = None
-    ) -> ChatResult:
-        result = super().chat(messages, tools)
-        if result.tool_calls:
-            return result
-        return ChatResult(text=result.text, reasoning="Now I can answer.")
+    ) -> Iterator[LLMChatStreamEvent]:
+        for event in super().chat_stream(messages, tools):
+            if isinstance(event, ChatResult) and not event.tool_calls:
+                yield ChatResult(text=event.text, reasoning="Now I can answer.")
+            else:
+                yield event
 
 
 def test_reasoning_is_returned_per_step_and_kept_out_of_the_transcript() -> None:
