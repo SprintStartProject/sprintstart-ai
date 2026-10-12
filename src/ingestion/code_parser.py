@@ -53,6 +53,7 @@ def parse_code(filename: str, content: bytes) -> list[ParsedChunk]:
         )
         return fallback_regex_parser(filename, content)
 
+    # Tree-sitter ran cleanly but found no top-level symbols
     if not symbols:
         return parse_text(filename, content)
 
@@ -60,9 +61,10 @@ def parse_code(filename: str, content: bytes) -> list[ParsedChunk]:
 
     for symbol in symbols:
         full_content = f"{preamble}\n\n{symbol.content}" if preamble else symbol.content
-        # The symbol's own start line in the source file, not the line the
-        # (possibly preamble-prefixed) chunk content starts on: a citation
-        # should point at the definition itself, not at the repeated preamble.
+        # Turn the symbol's byte offset into a 1-based line: count the
+        # newlines that come before it in the original bytes (+1 for 1-based).
+        # This is the source line citations should point at — the definition
+        # itself, not the preamble we prepend above nor a split's own offset.
         symbol_start_line = content.count(b"\n", 0, symbol.start_byte) + 1
 
         code_chunks = chunk_code(filename, full_content, start_line=symbol_start_line)

@@ -376,13 +376,13 @@ def chunk_text(
 def chunk_code(
     filename: str,
     code: str,
-    chunk_size: int = 512,
+    chunk_size: int = chunk_size,
     start_line: int | None = None,
 ) -> list[ParsedChunk]:
     """Split large code blocks into smaller code chunks.
 
     The function preserves line boundaries and creates sequential
-    code chunks that do not exceed the configured chunk size (default=512 characters).
+    code chunks that do not exceed the configured chunk size.
 
     Args:
         filename (str):
@@ -393,7 +393,7 @@ def chunk_code(
 
         chunk_size (int, optional):
             Maximum size of each chunk in characters.
-            Defaults to 512.
+            Defaults to the value configured via CHUNK_SIZE (fallback 512).
 
         start_line (int, optional):
             1-based line the given ``code`` starts on in the source file, if

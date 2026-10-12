@@ -38,8 +38,10 @@ def _utc_now() -> str:
 
 
 def _content_type_for_filename(filename: str) -> str:
-    content_type, _ = mimetypes.guess_type(filename) # .md -> text/markdown, .png -> image/png
-    return content_type or "application/octet-stream" # content as raw bytes if detection failed
+    # e.g. .md -> text/markdown, .png -> image/png
+    content_type, _ = mimetypes.guess_type(filename)
+    # Treat content as raw bytes if detection failed
+    return content_type or "application/octet-stream"
 
 
 def _artifact_to_response(artifact: ArtifactRecord) -> IngestArtifactResponse:
