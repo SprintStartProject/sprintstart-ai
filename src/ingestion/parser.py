@@ -56,12 +56,12 @@ def parse(
         semantic_boundaries (bool, optional):
             Let the LLM choose chunk boundaries based on semantic
             coherence. Only relevant when ``llm`` is provided. Defaults to
-            ``True``.
+            ``False``.
 
         contextualize (bool, optional):
             Let the LLM prepend a short situating context block to chunks
             that would benefit from one. Only relevant when ``llm`` is
-            provided. Defaults to ``True``.
+            provided. Defaults to ``False``.
 
     Returns:
         list[ParsedChunk]: A list of ParsedChunk objects extracted from the file.

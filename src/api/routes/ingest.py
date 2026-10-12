@@ -38,8 +38,8 @@ def _utc_now() -> str:
 
 
 def _content_type_for_filename(filename: str) -> str:
-    content_type, _ = mimetypes.guess_type(filename)
-    return content_type or "application/octet-stream"
+    content_type, _ = mimetypes.guess_type(filename) # .md -> text/markdown, .png -> image/png
+    return content_type or "application/octet-stream" # content as raw bytes if detection failed
 
 
 def _artifact_to_response(artifact: ArtifactRecord) -> IngestArtifactResponse:
@@ -154,12 +154,12 @@ def ingest(
         metadata_store.mark_failed(body.artifact_id, detail, _utc_now())
         raise HTTPException(status_code=413, detail=detail)
 
-    use_context_aware_chunking = body.semantic_boundaries or body.contextualize
+    llm_needed_for_chunking = body.semantic_boundaries or body.contextualize
 
     parsed_chunks = parse(
         body.filename,
         content_bytes,
-        llm=llm if use_context_aware_chunking else None,
+        llm=llm if llm_needed_for_chunking else None,
         semantic_boundaries=body.semantic_boundaries,
         contextualize=body.contextualize,
     )
