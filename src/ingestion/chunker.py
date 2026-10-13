@@ -136,9 +136,27 @@ def split_into_paragraphs(text: str) -> list[str]:
 
     Returns:
         list[str]:
-            Paragraphs in document order.
+            Only Paragraphs in document order.
     """
     return [paragraph for paragraph, _ in _paragraphs_with_start_lines(text)]
+
+
+def _flush_paragraph_bucket(
+    chunks: list[str],
+    bucket: list[str],
+) -> None:
+    if bucket:
+        chunks.append("\n\n".join(bucket))
+        bucket.clear()
+
+
+def _flush_paragraph_bucket_with_lines(
+    chunks: list[tuple[str, int]],
+    bucket: list[tuple[str, int]],
+) -> None:
+    if bucket:
+        chunks.append(("\n\n".join(p for p, _ in bucket), bucket[0][1]))
+        bucket.clear()
 
 
 def group_paragraphs_into_chunks(
@@ -146,13 +164,13 @@ def group_paragraphs_into_chunks(
     chunk_size: int = chunk_size,
     chunk_overlap: int = chunk_overlap,
 ) -> list[str]:
-    """Accumulate paragraphs into character-limited, overlap-aware chunks.
+    """Accumulate paragraphs into character-limited chunks.
 
-    Paragraphs are accumulated until adding another paragraph would exceed
-    ``chunk_size``. When a chunk boundary is reached, the last paragraph is
-    carried into the next chunk as overlap context. Paragraphs that exceed
-    ``chunk_size`` on their own are hard-split into overlapping character
-    chunks.
+    Paragraphs are accumulated into chunks without exceeding ``chunk_size``.
+    When adding another paragraph would exceed ``chunk_size``, the current
+    chunk is finalized and the next paragraph starts a fresh chunk. Paragraphs
+    that exceed ``chunk_size`` on their own are hard-split into overlapping
+    character chunks using ``chunk_overlap``.
 
     This grouping logic is shared by :func:`chunk_text` and the LLM-based
     context-aware chunker (when it is asked to only contextualize
@@ -174,54 +192,43 @@ def group_paragraphs_into_chunks(
 
     Returns:
         list[str]:
-            Raw chunk contents (paragraphs joined by ``\\n\\n``).
+            Chunk contents (paragraphs joined by ``\\n\\n``).
     """
-    raw_chunks_content: list[str] = []
-    current_chunk_content: list[str] = []
+    chunks: list[str] = []
+    paragraph_bucket: list[str] = []
 
     for paragraph in paragraphs:
         paragraph_length: int = len(paragraph)
 
         # hard split by character when paragraph itself exceeds chunk_size
         if paragraph_length > chunk_size:
-            if current_chunk_content:
-                raw_chunks_content.append("\n\n".join(current_chunk_content))
-                overlap_paragraph: str = (
-                    current_chunk_content[-1]
-                    if len(current_chunk_content[-1]) < chunk_overlap
-                    else ""
-                )
-                current_chunk_content = [overlap_paragraph] if overlap_paragraph else []
+            _flush_paragraph_bucket(chunks, paragraph_bucket)
 
-            paragraph_with_overlap: str = "\n\n".join(
-                current_chunk_content + [paragraph]
-            )
-            start: int = 0
-            while start < len(paragraph_with_overlap):
-                raw_chunks_content.append(
-                    paragraph_with_overlap[start : start + chunk_size]
-                )
-                start += chunk_size - chunk_overlap
+            offset: int = 0
+            while offset < len(paragraph):
+                chunks.append(paragraph[offset : offset + chunk_size])
+                offset += chunk_size - chunk_overlap
 
             continue
 
         # Would adding the paragraph exceed chunk_size?
-        candidate_length: int = len("\n\n".join(current_chunk_content + [paragraph]))
+        candidate_length: int = (
+            len("\n\n".join(paragraph_bucket + [paragraph]))
+            if paragraph_bucket
+            else paragraph_length
+        )
 
-        # handle when current_chunk_content + paragraph exceeds chunk size
-        if current_chunk_content and (candidate_length > chunk_size):
-            raw_chunks_content.append("\n\n".join(current_chunk_content))
-            overlap_paragraph: str = current_chunk_content[-1]
-            current_chunk_content = [overlap_paragraph]
+        # handle when paragraph_bucket + paragraph exceeds chunk size
+        if paragraph_bucket and (candidate_length > chunk_size):
+            _flush_paragraph_bucket(chunks, paragraph_bucket)
 
-        # append whole paragraph to current_chunk_content
-        current_chunk_content.append(paragraph)
+        # append paragraph to bucket
+        paragraph_bucket.append(paragraph)
 
-    # if there is some content left, append it to the raw_chunks
-    if current_chunk_content:
-        raw_chunks_content.append("\n\n".join(current_chunk_content))
+    # if there is some content left, flush it
+    _flush_paragraph_bucket(chunks, paragraph_bucket)
 
-    return raw_chunks_content
+    return chunks
 
 
 def _group_paragraphs_into_chunks_with_lines(
@@ -254,67 +261,48 @@ def _group_paragraphs_into_chunks_with_lines(
         list[tuple[str, int]]:
             One ``(chunk_content, start_line)`` pair per resulting chunk.
     """
-    raw_chunks: list[tuple[str, int]] = []
-    current_chunk_content: list[tuple[str, int]] = []
+    chunks: list[tuple[str, int]] = []
+    paragraph_bucket: list[tuple[str, int]] = []
 
     for paragraph, line in paragraphs:
         paragraph_length: int = len(paragraph)
 
         # hard split by character when paragraph itself exceeds chunk_size
         if paragraph_length > chunk_size:
-            if current_chunk_content:
-                chunk_content = "\n\n".join(p for p, _ in current_chunk_content)
-                chunk_start_line = current_chunk_content[0][1]
-                raw_chunks.append((chunk_content, chunk_start_line))
-                overlap_text, overlap_line = current_chunk_content[-1]
-                current_chunk_content = (
-                    [(overlap_text, overlap_line)]
-                    if len(overlap_text) < chunk_overlap
-                    else []
-                )
+            _flush_paragraph_bucket_with_lines(chunks, paragraph_bucket)
 
-            combo: list[tuple[str, int]] = current_chunk_content + [(paragraph, line)]
-            paragraph_with_overlap: str = "\n\n".join(p for p, _ in combo)
-            combo_start_line: int = combo[0][1]
-
-            start: int = 0
-            while start < len(paragraph_with_overlap):
-                newlines_before = paragraph_with_overlap.count("\n", 0, start)
-                piece_start_line = combo_start_line + newlines_before
-                raw_chunks.append(
+            offset: int = 0
+            while offset < len(paragraph):
+                lines_before_piece = paragraph.count("\n", 0, offset)
+                piece_start_line = line + lines_before_piece
+                chunks.append(
                     (
-                        paragraph_with_overlap[start : start + chunk_size],
+                        paragraph[offset : offset + chunk_size],
                         piece_start_line,
                     )
                 )
-                start += chunk_size - chunk_overlap
+                offset += chunk_size - chunk_overlap
 
-            current_chunk_content = []
             continue
 
         # Would adding the paragraph exceed chunk_size?
-        candidate_length: int = len(
-            "\n\n".join([p for p, _ in current_chunk_content] + [paragraph])
+        candidate_length: int = (
+            len("\n\n".join([p for p, _ in paragraph_bucket] + [paragraph]))
+            if paragraph_bucket
+            else paragraph_length
         )
 
-        # handle when current_chunk_content + paragraph exceeds chunk size
-        if current_chunk_content and (candidate_length > chunk_size):
-            chunk_content = "\n\n".join(p for p, _ in current_chunk_content)
-            chunk_start_line = current_chunk_content[0][1]
-            raw_chunks.append((chunk_content, chunk_start_line))
-            overlap_text, overlap_line = current_chunk_content[-1]
-            current_chunk_content = [(overlap_text, overlap_line)]
+        # handle when paragraph_bucket + paragraph exceeds chunk size
+        if paragraph_bucket and (candidate_length > chunk_size):
+            _flush_paragraph_bucket_with_lines(chunks, paragraph_bucket)
 
-        # append whole paragraph to current_chunk_content
-        current_chunk_content.append((paragraph, line))
+        # append paragraph to bucket
+        paragraph_bucket.append((paragraph, line))
 
-    # if there is some content left, append it to the raw_chunks
-    if current_chunk_content:
-        chunk_content = "\n\n".join(p for p, _ in current_chunk_content)
-        chunk_start_line = current_chunk_content[0][1]
-        raw_chunks.append((chunk_content, chunk_start_line))
+    # if there is some content left, flush it
+    _flush_paragraph_bucket_with_lines(chunks, paragraph_bucket)
 
-    return raw_chunks
+    return chunks
 
 
 def chunk_text(
@@ -329,10 +317,10 @@ def chunk_text(
     double newlines (``\\n\\n``). Paragraphs are accumulated until
     adding another paragraph would exceed the configured chunk size.
 
-    When a chunk boundary is reached, the last paragraph is carried
-    into the next chunk as overlap context. Paragraphs that exceed
-    ``chunk_size`` on their own are split into overlapping character
-    chunks by the given chunk_overlap.
+    When a chunk boundary is reached, the current chunk is finalized and the
+    next paragraph starts a fresh chunk. Paragraphs that exceed ``chunk_size``
+    on their own are split into overlapping character chunks by the given
+    chunk_overlap.
 
     Args:
         filename (str):
@@ -354,11 +342,11 @@ def chunk_text(
             Paragraph-aware text chunks with metadata.
     """
     paragraphs_with_lines = _paragraphs_with_start_lines(text)
-    raw_chunks = _group_paragraphs_into_chunks_with_lines(
+    chunks = _group_paragraphs_into_chunks_with_lines(
         paragraphs_with_lines, chunk_size, chunk_overlap
     )
 
-    total_chunks_amount = len(raw_chunks)
+    total_chunks_amount = len(chunks)
 
     return [
         to_parsed_chunk(
@@ -369,7 +357,7 @@ def chunk_text(
             total_chunks_amount,
             start_line=start_line,
         )
-        for chunk_index, (chunk_content, start_line) in enumerate(raw_chunks)
+        for chunk_index, (chunk_content, start_line) in enumerate(chunks)
     ]
 
 
