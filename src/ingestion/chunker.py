@@ -141,20 +141,12 @@ def split_into_paragraphs(text: str) -> list[str]:
     return [paragraph for paragraph, _ in _paragraphs_with_start_lines(text)]
 
 
-def _flush_paragraph_bucket(
-    chunks: list[str],
-    bucket: list[str],
-) -> None:
-    if bucket:
-        chunks.append("\n\n".join(bucket))
-        bucket.clear()
-
-
 def _flush_paragraph_bucket_with_lines(
     chunks: list[tuple[str, int]],
     bucket: list[tuple[str, int]],
 ) -> None:
     if bucket:
+        # bucket[0][1] returns the starting line of this chunk
         chunks.append(("\n\n".join(p for p, _ in bucket), bucket[0][1]))
         bucket.clear()
 
@@ -172,10 +164,10 @@ def group_paragraphs_into_chunks(
     that exceed ``chunk_size`` on their own are hard-split into overlapping
     character chunks using ``chunk_overlap``.
 
-    This grouping logic is shared by :func:`chunk_text` and the LLM-based
-    context-aware chunker (when it is asked to only contextualize
-    already-fixed chunk boundaries rather than choose semantic boundaries
-    itself).
+    This function is a plain-string projection of
+    :func:`_group_paragraphs_into_chunks_with_lines` (which is the single
+    source of truth for grouping/hard-split decisions). Synthetic placeholder
+    line indices are passed in and discarded from the resulting tuples.
 
     Args:
         paragraphs (list[str]):
@@ -194,41 +186,14 @@ def group_paragraphs_into_chunks(
         list[str]:
             Chunk contents (paragraphs joined by ``\\n\\n``).
     """
-    chunks: list[str] = []
-    paragraph_bucket: list[str] = []
-
-    for paragraph in paragraphs:
-        paragraph_length: int = len(paragraph)
-
-        # hard split by character when paragraph itself exceeds chunk_size
-        if paragraph_length > chunk_size:
-            _flush_paragraph_bucket(chunks, paragraph_bucket)
-
-            offset: int = 0
-            while offset < len(paragraph):
-                chunks.append(paragraph[offset : offset + chunk_size])
-                offset += chunk_size - chunk_overlap
-
-            continue
-
-        # Would adding the paragraph exceed chunk_size?
-        candidate_length: int = (
-            len("\n\n".join(paragraph_bucket + [paragraph]))
-            if paragraph_bucket
-            else paragraph_length
+    return [
+        content
+        for content, _ in _group_paragraphs_into_chunks_with_lines(
+            [(paragraph, index) for index, paragraph in enumerate(paragraphs)],
+            chunk_size,
+            chunk_overlap,
         )
-
-        # handle when paragraph_bucket + paragraph exceeds chunk size
-        if paragraph_bucket and (candidate_length > chunk_size):
-            _flush_paragraph_bucket(chunks, paragraph_bucket)
-
-        # append paragraph to bucket
-        paragraph_bucket.append(paragraph)
-
-    # if there is some content left, flush it
-    _flush_paragraph_bucket(chunks, paragraph_bucket)
-
-    return chunks
+    ]
 
 
 def _group_paragraphs_into_chunks_with_lines(
@@ -236,15 +201,12 @@ def _group_paragraphs_into_chunks_with_lines(
     chunk_size: int,
     chunk_overlap: int,
 ) -> list[tuple[str, int]]:
-    """Line-tracking counterpart of :func:`group_paragraphs_into_chunks`.
+    """Accumulate paragraphs with line tracking into character-limited chunks.
 
-    Mirrors that function's grouping/hard-split decisions exactly (same
-    ``chunk_size``/``chunk_overlap`` semantics), but operates on
-    ``(paragraph, start_line)`` pairs so each resulting chunk can report the
-    1-based line it starts on. Kept separate from
-    :func:`group_paragraphs_into_chunks` (which the LLM-based context-aware
-    chunker also calls with plain strings) to avoid changing that function's
-    public contract.
+    Single source of truth for paragraph grouping and hard-split decisions.
+    Operates on ``(paragraph, start_line)`` pairs so each resulting chunk
+    reports the 1-based line it starts on. :func:`group_paragraphs_into_chunks`
+    is defined as a plain-string projection of this function.
 
     Args:
         paragraphs (list[tuple[str, int]]):
