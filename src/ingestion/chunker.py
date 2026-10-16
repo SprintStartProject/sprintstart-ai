@@ -99,12 +99,17 @@ def to_parsed_chunk(
 def _paragraphs_with_start_lines(text: str) -> list[tuple[str, int]]:
     """Split text into non-empty paragraphs, keeping each one's start line.
 
+    Normalizes Windows (``\\r\\n``) and legacy Mac (``\\r``) line endings to
+    standard Unix newlines (``\\n``) so paragraph splitting on blank lines
+    (``\\n\\n``) works consistently regardless of source file origin.
+
     Mirrors ``text.split("\\n\\n")`` semantics (paragraphs separated by a
     blank line, stripped, empty ones dropped) while additionally tracking
     the 1-based line each surviving paragraph starts on in ``text``. This is
     the single source of truth for paragraph splitting: :func:`
     split_into_paragraphs` is defined in terms of it so both stay in sync.
     """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     paragraphs: list[tuple[str, int]] = []
     offset = 0
     for part in text.split("\n\n"):
@@ -142,12 +147,12 @@ def split_into_paragraphs(text: str) -> list[str]:
 
 
 def _flush_paragraph_bucket_with_lines(
-    chunks: list[tuple[str, int]],
+    chunks: list[tuple[str, int, bool, tuple[int, int] | None]],
     bucket: list[tuple[str, int]],
 ) -> None:
     if bucket:
         # bucket[0][1] returns the starting line of this chunk
-        chunks.append(("\n\n".join(p for p, _ in bucket), bucket[0][1]))
+        chunks.append(("\n\n".join(p for p, _ in bucket), bucket[0][1], False, None))
         bucket.clear()
 
 
@@ -188,7 +193,7 @@ def group_paragraphs_into_chunks(
     """
     return [
         content
-        for content, _ in _group_paragraphs_into_chunks_with_lines(
+        for content, *_ in _group_paragraphs_into_chunks_with_lines(
             [(paragraph, index) for index, paragraph in enumerate(paragraphs)],
             chunk_size,
             chunk_overlap,
@@ -200,7 +205,7 @@ def _group_paragraphs_into_chunks_with_lines(
     paragraphs: list[tuple[str, int]],
     chunk_size: int,
     chunk_overlap: int,
-) -> list[tuple[str, int]]:
+) -> list[tuple[str, int, bool, tuple[int, int] | None]]:
     """Accumulate paragraphs with line tracking into character-limited chunks.
 
     Single source of truth for paragraph grouping and hard-split decisions.
@@ -220,10 +225,11 @@ def _group_paragraphs_into_chunks_with_lines(
             Overlap used when hard-splitting oversized paragraphs.
 
     Returns:
-        list[tuple[str, int]]:
-            One ``(chunk_content, start_line)`` pair per resulting chunk.
+        list[tuple[str, int, bool, tuple[int, int] | None]]:
+            One ``(chunk_content, start_line, has_overlap, overlap_range)``
+            tuple per resulting chunk.
     """
-    chunks: list[tuple[str, int]] = []
+    chunks: list[tuple[str, int, bool, tuple[int, int] | None]] = []
     paragraph_bucket: list[tuple[str, int]] = []
 
     for paragraph, line in paragraphs:
@@ -234,16 +240,26 @@ def _group_paragraphs_into_chunks_with_lines(
             _flush_paragraph_bucket_with_lines(chunks, paragraph_bucket)
 
             offset: int = 0
-            while offset < len(paragraph):
+            first: bool = True
+            while offset < len(paragraph) or first:
                 lines_before_piece = paragraph.count("\n", 0, offset)
                 piece_start_line = line + lines_before_piece
+                piece_slice = paragraph[offset : offset + chunk_size]
+                actual_overlap = min(chunk_overlap, len(piece_slice))
+                has_overlap = not first and actual_overlap > 0
+                overlap_range = (0, actual_overlap) if has_overlap else None
                 chunks.append(
                     (
-                        paragraph[offset : offset + chunk_size],
+                        piece_slice,
                         piece_start_line,
+                        has_overlap,
+                        overlap_range,
                     )
                 )
+                if offset + chunk_size >= len(paragraph):
+                    break
                 offset += chunk_size - chunk_overlap
+                first = False
 
             continue
 
@@ -318,8 +334,15 @@ def chunk_text(
             chunk_index,
             total_chunks_amount,
             start_line=start_line,
+            has_overlap=has_overlap,
+            overlap_range=overlap_range,
         )
-        for chunk_index, (chunk_content, start_line) in enumerate(chunks)
+        for chunk_index, (
+            chunk_content,
+            start_line,
+            has_overlap,
+            overlap_range,
+        ) in enumerate(chunks)
     ]
 
 

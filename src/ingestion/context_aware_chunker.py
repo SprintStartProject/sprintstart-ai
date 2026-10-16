@@ -169,11 +169,15 @@ def _build_prompt(
 
     instructions: list[str] = []
     if semantic_boundaries:
+        num_segments = len(segments)
         instructions.append(
             "1. 'boundaries': a sorted list of paragraph indices where a new "
             "chunk should start, based on topic shifts, section boundaries, "
             "or other semantic breaks. It must start with 0 and contain no "
-            "duplicates or indices outside the given paragraph range."
+            "duplicates or indices outside the given paragraph range. "
+            f"There are exactly {num_segments} numbered paragraphs; every "
+            f"boundary index must be between 0 and {num_segments - 1} (inclusive). "
+            "Do not invent indices above this range."
         )
     else:
         instructions.append(
@@ -401,6 +405,10 @@ def chunk_text_context_aware(
 
     paragraphs = split_into_paragraphs(text)
     if not paragraphs:
+        logger.warning(
+            "Text for %s has no non-empty paragraphs — falling back to chunk_text",
+            filename,
+        )
         return chunk_text(filename, text, chunk_size, chunk_overlap)
 
     segments = (

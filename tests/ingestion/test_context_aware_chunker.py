@@ -15,7 +15,9 @@ from tests.stubs.llm import StubLLMClient
 class _RaisingLLMClient(StubLLMClient):
     """Raises LLMUnavailableError instead of returning a response."""
 
-    def generate(self, messages: list[Message]) -> str:
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
         raise LLMUnavailableError(host="http://stub")
 
 
@@ -256,3 +258,17 @@ def test_chunks_without_needs_context_are_left_untouched(
     )
 
     assert all(chunk.metadata["has_context_block"] == "false" for chunk in chunks)
+
+
+def test_build_prompt_includes_segment_count_and_range():
+    from ingestion.context_aware_chunker import (
+        _build_prompt,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    segments = ["Para 0", "Para 1", "Para 2"]
+    messages = _build_prompt(segments, semantic_boundaries=True, contextualize=True)
+
+    system_msg = next(m["content"] for m in messages if m["role"] == "system")
+    assert "There are exactly 3 numbered paragraphs" in system_msg
+    assert "between 0 and 2 (inclusive)" in system_msg
+    assert "Do not invent indices above this range." in system_msg

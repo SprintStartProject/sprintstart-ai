@@ -205,3 +205,16 @@ def test_chunk_code_without_start_line_omits_metadata_key():
     chunks = chunk_code("test.py", "def foo():\n    pass\n")
 
     assert "start_line" not in chunks[0].metadata
+
+
+def test_chunk_text_normalizes_crlf_line_endings():
+    text = "First paragraph.\r\n\r\nSecond paragraph.\r\n\r\nThird paragraph."
+
+    chunks = chunk_text("file.txt", text, chunk_size=35)
+
+    assert len(chunks) == 2
+    assert "First paragraph." in chunks[0].content
+    assert "Second paragraph." in chunks[0].content
+    assert "Third paragraph." in chunks[1].content
+    assert chunks[0].metadata["start_line"] == "1"
+    assert chunks[1].metadata["start_line"] == "5"
