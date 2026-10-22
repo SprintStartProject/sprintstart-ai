@@ -103,6 +103,27 @@ TOP_LEVEL_NODES_FOR_SUPPORTED_LANGUAGES = {
 PATTERNS: dict[str, re.Pattern[str]] = {
     ".py": re.compile(r"^(async\s+def |def |class )"),
     ".js": re.compile(r"^(export\s+)?(async\s+)?(function|class|const|let|var)\b"),
-    ".ts": re.compile(r"^(export\s+)?(async\s+)?(function|class|const|let|var)\b"),
+    ".ts": re.compile(
+        r"^(export\s+)?(async\s+)?(function|class|const|let|var|interface|type|enum)\b"
+    ),
+    ".tsx": re.compile(
+        r"^(export\s+)?(async\s+)?(function|class|const|let|var|interface|type|enum)\b"
+    ),
     ".go": re.compile(r"func\s+\w+|type\s+\w+|const\s+\w+|var\s+\w+"),
+    ".java": re.compile(
+        r"^((public|private|protected|static|final|abstract)\s+)*(class|interface|enum|@interface)\b"
+    ),
+    ".kt": re.compile(
+        r"^((public|private|internal|protected|open|abstract|final|sealed|data)\s+)*(class|interface|object|fun)\b"
+    ),
+    ".rs": re.compile(
+        r"^(pub(\([^)]*\))?\s+)?(async\s+)?(unsafe\s+)?(fn|struct|enum|trait|impl)\b"
+    ),
+    ".cs": re.compile(
+        r"^((public|private|internal|protected)\s+)?(partial\s+|static\s+|abstract\s+|sealed\s+)*(class|struct|interface|enum|record)\b"
+    ),
+    ".php": re.compile(
+        r"^(abstract\s+|final\s+)?(class|interface|trait)\b|^function\b"
+    ),
+    ".rb": re.compile(r"^(def|class|module)\b"),
 }

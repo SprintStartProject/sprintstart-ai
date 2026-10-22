@@ -1,7 +1,6 @@
 from dataclasses import dataclass
-from typing import Literal
 
-ChunkKind = Literal["text", "code", "pdf", "image"]
+from rag.types import ChunkKind
 
 
 @dataclass(slots=True)

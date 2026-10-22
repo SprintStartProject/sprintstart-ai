@@ -97,8 +97,8 @@ def test_text_chunks_split_on_paragraph_boundaries():
     assert "Paragraph A" in chunks[0].content
     assert "Paragraph B" in chunks[0].content
 
-    assert "Paragraph B" in chunks[1].content
     assert "Paragraph C" in chunks[1].content
+    assert "Paragraph B" not in chunks[1].content
 
 
 def test_chunking_does_not_cut_typical_prose_mid_sentence():
@@ -121,7 +121,7 @@ def test_chunking_does_not_cut_typical_prose_mid_sentence():
         assert not chunk.content.startswith("plete sentences")
 
 
-def test_last_paragraph_is_used_as_overlap():
+def test_paragraphs_not_duplicated_across_chunks():
     text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
 
     chunks = chunk_text(
@@ -132,8 +132,25 @@ def test_last_paragraph_is_used_as_overlap():
 
     assert len(chunks) == 2
 
+    assert "First paragraph." in chunks[0].content
     assert "Second paragraph." in chunks[0].content
-    assert chunks[1].content.startswith("Second paragraph.")
+    assert "Third paragraph." in chunks[1].content
+    assert "Second paragraph." not in chunks[1].content
+
+
+def test_no_chunk_exceeds_chunk_size_with_mixed_paragraphs():
+    text = (
+        "Short intro.\n\n"
+        "A somewhat longer paragraph that holds substantial text.\n\n"
+        "Another paragraph that is medium length.\n\n"
+        "Final paragraph to wrap up."
+    )
+
+    chunks = chunk_text("file.txt", text, chunk_size=60)
+
+    assert len(chunks) >= 2
+    for chunk in chunks:
+        assert len(chunk.content) <= 60
 
 
 def test_chunk_text_tracks_start_line_per_paragraph():
@@ -188,3 +205,16 @@ def test_chunk_code_without_start_line_omits_metadata_key():
     chunks = chunk_code("test.py", "def foo():\n    pass\n")
 
     assert "start_line" not in chunks[0].metadata
+
+
+def test_chunk_text_normalizes_crlf_line_endings():
+    text = "First paragraph.\r\n\r\nSecond paragraph.\r\n\r\nThird paragraph."
+
+    chunks = chunk_text("file.txt", text, chunk_size=35)
+
+    assert len(chunks) == 2
+    assert "First paragraph." in chunks[0].content
+    assert "Second paragraph." in chunks[0].content
+    assert "Third paragraph." in chunks[1].content
+    assert chunks[0].metadata["start_line"] == "1"
+    assert chunks[1].metadata["start_line"] == "5"
