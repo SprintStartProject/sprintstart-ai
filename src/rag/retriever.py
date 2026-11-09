@@ -1,7 +1,7 @@
+from corpus.source_filter import SourceExclusions
+from corpus.types import RetrievalFilters, ScoredChunk
 from llm.base import LLMClient
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
-from rag.source_filter import SourceExclusions
-from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 # Process-wide BM25 index, shared across every caller (chat, agent tools, and

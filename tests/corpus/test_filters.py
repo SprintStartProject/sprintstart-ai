@@ -1,0 +1,243 @@
+from corpus.filters import (
+    decode_project_ids,
+    encode_project_ids,
+    has_narrowing_filters,
+    matches_retrieval_filters,
+    normalize_source_system,
+)
+from corpus.types import Chunk, RetrievalFilters, is_source_system
+from ingestion.mapper import to_chunk
+from ingestion.models import ParsedChunk
+
+
+def test_source_system_filter_matches_allowed_system() -> None:
+    chunk = Chunk(
+        id="chunk-1",
+        artifact_id="artifact-1",
+        filename="app.py",
+        text="Code",
+        embedding=[1.0, 0.0],
+        kind="code",
+        source_system="GITHUB",
+    )
+
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB", "JIRA"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["UPLOAD"]),
+    )
+
+
+def test_only_a_caller_chosen_narrowing_counts_as_narrowing() -> None:
+    """The always-present project scope must never look like a narrowing."""
+    assert not has_narrowing_filters(None)
+    assert not has_narrowing_filters(RetrievalFilters(project_id="p1"))
+    assert not has_narrowing_filters(RetrievalFilters(source_systems=[]))
+    assert has_narrowing_filters(RetrievalFilters(source_systems=["JIRA"]))
+    assert has_narrowing_filters(RetrievalFilters(time_from="2025-01-01T00:00:00Z"))
+    assert has_narrowing_filters(RetrievalFilters(time_to="2025-12-31T00:00:00Z"))
+
+
+def test_confluence_source_system_survives_ingest_and_filtering() -> None:
+    chunk = to_chunk(
+        ParsedChunk(
+            content="How to request VPN access",
+            kind="text",
+            metadata={"filename": "page-98765.md"},
+        ),
+        artifact_id="page-98765",
+        embedding=[1.0, 0.0],
+        artifact_type="PAGE",
+        source_system="CONFLUENCE",
+    )
+
+    assert chunk.source_system == "CONFLUENCE"
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["CONFLUENCE"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB"]),
+    )
+
+
+def test_bitbucket_source_system_survives_ingest_and_filtering() -> None:
+    # Without BITBUCKET in the known systems the ingest silently tagged the chunk
+    # with no source system, so a Bitbucket filter could never find it.
+    chunk = to_chunk(
+        ParsedChunk(
+            content="Why the widgets service retries",
+            kind="text",
+            metadata={"filename": "widgets.md"},
+        ),
+        artifact_id="bitbucket:acme/widgets:FILE:widgets.md",
+        embedding=[1.0, 0.0],
+        artifact_type="FILE",
+        source_system="BITBUCKET",
+    )
+
+    assert chunk.source_system == "BITBUCKET"
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["BITBUCKET"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB"]),
+    )
+
+
+def test_notion_source_system_survives_ingest_and_filtering() -> None:
+    # Without NOTION in the known systems the ingest silently tagged the chunk
+    # with no source system, so a Notion filter could never find it.
+    chunk = to_chunk(
+        ParsedChunk(
+            content="How we run the sprint review",
+            kind="text",
+            metadata={"filename": "page-4f2a.md"},
+        ),
+        artifact_id="notion:7c1d2b0e-1111-4222-8333-444455556666:page:4f2a",
+        embedding=[1.0, 0.0],
+        artifact_type="PAGE",
+        source_system="NOTION",
+    )
+
+    assert chunk.source_system == "NOTION"
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["NOTION"]),
+    )
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(source_systems=["GITHUB"]),
+    )
+
+
+def test_source_system_is_recognised_case_insensitively() -> None:
+    assert normalize_source_system("bitbucket") == "BITBUCKET"
+    assert is_source_system("BITBUCKET")
+    assert normalize_source_system("notion") == "NOTION"
+    assert is_source_system("NOTION")
+    assert normalize_source_system("gitlab") is None
+    assert normalize_source_system(None) is None
+
+
+def test_source_timestamp_preferred_over_indexed_at() -> None:
+    chunk = to_chunk(
+        ParsedChunk(
+            content="Old issue indexed today",
+            kind="text",
+            metadata={
+                "filename": "issue-1.md",
+                "indexed_at": "2026-06-01T00:00:00Z",
+            },
+        ),
+        artifact_id="issue-1",
+        embedding=[1.0, 0.0],
+        artifact_type="ISSUE",
+        source_updated_at="2025-01-01T00:00:00Z",
+        source_system="JIRA",
+    )
+
+    assert chunk.created_at == "2025-01-01T00:00:00Z"
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(time_from="2026-01-01T00:00:00Z"),
+    )
+
+
+def test_source_system_and_time_filters_are_combined_with_and() -> None:
+    chunk = Chunk(
+        id="chunk-1",
+        artifact_id="artifact-1",
+        filename="app.py",
+        text="Code",
+        embedding=[1.0, 0.0],
+        kind="code",
+        source_system="GITHUB",
+        created_at="2026-03-01T00:00:00Z",
+    )
+
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(
+            source_systems=["GITHUB"],
+            time_from="2026-01-01T00:00:00Z",
+            time_to="2026-07-01T00:00:00Z",
+        ),
+    )
+
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(
+            source_systems=["JIRA"],
+            time_from="2026-01-01T00:00:00Z",
+            time_to="2026-07-01T00:00:00Z",
+        ),
+    )
+
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(
+            source_systems=["GITHUB"],
+            time_from="2026-04-01T00:00:00Z",
+            time_to="2026-07-01T00:00:00Z",
+        ),
+    )
+
+
+def _chunk(project_ids: tuple[str, ...]) -> Chunk:
+    return Chunk(
+        id="chunk-1",
+        artifact_id="artifact-1",
+        filename="app.py",
+        text="Code",
+        embedding=[1.0, 0.0],
+        kind="code",
+        source_system="GITHUB",
+        project_ids=project_ids,
+    )
+
+
+def test_project_filter_matches_only_members_of_that_project() -> None:
+    chunk = _chunk(("project-1", "project-2"))
+
+    assert matches_retrieval_filters(chunk, RetrievalFilters(project_id="project-1"))
+    assert matches_retrieval_filters(chunk, RetrievalFilters(project_id="project-2"))
+    assert not matches_retrieval_filters(chunk, RetrievalFilters(project_id="other"))
+
+
+def test_project_filter_is_fail_closed_for_chunks_without_a_project() -> None:
+    """Pre-project-separation chunks must not leak into any project."""
+    assert not matches_retrieval_filters(
+        _chunk(()), RetrievalFilters(project_id="project-1")
+    )
+
+
+def test_project_filter_combines_with_source_system_filter() -> None:
+    chunk = _chunk(("project-1",))
+
+    assert not matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(project_id="project-1", source_systems=["UPLOAD"]),
+    )
+    assert matches_retrieval_filters(
+        chunk,
+        RetrievalFilters(project_id="project-1", source_systems=["GITHUB"]),
+    )
+
+
+def test_project_ids_round_trip_through_the_delimited_encoding() -> None:
+    assert encode_project_ids(("a", "b")) == "|a|b|"
+    assert encode_project_ids(()) == ""
+    assert decode_project_ids("|a|b|") == ("a", "b")
+    assert decode_project_ids("") == ()
+    assert decode_project_ids(None) == ()
+
+
+def test_encode_project_ids_deduplicates_and_drops_blanks() -> None:
+    assert encode_project_ids(["a", "", "a", "b"]) == "|a|b|"

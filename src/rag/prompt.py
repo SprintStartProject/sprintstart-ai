@@ -1,4 +1,4 @@
-from rag.types import ScoredChunk
+from corpus.types import ScoredChunk
 
 
 def chunk_header(chunk: ScoredChunk) -> str:

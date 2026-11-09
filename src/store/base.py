@@ -1,9 +1,9 @@
 from collections.abc import Iterator
 from typing import Protocol
 
-from ingestion.source_role import SourceRole
-from rag.source_filter import SourceExclusions
-from rag.types import Chunk, RetrievalFilters, ScoredChunk
+from corpus.source_filter import SourceExclusions
+from corpus.source_role import SourceRole
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk
 
 
 class VectorStore(Protocol):

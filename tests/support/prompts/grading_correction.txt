@@ -1,0 +1,4 @@
+--- assistant ---
+{broken
+--- user ---
+That response could not be validated: boom. Return the same grades again as one valid JSON object matching the schema exactly. Return JSON only.

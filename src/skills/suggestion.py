@@ -1,22 +1,19 @@
 """AI-supported skill suggestion for project roles."""
 
 import logging
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from api.schemas import (
-    SkillCatalogItem,
-    SkillSuggestionItem,
-    SkillSuggestionResponse,
-)
-from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
+from corpus.filters import RetrievalFilters
+from corpus.source_role import GROUNDING_EXCLUDED_ROLES
+from corpus.types import ScoredChunk
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
-from rag.filters import RetrievalFilters
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
 from rag.retriever import get_bm25_cache
-from rag.types import ScoredChunk
+from skills.models import SkillCatalogEntry, SkillSuggestion, SkillSuggestionResult
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -59,7 +56,7 @@ class _Payload(BaseModel):
     suggestions: list[_Suggestion] = Field(default_factory=list[_Suggestion])
 
 
-def _format_catalog(available_skills: list[SkillCatalogItem]) -> str:
+def _format_catalog(available_skills: list[SkillCatalogEntry]) -> str:
     if not available_skills:
         return "(empty catalog)"
     lines: list[str] = []
@@ -90,7 +87,7 @@ def _build_prompt(
     role_name: str,
     role_description: str,
     project_industry: str | None,
-    available_skills: list[SkillCatalogItem],
+    available_skills: list[SkillCatalogEntry],
     chunks: list[ScoredChunk],
 ) -> list[Message]:
     system = (
@@ -133,6 +130,135 @@ def _build_prompt(
     ]
 
 
+@dataclass(frozen=True)
+class _Role:
+    """The role skills are suggested for."""
+
+    name: str
+    description: str
+    industry: str | None
+
+
+@dataclass(frozen=True)
+class _Search:
+    """What is retrieved as evidence, and where from."""
+
+    query: str
+    filters: RetrievalFilters
+    cache: BM25IndexCache
+
+
+@dataclass(frozen=True)
+class _Evidence:
+    """What a suggestion is checked against: the catalog and the chunks retrieved."""
+
+    catalog: dict[str, SkillCatalogEntry]
+    retrieved_chunk_ids: set[str]
+    role_name: str
+
+
+def _query(role: _Role) -> str:
+    parts = [role.name]
+    if role.description:
+        parts.append(role.description)
+    if role.industry:
+        parts.append(role.industry)
+    return " ".join(parts)
+
+
+def _retrieve(llm: LLMClient, store: VectorStore, search: _Search) -> list[ScoredChunk]:
+    if search.filters.project_id is None or store.count() == 0:
+        return []
+    return hybrid_retrieve(
+        question=search.query,
+        llm=llm,
+        store=store,
+        top_k=_TOP_K,
+        min_score=_MIN_SCORE,
+        bm25_cache=search.cache,
+        exclude_roles=GROUNDING_EXCLUDED_ROLES,
+        filters=search.filters,
+    )
+
+
+def _read(raw: str, role: _Role, search: _Search) -> _Payload | None:
+    try:
+        return _Payload.model_validate_json(extract_json_object(raw))
+    except (ValueError, ValidationError) as exc:
+        logger.warning(
+            "Failed to parse LLM skill suggestions for role %r on project %r: %s",
+            role.name,
+            search.filters.project_id,
+            exc,
+        )
+        return None
+
+
+def _is_universal_category(category: str | None) -> bool:
+    return bool(category and category.strip().lower() in _KNOWN_UNIVERSAL_CATEGORIES)
+
+
+def _vet(item: _Suggestion, evidence: _Evidence) -> SkillSuggestion | None:
+    """The suggestion if the evidence allows it, else ``None``.
+
+    Universal skills pass without citations. A project-specific skill must cite at
+    least one chunk that was actually retrieved.
+    """
+    catalog_entry = evidence.catalog.get(item.name.strip().lower())
+    if catalog_entry is not None:
+        is_universal = catalog_entry.universal
+        name = catalog_entry.name
+        category = catalog_entry.category or item.category
+        is_new = False
+    else:
+        is_universal = item.universal or _is_universal_category(item.category)
+        name = item.name.strip()
+        category = item.category
+        is_new = True
+
+    valid_chunk_ids = [
+        cid for cid in item.chunk_ids if cid in evidence.retrieved_chunk_ids
+    ]
+    if is_universal:
+        fallback = f"Recommended universal skill for {evidence.role_name}."
+    elif valid_chunk_ids:
+        fallback = (
+            "Project-specific skill identified from artifacts for "
+            f"{evidence.role_name}."
+        )
+    else:
+        logger.debug(
+            "Dropping ungrounded skill suggestion %r for role %r",
+            item.name,
+            evidence.role_name,
+        )
+        return None
+    return SkillSuggestion(
+        name=name,
+        category=category,
+        reason=item.reason or fallback,
+        confidence=item.confidence,
+        is_new=is_new,
+        chunk_ids=valid_chunk_ids,
+    )
+
+
+def _ground(payload: _Payload, evidence: _Evidence) -> list[SkillSuggestion]:
+    """Keep each skill once, in the model's order, if the evidence allows it."""
+    suggestions: list[SkillSuggestion] = []
+    seen_names: set[str] = set()
+    for item in payload.suggestions:
+        norm_name = item.name.strip().lower()
+        if not norm_name or norm_name in seen_names:
+            continue
+        suggestion = _vet(item, evidence)
+        if suggestion is None:
+            continue
+        seen_names.add(norm_name)
+        suggestions.append(suggestion)
+    return suggestions
+
+
 def suggest_skills(
     llm: LLMClient,
     store: VectorStore,
@@ -141,42 +267,16 @@ def suggest_skills(
     role_name: str,
     role_description: str = "",
     project_industry: str | None = None,
-    available_skills: list[SkillCatalogItem] | None = None,
+    available_skills: list[SkillCatalogEntry] | None = None,
     bm25_cache: BM25IndexCache | None = None,
-) -> SkillSuggestionResponse:
+) -> SkillSuggestionResult:
     """Suggest fitting skills for a project role, grounded in project artifacts."""
     if available_skills is None:
         available_skills = []
-
-    # Map catalog by normalized name for lookup
-    catalog_by_norm_name: dict[str, SkillCatalogItem] = {
-        s.name.strip().lower(): s for s in available_skills
-    }
-
-    # Retrieve relevant project artifacts via hybrid RAG
-    query_parts = [role_name]
-    if role_description:
-        query_parts.append(role_description)
-    if project_industry:
-        query_parts.append(project_industry)
-    query = " ".join(query_parts)
-
+    role = _Role(role_name, role_description, project_industry)
     cache = bm25_cache if bm25_cache is not None else get_bm25_cache()
-
-    chunks: list[ScoredChunk] = []
-    if project_id is not None and store.count() > 0:
-        chunks = hybrid_retrieve(
-            question=query,
-            llm=llm,
-            store=store,
-            top_k=_TOP_K,
-            min_score=_MIN_SCORE,
-            bm25_cache=cache,
-            exclude_roles=GROUNDING_EXCLUDED_ROLES,
-            filters=RetrievalFilters(project_id=project_id),
-        )
-
-    retrieved_chunk_ids = {c.id for c in chunks}
+    search = _Search(_query(role), RetrievalFilters(project_id=project_id), cache)
+    chunks = _retrieve(llm, store, search)
 
     prompt = _build_prompt(
         role_name=role_name,
@@ -185,91 +285,14 @@ def suggest_skills(
         available_skills=available_skills,
         chunks=chunks,
     )
-
     # Let LLMUnavailableError propagate so route returns 503
-    raw = llm.generate(prompt)
+    payload = _read(llm.generate(prompt), role, search)
+    if payload is None:
+        return SkillSuggestionResult(suggestions=[])
 
-    try:
-        json_str = extract_json_object(raw)
-        payload = _Payload.model_validate_json(json_str)
-    except (ValueError, ValidationError) as exc:
-        logger.warning(
-            "Failed to parse LLM skill suggestions for role %r on project %r: %s",
-            role_name,
-            project_id,
-            exc,
-        )
-        return SkillSuggestionResponse(suggestions=[])
-
-    # Grounding gate:
-    # Universal skills pass without evidence citations.
-    # Project-specific skills MUST have >=1 valid retrieved chunk_id.
-    validated_suggestions: list[SkillSuggestionItem] = []
-    seen_names: set[str] = set()
-
-    for item in payload.suggestions:
-        norm_name = item.name.strip().lower()
-        if not norm_name or norm_name in seen_names:
-            continue
-
-        catalog_entry = catalog_by_norm_name.get(norm_name)
-        if catalog_entry is not None:
-            is_universal = catalog_entry.universal
-            name = catalog_entry.name
-            category = catalog_entry.category or item.category
-            is_new = False
-        else:
-            is_universal = item.universal or (
-                bool(
-                    item.category
-                    and item.category.strip().lower() in _KNOWN_UNIVERSAL_CATEGORIES
-                )
-            )
-            name = item.name.strip()
-            category = item.category
-            is_new = True
-
-        # Filter chunk_ids to only those actually retrieved
-        valid_chunk_ids = [cid for cid in item.chunk_ids if cid in retrieved_chunk_ids]
-
-        if is_universal:
-            # Universal skill: no chunk evidence required
-            seen_names.add(norm_name)
-            reason = item.reason or f"Recommended universal skill for {role_name}."
-            validated_suggestions.append(
-                SkillSuggestionItem(
-                    name=name,
-                    category=category,
-                    reason=reason,
-                    confidence=item.confidence,
-                    is_new=is_new,
-                    chunk_ids=valid_chunk_ids,
-                )
-            )
-        else:
-            # Project-specific skill: must have chunk evidence
-            if not valid_chunk_ids:
-                logger.debug(
-                    "Dropping ungrounded skill suggestion %r for role %r",
-                    item.name,
-                    role_name,
-                )
-                continue
-
-            seen_names.add(norm_name)
-            reason = (
-                item.reason
-                or f"Project-specific skill identified from artifacts for {role_name}."
-            )
-            validated_suggestions.append(
-                SkillSuggestionItem(
-                    name=name,
-                    category=category,
-                    reason=reason,
-                    confidence=item.confidence,
-                    is_new=is_new,
-                    chunk_ids=valid_chunk_ids,
-                )
-            )
-
-    return SkillSuggestionResponse(suggestions=validated_suggestions)
+    evidence = _Evidence(
+        catalog={s.name.strip().lower(): s for s in available_skills},
+        retrieved_chunk_ids={c.id for c in chunks},
+        role_name=role_name,
+    )
+    return SkillSuggestionResult(suggestions=_ground(payload, evidence))

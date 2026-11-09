@@ -1,5 +1,5 @@
-import logging
 from collections.abc import Iterator
+from typing import TypedDict
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -17,25 +17,24 @@ from api.schemas import (
     BuddyToolSpecSchema,
     ValidationErrorResponse,
 )
-from api.sse import sse_event
-from ingestion.source_state_store import SourceStateStore
-from llm.base import LLMClient, Message, ToolCall, ToolSpec
-from llm.errors import LLMUnavailableError
-from onboarding.buddy_agent import (
+from api.sse import stream_events
+from buddy.agent import run_agent_turn, stream_agent_turn
+from buddy.compact import compact_memory
+from buddy.events import (
     AgentReasoning,
+    AgentStreamEvent,
     AgentToken,
     AgentToolUse,
     AgentTurnResult,
-    run_agent_turn,
-    stream_agent_turn,
 )
-from onboarding.buddy_compact import compact_memory
-from onboarding.buddy_open import stream_session
-from onboarding.vocabulary import Vocabulary
-from rag.types import RetrievalFilters
+from buddy.opening import stream_session
+from buddy.vocabulary import Vocabulary
+from corpus.source_filter import SourceExclusions
+from corpus.types import RetrievalFilters
+from llm.base import LLMClient, Message, ToolCall, ToolSpec
+from llm.errors import LLMUnavailableError
 from store.base import VectorStore
-
-logger = logging.getLogger(__name__)
+from store.source_state_store import SourceStateStore
 
 router = APIRouter()
 
@@ -106,6 +105,40 @@ def _narrowing(body: BuddyAgentRequest) -> RetrievalFilters | None:
     )
 
 
+class _TurnOptions(TypedDict):
+    exclusions: SourceExclusions
+    prior_summary: str | None
+    vocabulary: Vocabulary
+    project_ids: frozenset[str]
+    capabilities_enabled: bool
+    team_mode: bool
+    filters: RetrievalFilters | None
+
+
+def _turn_options(
+    body: BuddyAgentRequest, source_state: SourceStateStore
+) -> _TurnOptions:
+    return _TurnOptions(
+        exclusions=source_state.get_exclusions(),
+        prior_summary=body.prior_summary,
+        vocabulary=_vocabulary(body),
+        project_ids=frozenset(body.project_ids),
+        capabilities_enabled=body.capabilities_enabled,
+        team_mode=body.team_mode,
+        filters=_narrowing(body),
+    )
+
+
+def _event_payload(event: AgentStreamEvent) -> dict[str, object]:
+    if isinstance(event, AgentReasoning):
+        return {"type": "reasoning", "content": event.text}
+    if isinstance(event, AgentToken):
+        return {"type": "token", "content": event.text}
+    if isinstance(event, AgentToolUse):
+        return {"type": "tool_use", "name": event.name, "arguments": event.arguments}
+    return {"type": "result", **_agent_response(event).model_dump(mode="json")}
+
+
 def _agent_response(result: AgentTurnResult) -> BuddyAgentResponse:
     return BuddyAgentResponse(
         final=result.final,
@@ -160,13 +193,7 @@ def buddy_agent(
             [_to_toolspec(t) for t in body.backend_tools],
             llm,
             store,
-            exclusions=source_state.get_exclusions(),
-            prior_summary=body.prior_summary,
-            vocabulary=_vocabulary(body),
-            project_ids=frozenset(body.project_ids),
-            capabilities_enabled=body.capabilities_enabled,
-            team_mode=body.team_mode,
-            filters=_narrowing(body),
+            **_turn_options(body, source_state),
         )
     except LLMUnavailableError as exc:
         raise HTTPException(
@@ -207,52 +234,16 @@ def buddy_agent_stream(
     """
     messages = [_to_message(m) for m in body.messages]
     backend_tools = [_to_toolspec(t) for t in body.backend_tools]
-    exclusions = source_state.get_exclusions()
-    narrowing = _narrowing(body)
+    options = _turn_options(body, source_state)
 
-    def event_stream() -> Iterator[str]:
-        try:
-            for event in stream_agent_turn(
-                messages,
-                backend_tools,
-                llm,
-                store,
-                exclusions=exclusions,
-                prior_summary=body.prior_summary,
-                vocabulary=_vocabulary(body),
-                project_ids=frozenset(body.project_ids),
-                capabilities_enabled=body.capabilities_enabled,
-                team_mode=body.team_mode,
-                filters=narrowing,
-            ):
-                if isinstance(event, AgentReasoning):
-                    yield sse_event({"type": "reasoning", "content": event.text})
-                elif isinstance(event, AgentToken):
-                    yield sse_event({"type": "token", "content": event.text})
-                elif isinstance(event, AgentToolUse):
-                    yield sse_event(
-                        {
-                            "type": "tool_use",
-                            "name": event.name,
-                            "arguments": event.arguments,
-                        }
-                    )
-                else:
-                    yield sse_event(
-                        {
-                            "type": "result",
-                            **_agent_response(event).model_dump(mode="json"),
-                        }
-                    )
-        except LLMUnavailableError as exc:
-            yield sse_event({"type": "error", "message": str(exc)})
-        except Exception:
-            logger.exception("Unexpected error in buddy agent stream")
-            yield sse_event(
-                {"type": "error", "message": "An unexpected error occurred"}
-            )
+    def payloads() -> Iterator[dict[str, object]]:
+        for event in stream_agent_turn(messages, backend_tools, llm, store, **options):
+            yield _event_payload(event)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_events(payloads(), what="buddy agent stream"),
+        media_type="text/event-stream",
+    )
 
 
 @router.post(
@@ -326,22 +317,16 @@ def buddy_open_stream(
     attention list, so both the prompt and that plain welcome address a manager.
     """
 
-    def event_stream() -> Iterator[str]:
-        try:
-            for event in stream_session(
-                memory=body.memory,
-                recent=[_to_message(m) for m in body.recent],
-                state=body.state,
-                llm=llm,
-                team_mode=body.team_mode,
-            ):
-                yield sse_event(event)
-        except LLMUnavailableError as exc:
-            yield sse_event({"type": "error", "message": str(exc)})
-        except Exception:
-            logger.exception("Unexpected error in buddy open stream")
-            yield sse_event(
-                {"type": "error", "message": "An unexpected error occurred"}
-            )
+    def payloads() -> Iterator[dict[str, object]]:
+        yield from stream_session(
+            memory=body.memory,
+            recent=[_to_message(m) for m in body.recent],
+            state=body.state,
+            llm=llm,
+            team_mode=body.team_mode,
+        )
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_events(payloads(), what="buddy open stream"),
+        media_type="text/event-stream",
+    )

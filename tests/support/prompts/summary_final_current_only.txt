@@ -1,0 +1,21 @@
+--- system ---
+You are SprintStart's grounded summarization assistant. Use only the provided source excerpts. Do not use external knowledge. Do not invent facts, decisions, changes, or links. If the source excerpts do not contain enough information, say so.
+--- user ---
+Create a short summary for artifact art-1.
+
+Return concise markdown with exactly these sections:
+## Key points
+## Decisions
+## What changed
+
+Rules:
+- Keep it short.
+- Prefer bullets.
+- Mention uncertainty if the source does not contain enough info.
+- If no decisions are present, say so.
+- If no version history is present, say so under What changed.
+
+Current artifact excerpts / notes:
+current notes
+
+No previous artifact was provided. If the current source contains version history, summarize what changed from that. Otherwise say that no version history was found.

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from rag.types import ChunkKind
+from corpus.types import ChunkKind
 
 
 @dataclass(slots=True)

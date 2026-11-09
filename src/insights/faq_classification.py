@@ -33,12 +33,12 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError, model_validator
 
-from ingestion.metadata_store import IngestionMetadataStore
 from insights.faq import NON_FAQ_KINDS, TITLE_RULE, FaqDocument, documents_for
 from insights.redaction import redact_pii, redact_structured
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from store.base import VectorStore
+from store.metadata_store import IngestionMetadataStore
 
 logger = logging.getLogger(__name__)
 

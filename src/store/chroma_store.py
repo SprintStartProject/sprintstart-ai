@@ -8,19 +8,19 @@ import chromadb.api
 from chromadb.api.types import Metadata, PyEmbeddings, QueryResult, Where
 from chromadb.config import Settings
 
-from ingestion.metadata_store import IngestionMetadataStore, RevocationReason
-from ingestion.source_role import SourceRole
-from rag.filters import (
+from corpus.filters import (
     PROJECT_IDS_METADATA_KEY,
     decode_project_ids,
     encode_project_ids,
     normalize_source_system,
     project_metadata_key,
     timestamp_from_iso,
-    where_filter_for_chroma,
 )
-from rag.source_filter import SourceExclusions
-from rag.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
+from corpus.source_filter import SourceExclusions
+from corpus.source_role import SourceRole
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
+from store.chroma_where import where_filter_for_chroma
+from store.metadata_store import IngestionMetadataStore, RevocationReason
 
 _NO_POSITION: int = -1
 # Keep every Chroma ``get`` comfortably below SQLite's 32,766 bind-variable
