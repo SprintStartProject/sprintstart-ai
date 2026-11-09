@@ -22,7 +22,7 @@ def parse_pdf(
     Parse a PDF file into structured text chunks.
 
     Each PDF page is processed independently. Extracted text is split
-    into fixed-size chunks using `chunk_text` (max 512 characters per chunk),
+    into fixed-size chunks using `chunk_text`,
     or, when ``llm`` is provided, using the LLM-based context-aware chunker
     (see :func:`ingestion.context_aware_chunker.chunk_text_context_aware`).
 

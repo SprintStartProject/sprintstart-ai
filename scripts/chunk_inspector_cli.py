@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ SRC = ROOT / "src"
 
 sys.path.insert(0, str(SRC))
 
+from api.dependencies import get_llm  # noqa: E402
 from ingestion.models import ParsedChunk  # noqa: E402
 from ingestion.parser import parse  # noqa: E402
 
@@ -24,6 +26,7 @@ console = Console()
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.WARNING)
 
     args = _parse_args()
 
@@ -35,7 +38,27 @@ def main() -> int:
 
     try:
         filename, content = _load_file(path)
-        chunks = parse(filename, content)
+        use_llm = args.semantic_boundaries or args.contextualize
+        llm = None
+        if use_llm:
+            try:
+                llm = get_llm()
+            except Exception as exc:
+                print(
+                    C.yellow(
+                        f"[warn] LLM client unavailable ({exc}) — "
+                        "falling back to deterministic chunker"
+                    )
+                )
+                llm = None
+
+        chunks = parse(
+            filename,
+            content,
+            llm=llm,
+            semantic_boundaries=args.semantic_boundaries,
+            contextualize=args.contextualize,
+        )
 
         if not chunks:
             print(C.yellow("[warn] no chunks generated"))
@@ -58,6 +81,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "filepath",
         help="Path to file to inspect",
+    )
+
+    parser.add_argument(
+        "--semantic-boundaries",
+        action="store_true",
+        help="Let LLM choose chunk boundaries based on semantic coherence",
+    )
+
+    parser.add_argument(
+        "--contextualize",
+        action="store_true",
+        help="Let LLM prepend situating context blocks to chunks",
     )
 
     group = parser.add_mutually_exclusive_group()
@@ -200,7 +235,7 @@ def print_chunks(
             content output. Defaults to False.
     """
 
-    for index, chunk in enumerate(chunks):
+    for chunk in chunks:
         print("")
         isPdf: bool = chunk.kind == "pdf"
         isCode: bool = chunk.kind == "code"
@@ -216,19 +251,11 @@ def print_chunks(
             )
         else:
             console.rule(title=f"Chunk {chunk.metadata['chunk_index']}", characters="=")
-        # compute overlap
-        if index > 0:
-            start_overlap: int = get_overlap_count(
-                chunks[index - 1].content, chunks[index].content
-            )
-        else:
-            start_overlap = 0
-        try:
-            end_overlap: int = get_overlap_count(
-                chunks[index].content, chunks[index + 1].content
-            )
-        except IndexError:
-            end_overlap = 0
+
+        has_context = chunk.metadata.get("has_context_block") == "true"
+        context_range_str = chunk.metadata.get("context_block_range", "")
+        has_overlap = chunk.metadata.get("has_overlap") == "true"
+        overlap_range_str = chunk.metadata.get("overlap_range", "")
 
         if pretty:
             metadata_table = Table(expand=False)
@@ -236,12 +263,13 @@ def print_chunks(
             metadata_table.add_column("filename", justify="center")
             metadata_table.add_column("type", justify="center")
             if isPdf:
-                metadata_table.add_column("global-chunk-index", justify="center")
+                metadata_table.add_column("global-index", justify="center")
             elif isCode:
+                metadata_table.add_column("symbol-kind", justify="center")
                 metadata_table.add_column("symbol-name", justify="center")
-            metadata_table.add_column("character count", justify="center")
-            metadata_table.add_column("front-overlap", justify="center")
-            metadata_table.add_column("end-overlap", justify="center")
+            metadata_table.add_column("chars", justify="center")
+            metadata_table.add_column("context", justify="center")
+            metadata_table.add_column("overlap", justify="center")
             row = [
                 chunk.kind,
                 chunk.metadata["filename"],
@@ -249,78 +277,89 @@ def print_chunks(
             ]
 
             if isPdf:
-                row.append(str(chunk.metadata["global_pdf_chunk_index"]))
+                row.append(str(chunk.metadata.get("global_pdf_chunk_index", "-")))
 
             if isCode:
+                row.append(chunk.metadata.get("symbol_kind", "-"))
                 row.append(chunk.metadata.get("symbol_name", "-"))
 
+            context_display = (
+                chunk.metadata.get("context_block_range", "yes") if has_context else "-"
+            )
+            overlap_display = (
+                chunk.metadata.get("overlap_range", "yes") if has_overlap else "-"
+            )
             row.extend(
                 [
                     str(len(chunk.content)),
-                    str(start_overlap),
-                    str(end_overlap),
+                    context_display,
+                    overlap_display,
                 ]
             )
 
             metadata_table.add_row(*row)
             console.print(Align.center(metadata_table))
         print("")
-        print(C.bold("content:"))
-        if show_overlap:
-            print(C.green(chunk.content[:start_overlap]), end="")
-            print(
-                C.dim(chunk.content[start_overlap : len(chunk.content) - end_overlap]),
-                end="",
-            )
-            print(C.green(chunk.content[len(chunk.content) - end_overlap :]), end="")
 
+        if has_context and context_range_str:
+            ctx_start, ctx_end = map(int, context_range_str.split(":"))
+            ctx_text = chunk.content[ctx_start:ctx_end]
+            body_text = chunk.content[ctx_end:]
+            print(C.cyan(f"[context] {ctx_text.strip()}"))
+            print(C.bold("body:"))
+            if show_overlap and has_overlap and overlap_range_str:
+                ov_s, ov_e = map(int, overlap_range_str.split(":"))
+                rel_s = max(0, ov_s - ctx_end)
+                rel_e = max(0, ov_e - ctx_end)
+                print(C.green(body_text[rel_s:rel_e]), end="")
+                print(C.dim(body_text[rel_e:]))
+            else:
+                print(C.dim(body_text))
         else:
-            print(C.dim(chunk.content))
+            print(C.bold("content:"))
+            if show_overlap and has_overlap and overlap_range_str:
+                ov_s, ov_e = map(int, overlap_range_str.split(":"))
+                print(chunk.content[:ov_s], end="")
+                print(C.green(chunk.content[ov_s:ov_e]), end="")
+                print(C.dim(chunk.content[ov_e:]))
+            else:
+                print(C.dim(chunk.content))
 
         print("")
 
 
 def chunk_to_dict(chunk: ParsedChunk) -> dict[str, Any]:
-    result = {}
-    result["content"] = chunk.content
-    result["kind"] = chunk.kind
-    result["metadata"] = {}
-    result["metadata"]["filename"] = chunk.metadata["filename"]
-    result["metadata"]["type"] = chunk.metadata["type"]
-    result["metadata"]["chunk_index"] = chunk.metadata["chunk_index"]
-    result["metadata"]["total_chunks"] = chunk.metadata["total_chunks"]
-    # TODO: add the specific metadata for pdf and code
+    metadata: dict[str, Any] = {
+        "filename": chunk.metadata.get("filename", ""),
+        "type": chunk.metadata.get("type", ""),
+        "chunk_index": chunk.metadata.get("chunk_index", ""),
+        "total_chunks": chunk.metadata.get("total_chunks", ""),
+    }
 
-    return result  # type: ignore
+    if "symbol_name" in chunk.metadata:
+        metadata["symbol_name"] = chunk.metadata["symbol_name"]
+    if "symbol_kind" in chunk.metadata:
+        metadata["symbol_kind"] = chunk.metadata["symbol_kind"]
 
+    if "page_number" in chunk.metadata:
+        metadata["page_number"] = chunk.metadata["page_number"]
+    if "global_pdf_chunk_index" in chunk.metadata:
+        metadata["global_pdf_chunk_index"] = chunk.metadata["global_pdf_chunk_index"]
 
-def get_overlap_count(first_string: str, second_string: str) -> int:
-    """Compute the overlap length between two chunk contents.
+    if "has_context_block" in chunk.metadata:
+        metadata["has_context_block"] = chunk.metadata["has_context_block"]
+    if "context_block_range" in chunk.metadata:
+        metadata["context_block_range"] = chunk.metadata["context_block_range"]
+    if "has_overlap" in chunk.metadata:
+        metadata["has_overlap"] = chunk.metadata["has_overlap"]
+    if "overlap_range" in chunk.metadata:
+        metadata["overlap_range"] = chunk.metadata["overlap_range"]
 
-    The function searches for the largest suffix of the first string
-    that matches a prefix of the second string. This corresponds to the
-    overlap produced by the chunking logic when context is carried
-    forward between adjacent chunks.
-
-    Args:
-        firstString (str):
-            Content of the preceding chunk.
-
-        secondString (str):
-            Content of the following chunk.
-
-    Returns:
-        int:
-            Length of the largest matching overlap in characters.
-            Returns 0 if no overlap exists.
-    """
-    max_len = min(len(first_string), len(second_string))
-
-    for size in range(max_len, 0, -1):
-        if first_string[-size:] == second_string[:size]:
-            return len(first_string[-size:])
-
-    return 0
+    return {
+        "content": chunk.content,
+        "kind": chunk.kind,
+        "metadata": metadata,
+    }
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 def revoke_removed_memberships(
     store: VectorStore,
     artifact_id: str,
-    project_ids: tuple[str, ...],
+    new_project_ids: tuple[str, ...],
 ) -> None:
     """Delete an artifact's indexed chunks if it lost any project membership.
 
@@ -29,7 +29,7 @@ def revoke_removed_memberships(
     Purely additive changes (a new project, unchanged content) delete nothing.
     """
     indexed = store.project_ids_for_artifact(artifact_id)
-    removed = indexed - set(project_ids)
+    removed = indexed - set(new_project_ids)
     if not removed:
         return
 

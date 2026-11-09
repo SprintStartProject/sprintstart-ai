@@ -68,7 +68,6 @@ def parse_with_tree_sitter(
     """
     symbols: list[CodeSymbol] = []
     preamble_parts: list[str] = []
-    trailing_parts: list[str] = []
     seen_symbol = False
 
     extension: str = Path(filename).suffix.lower()
@@ -115,16 +114,22 @@ def parse_with_tree_sitter(
         elif not seen_symbol:
             preamble_parts.append(_slice(content, start, end))
         else:
-            trailing_parts.append(_slice(content, start, end))
+            # Top-level statements that appear *after* the first symbol (module-level
+            # code, re-exports, ``if __name__ == "__main__"`` guards) are not symbols
+            # but must stay searchable, so emit them as module kind
+            trailing: str = _slice(content, start, end).strip()
+            if trailing:
+                symbols.append(
+                    CodeSymbol(
+                        None,
+                        "module",
+                        trailing,
+                        start,
+                        end,
+                    )
+                )
 
     preamble = "\n".join(preamble_parts).strip()
-    trailing = "\n".join(trailing_parts).strip()
-    if trailing:
-        # Top-level statements that appear *after* the first symbol (module-level
-        # code, re-exports, ``if __name__ == "__main__"`` guards) are not symbols
-        # but must stay searchable, so emit them as one synthetic module-level
-        # symbol instead of dropping them.
-        symbols.append(CodeSymbol(None, "module", trailing, 0, 0))
     return symbols, preamble
 
 
@@ -149,8 +154,6 @@ def _extract_name(
     if node is None:
         return None
 
-    # TODO:
-    # language-specific symbol extraction
     if node.kind() == "identifier":
         return _slice(content, node.start_byte(), node.end_byte())
 

@@ -160,3 +160,12 @@ def foo():
 
     assert len(result) >= 1
     assert all(chunk.kind == "code" for chunk in result)
+
+
+def test_parse_markdown_with_crlf_line_endings():
+    content = b"# Header\r\n\r\nFirst paragraph.\r\n\r\nSecond paragraph."
+    result = parse("test.md", content)
+
+    assert len(result) >= 1
+    assert result[0].kind == "text"
+    assert "Header" in result[0].content
