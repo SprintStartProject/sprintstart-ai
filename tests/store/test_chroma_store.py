@@ -7,13 +7,13 @@ from pathlib import Path
 import chromadb
 import pytest
 
-from ingestion.metadata_store import IngestionMetadataStore
-from ingestion.source_role import SourceRole
+from corpus.source_filter import SourceExclusions
+from corpus.source_role import SourceRole
+from corpus.types import Chunk, RetrievalFilters
 from rag.hybrid import BM25IndexCache
-from rag.source_filter import SourceExclusions
-from rag.types import Chunk, RetrievalFilters
 from store import chroma_store as chroma_store_module
 from store.chroma_store import ChromaVectorStore
+from store.metadata_store import IngestionMetadataStore
 
 
 def test_persistent_client_cold_cache_is_constructed_once_concurrently(

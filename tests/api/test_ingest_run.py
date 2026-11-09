@@ -8,9 +8,9 @@ from fastapi.testclient import TestClient
 
 from api.app import app
 from api.dependencies import get_ingestion_metadata_store, get_llm, get_store
-from ingestion.metadata_store import IngestionMetadataStore
+from corpus.types import Chunk
 from llm.errors import LLMUnavailableError
-from rag.types import Chunk
+from store.metadata_store import IngestionMetadataStore
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
@@ -616,10 +616,9 @@ _PDF_FIXTURE_PATH = (
 
 
 def test_assemble_content_skips_title_for_image_and_pdf() -> None:
-    from api.routes.ingest_run import _assemble_content
-    from api.schemas import ArtifactRunIngestRequest
+    from ingestion.pipeline.sync import SyncedArtifact, assemble_content
 
-    image_req = ArtifactRunIngestRequest(
+    image_req = SyncedArtifact(
         artifact_id="img-1",
         source_id="github:owner/repo:FILE:docs/diagram.png",
         artifact_type="FILE",
@@ -627,9 +626,9 @@ def test_assemble_content_skips_title_for_image_and_pdf() -> None:
         body_text=_TINY_PNG_B64,
         mime="image/png",
     )
-    assert _assemble_content(image_req) == _TINY_PNG_B64
+    assert assemble_content(image_req) == _TINY_PNG_B64
 
-    pdf_req = ArtifactRunIngestRequest(
+    pdf_req = SyncedArtifact(
         artifact_id="pdf-1",
         source_id="github:owner/repo:FILE:docs/report.pdf",
         artifact_type="FILE",
@@ -637,9 +636,9 @@ def test_assemble_content_skips_title_for_image_and_pdf() -> None:
         body_text="JVBERi0xLjQK...",
         mime="application/pdf",
     )
-    assert _assemble_content(pdf_req) == "JVBERi0xLjQK..."
+    assert assemble_content(pdf_req) == "JVBERi0xLjQK..."
 
-    text_req = ArtifactRunIngestRequest(
+    text_req = SyncedArtifact(
         artifact_id="txt-1",
         source_id="github:owner/repo:FILE:docs/readme.md",
         artifact_type="FILE",
@@ -647,39 +646,38 @@ def test_assemble_content_skips_title_for_image_and_pdf() -> None:
         body_text="Hello world",
         mime="text/markdown",
     )
-    assert _assemble_content(text_req) == "# Readme\n\nHello world"
+    assert assemble_content(text_req) == "# Readme\n\nHello world"
 
 
 def test_filename_for_uses_title_for_upload_file_artifacts() -> None:
-    from api.routes.ingest_run import _filename_for
-    from api.schemas import ArtifactRunIngestRequest
+    from ingestion.pipeline.sync import SyncedArtifact, filename_for
 
-    upload_file = ArtifactRunIngestRequest(
+    upload_file = SyncedArtifact(
         artifact_id="uuid-upload",
         source_system="UPLOAD",
         source_id="123e4567-e89b-12d3-a456-426614174000",
         artifact_type="FILE",
         title="uploaded_chart.png",
     )
-    assert _filename_for(upload_file) == "uploaded_chart.png"
+    assert filename_for(upload_file) == "uploaded_chart.png"
 
-    github_file = ArtifactRunIngestRequest(
+    github_file = SyncedArtifact(
         artifact_id="uuid-gh",
         source_system="GITHUB",
         source_id="github:owner/repo:FILE:src/main/App.kt",
         artifact_type="FILE",
         title="App.kt",
     )
-    assert _filename_for(github_file) == "src/main/App.kt"
+    assert filename_for(github_file) == "src/main/App.kt"
 
-    issue = ArtifactRunIngestRequest(
+    issue = SyncedArtifact(
         artifact_id="uuid-issue",
         source_system="GITHUB",
         source_id="github:owner/repo:ISSUE:42",
         artifact_type="ISSUE",
         title="Some bug",
     )
-    assert _filename_for(issue) == "issue-42.md"
+    assert filename_for(issue) == "issue-42.md"
 
 
 def test_ingest_run_indexes_image_artifact_with_caption(

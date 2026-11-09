@@ -12,7 +12,7 @@ from api.schemas import (
     PatchSourcesRequest,
     PatchSourcesResponse,
 )
-from ingestion.source_state_store import SourceStateStore
+from store.source_state_store import SourceStateStore
 
 router = APIRouter()
 

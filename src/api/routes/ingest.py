@@ -1,10 +1,3 @@
-import base64
-import binascii
-import logging
-import mimetypes
-import os
-from dataclasses import replace
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,31 +10,22 @@ from api.schemas import (
     IngestResponse,
     ValidationErrorResponse,
 )
-from ingestion.mapper import to_chunk
-from ingestion.membership import revoke_removed_memberships
-from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
-from ingestion.models import ParsedChunk
-from ingestion.parser import parse
-from ingestion.source_role import classify_source_role
+from corpus.ids import ArtifactId
+from corpus.types import Chunk
+from ingestion.pipeline.steps import IngestDeps, IngestError, IngestFailure
+from ingestion.pipeline.upload import UploadedDocument, ingest_upload
 from llm.base import LLMClient
-from llm.errors import LLMUnavailableError
-from rag.types import Chunk
 from store.base import VectorStore
-
-logger = logging.getLogger(__name__)
+from store.metadata_store import ArtifactRecord, IngestionMetadataStore
 
 router = APIRouter()
 
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def _content_type_for_filename(filename: str) -> str:
-    # e.g. .md -> text/markdown, .png -> image/png
-    content_type, _ = mimetypes.guess_type(filename)
-    # Treat content as raw bytes if detection failed
-    return content_type or "application/octet-stream"
+_STATUS_FOR_FAILURE: dict[IngestFailure, int] = {
+    "invalid_content": 422,
+    "too_large": 413,
+    "llm_unavailable": 503,
+    "store_failed": 500,
+}
 
 
 def _artifact_to_response(artifact: ArtifactRecord) -> IngestArtifactResponse:
@@ -126,150 +110,19 @@ def ingest(
         Depends(get_ingestion_metadata_store),
     ],
 ) -> IngestResponse:
-    request_time = _utc_now()
-    content_bytes = body.content.encode("utf-8")
-
-    existing = metadata_store.get_artifact(body.artifact_id)
-    created_at = existing.created_at if existing is not None else request_time
-
-    project_ids = tuple(dict.fromkeys(pid for pid in body.project_ids if pid))
-    revoke_removed_memberships(store, body.artifact_id, project_ids)
-
-    artifact = ArtifactRecord(
-        id=body.artifact_id,
+    document = UploadedDocument(
+        artifact_id=ArtifactId(body.artifact_id),
         filename=body.filename,
-        content_type=_content_type_for_filename(body.filename),
-        source_type="file",
-        size_bytes=len(content_bytes),
-        chunk_count=0,
-        status="processing",
-        created_at=created_at,
-        updated_at=request_time,
-        project_ids=project_ids,
-    )
-    metadata_store.save_artifact(artifact)
-
-    max_length = int(os.getenv("INGEST_MAX_CONTENT_LENGTH", "500000"))
-    if len(body.content) > max_length:
-        detail = f"Content exceeds maximum length of {max_length} characters."
-        store.delete(body.artifact_id, exclude_ids=[])
-        metadata_store.mark_failed(body.artifact_id, detail, _utc_now())
-        raise HTTPException(status_code=413, detail=detail)
-
-    llm_needed_for_chunking = body.semantic_boundaries or body.contextualize
-
-    parsed_chunks = parse(
-        body.filename,
-        content_bytes,
-        llm=llm if llm_needed_for_chunking else None,
+        content=body.content,
+        project_ids=tuple(body.project_ids),
+        source_role=body.source_role,
         semantic_boundaries=body.semantic_boundaries,
         contextualize=body.contextualize,
     )
-
-    if not parsed_chunks:
-        try:
-            store.delete(body.artifact_id, exclude_ids=[])
-        except Exception as exc:
-            detail = f"Failed to delete existing vector chunks: {exc}"
-            metadata_store.mark_failed(body.artifact_id, detail, _utc_now())
-            raise HTTPException(status_code=500, detail=detail) from exc
-        completed_artifact = replace(
-            artifact,
-            chunk_count=0,
-            status="completed",
-            updated_at=_utc_now(),
-        )
-        metadata_store.save_completed_artifact(completed_artifact)
-        return _response_from_records(completed_artifact, [])
-
-    enriched: list[ParsedChunk] = []
-    for chunk in parsed_chunks:
-        if chunk.kind == "image":
-            try:
-                image_bytes = base64.b64decode(
-                    "".join(chunk.content.split()), validate=True
-                )
-            except (binascii.Error, ValueError) as exc:
-                detail = f"Image content for {body.filename!r} is not valid base64."
-                metadata_store.mark_failed(body.artifact_id, detail, _utc_now())
-                raise HTTPException(status_code=422, detail=detail) from exc
-
-            try:
-                caption = llm.caption_image(image_bytes)
-                enriched.append(
-                    ParsedChunk(content=caption, kind="image", metadata=chunk.metadata)
-                )
-            except LLMUnavailableError:
-                logger.warning(
-                    "Vision model unavailable — skipping image chunk in %s",
-                    body.filename,
-                )
-        else:
-            enriched.append(chunk)
-
-    if not enriched:
-        try:
-            store.delete(body.artifact_id, exclude_ids=[])
-        except Exception as exc:
-            detail = f"Failed to delete existing vector chunks: {exc}"
-            metadata_store.mark_failed(body.artifact_id, detail, _utc_now())
-            raise HTTPException(status_code=500, detail=detail) from exc
-
-        completed_artifact = replace(
-            artifact,
-            chunk_count=0,
-            status="completed",
-            updated_at=_utc_now(),
-        )
-        metadata_store.save_completed_artifact(completed_artifact)
-        return _response_from_records(completed_artifact, [])
-
-    source_role = body.source_role or classify_source_role(body.filename)
     try:
-        embeddings = llm.embed_batch([chunk.content for chunk in enriched])
-        chunks = [
-            replace(
-                to_chunk(
-                    chunk,
-                    body.artifact_id,
-                    embedding,
-                    source_role=source_role,
-                    source_system="UPLOAD",
-                    project_ids=body.project_ids,
-                ),
-                position=index,
-            )
-            for index, (chunk, embedding) in enumerate(
-                zip(enriched, embeddings, strict=True)
-            )
-        ]
-    except LLMUnavailableError as exc:
-        detail = str(exc)
-        metadata_store.mark_failed(body.artifact_id, detail, _utc_now())
-        raise HTTPException(status_code=503, detail=detail) from exc
-
-    try:
-        store.add(chunks)
-        store.delete(body.artifact_id, exclude_ids=[chunk.id for chunk in chunks])
-    except Exception as exc:
-        detail = f"Failed to store chunks in vector database: {exc}"
-        metadata_store.mark_failed(body.artifact_id, detail, _utc_now())
-        raise HTTPException(status_code=500, detail=detail) from exc
-
-    completed_artifact = replace(
-        artifact,
-        chunk_count=len(chunks),
-        status="completed",
-        updated_at=_utc_now(),
-    )
-
-    metadata_store.save_completed_artifact(completed_artifact)
-
-    logger.info(
-        "Ingested artifact %s (%d chunks) from %s",
-        body.artifact_id,
-        len(chunks),
-        body.filename,
-    )
-
-    return _response_from_records(completed_artifact, chunks)
+        result = ingest_upload(document, IngestDeps(llm, store, metadata_store))
+    except IngestError as error:
+        raise HTTPException(
+            status_code=_STATUS_FOR_FAILURE[error.kind], detail=error.detail
+        ) from error
+    return _response_from_records(result.artifact, result.chunks)

@@ -1,6 +1,7 @@
 # 2 As-is architecture
 
-> **Status: draft (2026-10-22).** Recovered from `main` at `c188b82` (103 Python files, 18.7k lines in
+> **Status: snapshot (2026-10-22), not updated.** This is the starting point; what has changed since is
+> tracked in [§4](04-migration.md#41-tracked-numbers). Recovered from `main` at `c188b82` (103 Python files, 18.7k lines in
 > `src/`, ~1,000 test functions). Numbers come from the passes described in the
 > [README](README.md#how-the-numbers-were-produced).
 

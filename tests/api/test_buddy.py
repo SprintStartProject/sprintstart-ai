@@ -8,10 +8,10 @@ from fastapi.testclient import TestClient
 
 from api.app import app
 from api.dependencies import get_llm, get_source_state_store, get_store
-from ingestion.source_state_store import SourceStateStore
+from corpus.filters import NO_FILTERED_RESULTS_MESSAGE
+from corpus.types import Chunk
 from llm.errors import LLMUnavailableError
-from rag.filters import NO_FILTERED_RESULTS_MESSAGE
-from rag.types import Chunk
+from store.source_state_store import SourceStateStore
 from tests.conftest import parse_sse_events
 from tests.stubs.app_client import scripted_client
 from tests.stubs.llm import ScriptedLLMClient, StubLLMClient
@@ -55,7 +55,7 @@ def test_the_prior_summary_stands_in_for_the_conversation_older_than_the_window(
     assert body["messages"][0]["role"] == "system"
     assert "old notes" in body["messages"][0]["content"]
     contents = [m["content"] for m in body["messages"]]
-    # Fenced (`onboarding.query_fence`), so each is inside its marker lines.
+    # Fenced (`buddy.query_fence`), so each is inside its marker lines.
     assert any("\nm1\n" in c for c in contents)
     assert any("\nm2\n" in c for c in contents)
 

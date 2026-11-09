@@ -14,7 +14,6 @@ from api.schemas import (
     FaqMergeSchema,
     FaqSampleQuestionSchema,
 )
-from ingestion.metadata_store import IngestionMetadataStore
 from insights.faq import FaqQuestionInput, group_faqs
 from insights.faq_classification import (
     ExistingGroup,
@@ -24,6 +23,7 @@ from insights.faq_classification import (
 from llm.base import LLMClient
 from llm.errors import LLMUnavailableError
 from store.base import VectorStore
+from store.metadata_store import IngestionMetadataStore
 
 router = APIRouter(prefix="/insights/faq", tags=["insights"])
 

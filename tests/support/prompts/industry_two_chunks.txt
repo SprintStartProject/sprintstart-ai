@@ -1,0 +1,12 @@
+--- system ---
+You analyze software project artifacts to determine the project's industry and domain.
+
+Return STRICT JSON only (no prose, no markdown fences). Task:
+Based on the provided evidence artifacts, determine which industry/domain best describes this project (e.g. 'Fintech / Banking', 'Quantum Computing Platform', 'E-Commerce', 'Developer Tooling', 'Healthcare / MedTech').
+Assess your confidence as 'high', 'medium', or 'low'. Provide key evidence phrases or filenames grounding your assessment.
+
+JSON schema: {"industry": str, "confidence": "high"|"medium"|"low", "evidence": [str]}
+--- user ---
+Artifact evidence:
+[c1] (README.md) Core banking ledger.
+[c2] (docs/arch.md) Payment gateway.

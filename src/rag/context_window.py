@@ -1,9 +1,9 @@
 from collections import defaultdict
 
-from rag.filters import matches_retrieval_filters
+from corpus.filters import matches_retrieval_filters
+from corpus.source_filter import SourceExclusions, is_excluded
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk
 from rag.hybrid import to_scored_chunk
-from rag.source_filter import SourceExclusions, is_excluded
-from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 _DEFAULT_RADIUS = 1

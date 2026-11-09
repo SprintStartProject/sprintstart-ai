@@ -1,12 +1,6 @@
 """POST /api/v1/ingest/sync — batch ingest for completed GitHub ingestion runs."""
 
-import base64
-import binascii
 import logging
-import os
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -19,348 +13,60 @@ from api.schemas import (
     RunArtifactsSyncRequest,
     RunArtifactsSyncResponse,
 )
-from ingestion.mapper import to_chunk
-from ingestion.membership import revoke_removed_memberships
-from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
-from ingestion.models import ParsedChunk
-from ingestion.parser import parse
-from ingestion.source_role import classify_source_role
+from corpus.ids import ArtifactId, SourceId
+from ingestion.pipeline.steps import IngestDeps
+from ingestion.pipeline.sync import (
+    DeindexOutcome,
+    SyncedArtifact,
+    SyncedResult,
+    deindex,
+    ingest_all,
+)
 from llm.base import LLMClient
-from llm.errors import LLMUnavailableError
 from store.base import VectorStore
+from store.metadata_store import IngestionMetadataStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Each artifact already batches its own chunks into one embed_batch() call;
-# this bounds how many artifacts are embedded concurrently across the batch,
-# since /ingest/sync otherwise processes them one at a
-# time and a few hundred artifacts can take minutes purely from sequential
-# network round-trips to the embedding API. Kept modest to stay well under
-# typical provider rate limits -- override via INGEST_CONCURRENCY.
-_DEFAULT_INGEST_CONCURRENCY = 8
-_DEFAULT_MAX_BINARY_BYTES = 10 * 1024 * 1024  # 10 MB upload limit
 
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def _source_system_for(artifact: ArtifactRunIngestRequest) -> str:
-    return artifact.source_system or "GITHUB"
-
-
-def _filename_for(artifact: ArtifactRunIngestRequest) -> str:
-    """Derive a filename from the artifact metadata.
-
-    For FILE artifacts from uploads (sourceSystem="UPLOAD"), the original filename
-    is preserved in artifact.title, while sourceId is a raw upload UUID without an
-    extension. Suffix-based dispatch in parse() needs the extension, so we prefer
-    title.
-
-    For FILE artifacts from GitHub, the relative path is embedded in sourceId as
-    the last colon-separated segment, so we preserve it in full (including
-    directory) so that citations remain unambiguous when multiple files share the
-    same basename. All other types use .md.
-    """
-    if artifact.artifact_type == "FILE":
-        if _source_system_for(artifact).upper() == "UPLOAD" and artifact.title:
-            return artifact.title
-
-        # sourceId format: "github:owner/repo:FILE:src/main/App.kt"
-        path_segment = artifact.source_id.rsplit(":", 1)[-1]
-        return path_segment or f"{artifact.artifact_id}.txt"
-
-    slug = artifact.source_id.rsplit(":", 1)[-1]
-    type_prefix = artifact.artifact_type.lower().replace("_", "-")
-    return f"{type_prefix}-{slug}.md"
-
-
-def _connector_source_id_for(artifact: ArtifactRunIngestRequest) -> str | None:
-    """Derive the connector-level source id (e.g. 'owner/repo') from sourceId.
-
-    sourceId format: "github:owner/repo:TYPE:unique" — the connector-level
-    source identity is always the second colon-separated segment, regardless
-    of artifact type. This is distinct from the artifact-level sourceId
-    itself, and from the enclosing connector id (artifact.source_system).
-    """
-    parts = artifact.source_id.split(":", 3)
-    return parts[1] if len(parts) >= 2 else None
-
-
-def _assemble_content(artifact: ArtifactRunIngestRequest) -> str:
-    if artifact.mime and (
-        artifact.mime.startswith("image/") or artifact.mime == "application/pdf"
-    ):
-        return artifact.body_text or ""
-    parts: list[str] = []
-    if artifact.title:
-        parts.append(f"# {artifact.title}")
-    if artifact.body_text:
-        parts.append(artifact.body_text)
-    return "\n\n".join(parts)
-
-
-def _ingest_one(
-    artifact: ArtifactRunIngestRequest,
-    llm: LLMClient,
-    store: VectorStore,
-    metadata_store: IngestionMetadataStore,
-) -> ArtifactRunIngestResponse:
-    request_time = _utc_now()
-    filename = _filename_for(artifact)
-    content = _assemble_content(artifact)
-    content_bytes = content.encode("utf-8")
-
-    max_length = int(os.getenv("INGEST_MAX_CONTENT_LENGTH", "500000"))
-    max_binary_bytes = int(
-        os.getenv("INGEST_MAX_BINARY_BYTES", str(_DEFAULT_MAX_BINARY_BYTES))
-    )
-    is_binary = bool(artifact.mime) and (
-        artifact.mime.startswith("image/") or artifact.mime == "application/pdf"
+def _synced_artifact(request: ArtifactRunIngestRequest) -> SyncedArtifact:
+    return SyncedArtifact(
+        artifact_id=ArtifactId(request.artifact_id),
+        source_id=SourceId(request.source_id),
+        artifact_type=request.artifact_type,
+        project_ids=tuple(request.project_ids),
+        source_system=request.source_system,
+        source_url=request.source_url,
+        title=request.title,
+        body_text=request.body_text,
+        mime=request.mime,
+        language=request.language,
+        source_created_at=request.source_created_at,
+        source_updated_at=request.source_updated_at,
+        state=request.state,
+        has_assignee=request.has_assignee,
+        labels=tuple(request.labels),
     )
 
-    decoded_binary_bytes: bytes | None = None
-    if is_binary and content:
-        try:
-            decoded_binary_bytes = base64.b64decode(
-                "".join(content.split()), validate=True
-            )
-        except (binascii.Error, ValueError):
-            decoded_binary_bytes = None
 
-    existing = metadata_store.get_artifact(artifact.artifact_id)
-    created_at = existing.created_at if existing is not None else request_time
-
-    source_system = _source_system_for(artifact)
-
-    project_ids = tuple(dict.fromkeys(pid for pid in artifact.project_ids if pid))
-    revoke_removed_memberships(store, artifact.artifact_id, project_ids)
-
-    size_bytes = (
-        len(decoded_binary_bytes)
-        if decoded_binary_bytes is not None
-        else len(content_bytes)
-    )
-
-    record = ArtifactRecord(
-        id=artifact.artifact_id,
-        filename=filename,
-        content_type=artifact.mime or "text/plain",
-        source_type=source_system.lower(),
-        size_bytes=size_bytes,
-        chunk_count=0,
-        status="processing",
-        created_at=created_at,
-        updated_at=request_time,
-        source_id=artifact.source_id,
-        source_url=artifact.source_url,
-        artifact_type=artifact.artifact_type,
-        language=artifact.language,
-        project_ids=project_ids,
-        state=artifact.state,
-        has_assignee=artifact.has_assignee,
-        labels=artifact.labels,
-    )
-
-    if is_binary:
-        if (
-            decoded_binary_bytes is not None
-            and len(decoded_binary_bytes) > max_binary_bytes
-        ):
-            logger.warning(
-                "Artifact %s exceeds max binary size (%d > %d bytes), skipping",
-                artifact.artifact_id,
-                len(decoded_binary_bytes),
-                max_binary_bytes,
-            )
-            store.delete(artifact.artifact_id, exclude_ids=[])
-            completed = replace(record, status="completed", updated_at=_utc_now())
-            metadata_store.save_completed_artifact(completed)
-            return ArtifactRunIngestResponse(
-                artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
-            )
-    else:
-        if len(content) > max_length:
-            logger.warning(
-                "Artifact %s exceeds max content length (%d > %d), skipping",
-                artifact.artifact_id,
-                len(content),
-                max_length,
-            )
-            store.delete(artifact.artifact_id, exclude_ids=[])
-            completed = replace(record, status="completed", updated_at=_utc_now())
-            metadata_store.save_completed_artifact(completed)
-            return ArtifactRunIngestResponse(
-                artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
-            )
-
-    metadata_store.save_artifact(record)
-
-    if not content:
-        store.delete(artifact.artifact_id, exclude_ids=[])
-        completed = replace(record, status="completed", updated_at=_utc_now())
-        metadata_store.save_completed_artifact(completed)
-        return ArtifactRunIngestResponse(
-            artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
-        )
-
-    if artifact.mime == "application/pdf":
-        try:
-            content_bytes = base64.b64decode("".join(content.split()), validate=True)
-        except (binascii.Error, ValueError) as exc:
-            detail = f"PDF content for {filename!r} is not valid base64."
-            logger.warning(
-                "PDF content for artifact %s (%s) is not valid base64: %s",
-                artifact.artifact_id,
-                filename,
-                exc,
-            )
-            metadata_store.mark_failed(artifact.artifact_id, detail, _utc_now())
-            return ArtifactRunIngestResponse(
-                artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
-            )
-
-    try:
-        parsed_chunks = parse(filename, content_bytes)
-    except Exception as exc:
-        logger.warning(
-            "Failed to parse artifact %s (%s): %s",
-            artifact.artifact_id,
-            filename,
-            exc,
-        )
-        metadata_store.mark_failed(artifact.artifact_id, str(exc), _utc_now())
-        return ArtifactRunIngestResponse(
-            artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
-        )
-
-    if not parsed_chunks:
-        store.delete(artifact.artifact_id, exclude_ids=[])
-        completed = replace(record, status="completed", updated_at=_utc_now())
-        metadata_store.save_completed_artifact(completed)
-        return ArtifactRunIngestResponse(
-            artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
-        )
-
-    enriched: list[ParsedChunk] = []
-    for chunk in parsed_chunks:
-        if chunk.kind == "image":
-            try:
-                image_bytes = base64.b64decode(
-                    "".join(chunk.content.split()), validate=True
-                )
-            except (binascii.Error, ValueError) as exc:
-                detail = f"Image content for {filename!r} is not valid base64."
-                logger.warning(
-                    "Image content for artifact %s (%s) is not valid base64: %s",
-                    artifact.artifact_id,
-                    filename,
-                    exc,
-                )
-                metadata_store.mark_failed(artifact.artifact_id, detail, _utc_now())
-                return ArtifactRunIngestResponse(
-                    artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
-                )
-
-            try:
-                caption = llm.caption_image(image_bytes)
-                enriched.append(
-                    ParsedChunk(content=caption, kind="image", metadata=chunk.metadata)
-                )
-            except LLMUnavailableError as exc:
-                logger.warning(
-                    "Vision model unavailable for artifact %s (%s): %s",
-                    artifact.artifact_id,
-                    filename,
-                    exc,
-                )
-                metadata_store.mark_failed(artifact.artifact_id, str(exc), _utc_now())
-                return ArtifactRunIngestResponse(
-                    artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
-                )
-        else:
-            enriched.append(chunk)
-
-    if not enriched:
-        store.delete(artifact.artifact_id, exclude_ids=[])
-        completed = replace(record, status="completed", updated_at=_utc_now())
-        metadata_store.save_completed_artifact(completed)
-        return ArtifactRunIngestResponse(
-            artifact_id=artifact.artifact_id, chunk_count=0, status="completed"
-        )
-
-    source_role = classify_source_role(filename)
-
-    try:
-        embeddings = llm.embed_batch([chunk.content for chunk in enriched])
-        chunks = [
-            replace(
-                to_chunk(
-                    chunk,
-                    artifact.artifact_id,
-                    embedding,
-                    source_role=source_role,
-                    source_url=artifact.source_url,
-                    artifact_type=artifact.artifact_type,
-                    language=artifact.language,
-                    source_created_at=artifact.source_created_at,
-                    source_updated_at=artifact.source_updated_at,
-                    source_system=source_system,
-                    project_ids=artifact.project_ids,
-                ),
-                position=index,
-                connector_id=source_system.lower(),
-                connector_source_id=_connector_source_id_for(artifact),
-            )
-            for index, (chunk, embedding) in enumerate(
-                zip(enriched, embeddings, strict=True)
-            )
-        ]
-    except LLMUnavailableError as exc:
-        # Mid-batch LLM outages must not sink the whole request:
-        # record this artifact as failed and let the caller retry it later while
-        # the rest of the batch still gets a chance to ingest.
-        metadata_store.mark_failed(artifact.artifact_id, str(exc), _utc_now())
-        return ArtifactRunIngestResponse(
-            artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
-        )
-
-    store.add(chunks)
-    store.delete(artifact.artifact_id, exclude_ids=[chunk.id for chunk in chunks])
-
-    completed = replace(
-        record,
-        chunk_count=len(chunks),
-        status="completed",
-        updated_at=_utc_now(),
-    )
-    metadata_store.save_completed_artifact(completed)
-
+def _ingest_response(result: SyncedResult) -> ArtifactRunIngestResponse:
     return ArtifactRunIngestResponse(
-        artifact_id=artifact.artifact_id, chunk_count=len(chunks), status="completed"
+        artifact_id=result.artifact_id,
+        chunk_count=result.chunk_count,
+        status=result.status,
     )
 
 
-def _ingest_one_safe(
-    artifact: ArtifactRunIngestRequest,
-    llm: LLMClient,
-    store: VectorStore,
-    metadata_store: IngestionMetadataStore,
-) -> ArtifactRunIngestResponse:
-    try:
-        return _ingest_one(artifact, llm, store, metadata_store)
-    except Exception as exc:
-        logger.exception("Failed to ingest artifact %s", artifact.artifact_id)
-        metadata_store.mark_failed(
-            artifact.artifact_id,
-            f"Unexpected error during batch ingest: {exc}",
-            _utc_now(),
-        )
-        return ArtifactRunIngestResponse(
-            artifact_id=artifact.artifact_id, chunk_count=0, status="failed"
-        )
+def _deindex_response(outcome: DeindexOutcome) -> ArtifactDeindexResponse:
+    if outcome.error is None:
+        return ArtifactDeindexResponse(artifact_id=outcome.artifact_id)
+    return ArtifactDeindexResponse(
+        artifact_id=outcome.artifact_id,
+        status="failed",
+        error_message=outcome.error,
+    )
 
 
 @router.post(
@@ -388,39 +94,18 @@ def ingest_run(
         len(body.artifacts_to_ingest),
         len(body.artifacts_to_deindex),
     )
+    deps = IngestDeps(llm, store, metadata_store)
 
-    deindexed: list[ArtifactDeindexResponse] = []
-    for artifact_id in body.artifacts_to_deindex:
-        try:
-            deleted_count = store.delete(artifact_id, exclude_ids=[])
-            if deleted_count > 0:
-                metadata_store.mark_deindexed(artifact_id, _utc_now())
-        except Exception as exc:
-            # VectorStore.delete leaves a durable tombstone on failure, so
-            # retrieval stays fail-closed while the backend schedules a retry.
-            logger.exception("Failed to deindex artifact %s", artifact_id)
-            deindexed.append(
-                ArtifactDeindexResponse(
-                    artifact_id=artifact_id,
-                    status="failed",
-                    error_message=str(exc),
-                )
-            )
-        else:
-            deindexed.append(ArtifactDeindexResponse(artifact_id=artifact_id))
-
-    results: list[ArtifactRunIngestResponse] = []
-    if body.artifacts_to_ingest:
-        concurrency = min(
-            int(os.getenv("INGEST_CONCURRENCY", str(_DEFAULT_INGEST_CONCURRENCY))),
-            len(body.artifacts_to_ingest),
+    deindexed = [
+        _deindex_response(outcome)
+        for outcome in deindex([ArtifactId(i) for i in body.artifacts_to_deindex], deps)
+    ]
+    results = [
+        _ingest_response(result)
+        for result in ingest_all(
+            [_synced_artifact(a) for a in body.artifacts_to_ingest], deps
         )
-
-        def _ingest(artifact: ArtifactRunIngestRequest) -> ArtifactRunIngestResponse:
-            return _ingest_one_safe(artifact, llm, store, metadata_store)
-
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            results = list(executor.map(_ingest, body.artifacts_to_ingest))
+    ]
 
     failed_deindexes = sum(1 for entry in deindexed if entry.status == "failed")
     logger.info(

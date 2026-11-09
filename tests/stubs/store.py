@@ -1,10 +1,10 @@
 from collections.abc import Iterator
 from dataclasses import replace
 
-from ingestion.source_role import SourceRole
-from rag.filters import encode_project_ids, matches_retrieval_filters
-from rag.source_filter import SourceExclusions, is_excluded
-from rag.types import Chunk, RetrievalFilters, ScoredChunk
+from corpus.filters import encode_project_ids, matches_retrieval_filters
+from corpus.source_filter import SourceExclusions, is_excluded
+from corpus.source_role import SourceRole
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

@@ -1,0 +1,28 @@
+--- system ---
+
+You grade short-text answers to onboarding knowledge-check questions.
+
+For each answer, decide whether it is semantically correct against the
+reference answer:
+
+- Judge the core meaning, not exact wording. Paraphrases, different casing,
+  and typos are fine as long as the key fact/command is right.
+- No extra facts beyond the reference answer are required.
+- If the core claim is wrong, missing, or contradicts the reference, mark it
+  incorrect.
+- 'feedback' is one short sentence shown to the user explaining the verdict.
+
+Return STRICT JSON only (no prose, no markdown fences), correlating results
+by 'id', in the same order as the input:
+{"results": [{"id": str, "correct": bool, "confidence": number 0..1, "feedback": str}]}
+
+--- user ---
+id: q1
+question: Question q1?
+reference_answer: Reference q1
+user_answer: an answer
+
+id: q2
+question: Question q2?
+reference_answer: Reference q2
+user_answer: other

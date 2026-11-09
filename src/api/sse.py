@@ -14,6 +14,23 @@ def sse_event(payload: dict[str, object]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def stream_events(events: Iterable[dict[str, object]], *, what: str) -> Iterator[str]:
+    """Frame a stream of event payloads as SSE.
+
+    An LLM outage or any unexpected failure mid-stream becomes a terminal ``error``
+    event (``type`` and ``message`` only) rather than a truncated body, because the
+    status line is already sent by then. ``what`` names the stream in the log.
+    """
+    try:
+        for event in events:
+            yield sse_event(event)
+    except LLMUnavailableError as exc:
+        yield sse_event({"type": "error", "message": str(exc)})
+    except Exception:
+        logger.exception("Unexpected error in %s", what)
+        yield sse_event({"type": "error", "message": "An unexpected error occurred"})
+
+
 def stream_progress(
     events: Iterable[dict[str, object]], *, operation: str
 ) -> Iterator[str]:

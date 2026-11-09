@@ -2,10 +2,10 @@ import json
 
 import pytest
 
+from corpus.types import Chunk, ScoredChunk
 from llm.base import Message
 from llm.errors import LLMUnavailableError
 from projects.evaluation import _build_prompt, evaluate_industry
-from rag.types import Chunk, ScoredChunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
