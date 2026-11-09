@@ -120,9 +120,8 @@ def matches_retrieval_filters(
         return True
 
     if filters.project_id is not None:
-        # Fail closed: a chunk that carries no project association at all (i.e.
-        # ingested before the backend sent projectIds) is not visible to any
-        # project. Re-sync via /ingest/sync to make it retrievable again.
+        # Fail closed: a chunk without any project association is visible to no project
+        # until it is re-synced via /ingest/sync.
         if filters.project_id not in chunk.project_ids:
             return False
 

@@ -1,105 +1,23 @@
 import json
-from collections.abc import Generator
 
 from llm.base import Message
 from onboarding.phase import assemble_phase, stream_phase
-from onboarding.progress import ProgressEvent
-from rag.types import Chunk, RetrievalFilters
+from rag.types import RetrievalFilters
+from tests.onboarding.phase_fixtures import PROJECT, payload, question, step
+from tests.onboarding.pipeline_fixtures import EMBED, collect, make_llm, make_store
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
-_PROJECT = "p1"
-_EMBED = [1.0] + [0.0] * 767
-
-
-def _collect[T](
-    generator: Generator[ProgressEvent, None, T],
-) -> tuple[list[ProgressEvent], T]:
-    """Drain a progress generator, keeping both the events and the returned value."""
-    events: list[ProgressEvent] = []
-    try:
-        while True:
-            events.append(next(generator))
-    except StopIteration as stop:
-        return events, stop.value
-
-
-def _llm(payload: dict[str, object]) -> StubLLMClient:
-    llm = StubLLMClient(generate_response=json.dumps(payload))
-    llm.embedding = _EMBED
-    return llm
-
-
-def _store(*texts: str) -> StubVectorStore:
-    store = StubVectorStore()
-    store.add(
-        [
-            Chunk(
-                id=f"c{i}",
-                artifact_id=f"a{i}",
-                filename=f"doc{i}.md",
-                text=text,
-                embedding=_EMBED,
-                project_ids=(_PROJECT,),
-            )
-            for i, text in enumerate(texts, start=1)
-        ]
-    )
-    return store
-
-
-def _step(title: str, chunk_ids: list[str] | None = None) -> dict[str, object]:
-    step: dict[str, object] = {
-        "title": title,
-        "description": f"{title} description",
-        "tasks": [],
-        "resources": [],
-        "estimated_minutes": 10,
-        "expected_outcome": f"{title} outcome",
-    }
-    if chunk_ids is not None:
-        step["chunk_ids"] = chunk_ids
-    return step
-
-
-def _question(q_type: str = "SHORT_TEXT", **fields: object) -> dict[str, object]:
-    question: dict[str, object] = {
-        "type": q_type,
-        "question": f"Explain {q_type}",
-    }
-    if q_type == "SHORT_TEXT":
-        question["correct_answer"] = "Because the evidence says so"
-    else:
-        question["options"] = [
-            {"label": "Right", "correct": True},
-            {"label": "Wrong", "correct": False},
-        ]
-    question.update(fields)
-    return question
-
-
-def _payload(
-    steps: list[dict[str, object]] | None = None,
-    questions: list[dict[str, object]] | None = None,
-    **extra: object,
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "steps": steps or [],
-        "questions": questions or [],
-    }
-    payload.update(extra)
-    return payload
-
 
 def test_assembles_grounded_steps_and_questions() -> None:
-    store = _store(
+    store = make_store(
         "the README explains the project and how to run it locally",
         "coding conventions require a PR to pass review",
     )
-    llm = _llm(
-        _payload(
-            steps=[_step("Read the README", ["c1"])],
-            questions=[_question()],
+    llm = make_llm(
+        payload(
+            steps=[step("Read the README", ["c1"])],
+            questions=[question()],
         )
     )
 
@@ -108,31 +26,31 @@ def test_assembles_grounded_steps_and_questions() -> None:
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview for a new member.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
     assert len(outcome.steps) == 1
-    step = outcome.steps[0]
-    assert step.title == "Read the README"
-    assert step.estimated_minutes == 10
+    first = outcome.steps[0]
+    assert first.title == "Read the README"
+    assert first.estimated_minutes == 10
     assert len(outcome.check_questions) == 1
     assert outcome.check_questions[0].question == "Explain SHORT_TEXT"
 
 
 def test_accepts_literal_control_characters_in_generated_strings() -> None:
     """Model output with an unescaped newline remains usable phase content."""
-    payload = _payload(steps=[_step("Read the README", ["c1"])])
-    payload["steps"][0]["description"] = "Read first\nThen run the application"  # type: ignore[index]
-    raw = json.dumps(payload).replace("\\n", "\n")
-    llm = StubLLMClient(generate_response=raw, embedding=_EMBED)
+    generated = payload(steps=[step("Read the README", ["c1"])])
+    generated["steps"][0]["description"] = "Read first\nThen run the application"  # type: ignore[index]
+    raw = json.dumps(generated).replace("\\n", "\n")
+    llm = StubLLMClient(generate_response=raw, embedding=EMBED)
 
     outcome = assemble_phase(
         llm,
-        _store("the README explains the project and how to run it locally"),
+        make_store("the README explains the project and how to run it locally"),
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -142,16 +60,16 @@ def test_accepts_literal_control_characters_in_generated_strings() -> None:
 def test_treats_null_short_text_options_as_an_empty_list() -> None:
     """A model's explicit null for inapplicable options does not skip the phase."""
     outcome = assemble_phase(
-        _llm(
-            _payload(
-                steps=[_step("Read the README", ["c1"])],
-                questions=[_question(options=None)],
+        make_llm(
+            payload(
+                steps=[step("Read the README", ["c1"])],
+                questions=[question(options=None)],
             )
         ),
-        _store("the README explains the project and how to run it locally"),
+        make_store("the README explains the project and how to run it locally"),
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -161,15 +79,15 @@ def test_treats_null_short_text_options_as_an_empty_list() -> None:
 
 def test_accepts_tasks_as_plain_strings() -> None:
     """A compact model task remains usable instead of invalidating the phase."""
-    step = _step("Review the repository", ["c1"])
-    step["tasks"] = ["Open README.md", "Search for meeting references"]
+    compact = step("Review the repository", ["c1"])
+    compact["tasks"] = ["Open README.md", "Search for meeting references"]
 
     outcome = assemble_phase(
-        _llm(_payload(steps=[step])),
-        _store("the README documents the repository structure"),
+        make_llm(payload(steps=[compact])),
+        make_store("the README documents the repository structure"),
         phase_title="Architecture",
         phase_prompt="Review the repository.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -182,11 +100,11 @@ def test_accepts_tasks_as_plain_strings() -> None:
 
 def test_retries_once_when_generated_json_is_invalid() -> None:
     """A transient syntax error gets one correction pass before giving up."""
-    valid = json.dumps(_payload(steps=[_step("Read the README", ["c1"])]))
+    valid = json.dumps(payload(steps=[step("Read the README", ["c1"])]))
 
     class _CorrectingLLM(StubLLMClient):
         def __init__(self) -> None:
-            super().__init__(embedding=_EMBED)
+            super().__init__(embedding=EMBED)
             self.calls: list[list[Message]] = []
 
         def generate(
@@ -198,10 +116,10 @@ def test_retries_once_when_generated_json_is_invalid() -> None:
     llm = _CorrectingLLM()
     outcome = assemble_phase(
         llm,
-        _store("the README explains the project"),
+        make_store("the README explains the project"),
         phase_title="Architecture",
         phase_prompt="Review the repository.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -211,12 +129,12 @@ def test_retries_once_when_generated_json_is_invalid() -> None:
 
 def test_drops_an_ungrounded_step_but_keeps_the_phase() -> None:
     """A step with no source does not ship -- that is the phase's grounding rule."""
-    store = _store("the README explains the project and how to run it locally")
-    llm = _llm(
-        _payload(
+    store = make_store("the README explains the project and how to run it locally")
+    llm = make_llm(
+        payload(
             steps=[
-                _step("Read the README", ["c1"]),
-                _step("Invented step", ["nope"]),
+                step("Read the README", ["c1"]),
+                step("Invented step", ["nope"]),
             ]
         )
     )
@@ -226,7 +144,7 @@ def test_drops_an_ungrounded_step_but_keeps_the_phase() -> None:
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -236,35 +154,35 @@ def test_drops_an_ungrounded_step_but_keeps_the_phase() -> None:
 
 def test_resolves_dependency_edges_between_grounded_items() -> None:
     """blocked_by keys survive only when they name an earlier kept item."""
-    store = _store(
+    store = make_store(
         "the README explains the project and how to run it locally",
         "a build requires the environment to be configured first",
     )
-    readme = _step("Read the README", ["c1"])
+    readme = step("Read the README", ["c1"])
     readme["key"] = "s1"
-    setup = _step("Set up the environment", ["c2"])
+    setup = step("Set up the environment", ["c2"])
     setup["key"] = "s2"
     setup["blocked_by"] = ["s1", "missing"]
-    ghost = _step("Ungrounded step", ["nope"])
+    ghost = step("Ungrounded step", ["nope"])
     ghost["key"] = "s3"
-    later = _step("Depends on a dropped step", ["c1"])
+    later = step("Depends on a dropped step", ["c1"])
     later["key"] = "s4"
     later["blocked_by"] = ["s3", "s2"]
-    selfie = _step("Self-referencing step", ["c1"])
+    selfie = step("Self-referencing step", ["c1"])
     selfie["key"] = "s5"
     selfie["blocked_by"] = ["s5"]
 
     outcome = assemble_phase(
-        _llm(
-            _payload(
+        make_llm(
+            payload(
                 steps=[readme, setup, ghost, later, selfie],
-                questions=[_question(key="q1", blocked_by=["s1", "unknown"])],
+                questions=[question(key="q1", blocked_by=["s1", "unknown"])],
             )
         ),
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -283,27 +201,27 @@ def test_dependency_edges_survive_end_to_end() -> None:
     (read the README -> run its build -> follow the conventions), the phase
     should expose it as dependency edges rather than dropping them all.
     """
-    store = _store(
+    store = make_store(
         "the README explains the project and how to run it locally",
         "the build only works once the README's environment setup is done",
         "coding conventions live in CONTRIBUTING.md",
     )
-    readme = _step("Read the README", ["c1"])
+    readme = step("Read the README", ["c1"])
     readme["key"] = "s1"
-    build = _step("Run the build", ["c2"])
+    build = step("Run the build", ["c2"])
     build["key"] = "s2"
     build["blocked_by"] = ["s1"]
-    conventions = _step("Follow the conventions", ["c3"])
+    conventions = step("Follow the conventions", ["c3"])
     conventions["key"] = "s3"
     conventions["blocked_by"] = ["s2"]
 
     outcome = assemble_phase(
-        _llm(
-            _payload(
+        make_llm(
+            payload(
                 steps=[readme, build, conventions],
                 questions=[
-                    _question(key="q1", blocked_by=["s1"]),
-                    _question(key="q2", blocked_by=["s3"]),
+                    question(key="q1", blocked_by=["s1"]),
+                    question(key="q2", blocked_by=["s3"]),
                 ],
             )
         ),
@@ -312,7 +230,7 @@ def test_dependency_edges_survive_end_to_end() -> None:
         phase_prompt=(
             "Guide a new member from reading the README to following the conventions."
         ),
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -328,14 +246,14 @@ def test_dependency_edges_survive_end_to_end() -> None:
 
 def test_drops_invalid_questions_and_keeps_the_valid_ones() -> None:
     """A quiz with a flawed question is not thrown away wholesale."""
-    store = _store("project security conventions are documented in CONTRIBUTING.md")
-    llm = _llm(
-        _payload(
-            steps=[_step("Follow the conventions", ["c1"])],
+    store = make_store("project security conventions are documented in CONTRIBUTING.md")
+    llm = make_llm(
+        payload(
+            steps=[step("Follow the conventions", ["c1"])],
             questions=[
-                _question(),
+                question(),
                 # All-correct MULTIPLE_CHOICE discriminates nothing: dropped.
-                _question(
+                question(
                     q_type="MULTIPLE_CHOICE",
                     question="Pick all",
                     options=[
@@ -352,7 +270,7 @@ def test_drops_invalid_questions_and_keeps_the_valid_ones() -> None:
         store,
         phase_title="Conventions",
         phase_prompt="Cover the security conventions.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "assembled"
@@ -362,14 +280,14 @@ def test_drops_invalid_questions_and_keeps_the_valid_ones() -> None:
 
 def test_skipped_when_the_corpus_is_empty() -> None:
     store = StubVectorStore()
-    llm = _llm({})
+    llm = make_llm({})
 
     outcome = assemble_phase(
         llm,
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "skipped"
@@ -377,15 +295,15 @@ def test_skipped_when_the_corpus_is_empty() -> None:
 
 
 def test_skipped_when_every_step_is_ungrounded() -> None:
-    store = _store("the README explains the project")
-    llm = _llm(_payload(steps=[_step("Invented step", ["missing"])]))
+    store = make_store("the README explains the project")
+    llm = make_llm(payload(steps=[step("Invented step", ["missing"])]))
 
     outcome = assemble_phase(
         llm,
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
 
     assert outcome.status == "skipped"
@@ -395,24 +313,24 @@ def test_skipped_when_every_step_is_ungrounded() -> None:
 
 def test_unchanged_when_the_corpus_fingerprint_matches() -> None:
     """Idempotency: an unchanged corpus short-circuits retrieval and generation."""
-    store = _store("the README explains the project and how to run it locally")
+    store = make_store("the README explains the project and how to run it locally")
     first = assemble_phase(
-        _llm(_payload(steps=[_step("Read the README", ["c1"])])),
+        make_llm(payload(steps=[step("Read the README", ["c1"])])),
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
     )
     assert first.status == "assembled"
     fingerprint = first.provenance.corpus_fingerprint
     assert fingerprint is not None
 
     second = assemble_phase(
-        _llm(json.dumps({"steps": []})),
+        make_llm(json.dumps({"steps": []})),
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         last_fingerprint=fingerprint,
     )
 
@@ -420,16 +338,16 @@ def test_unchanged_when_the_corpus_fingerprint_matches() -> None:
 
 
 def test_stream_emits_item_per_grounded_step_then_terminal_done() -> None:
-    store = _store("the README explains the project and how to run it locally")
-    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+    store = make_store("the README explains the project and how to run it locally")
+    llm = make_llm(payload(steps=[step("Read the README", ["c1"])]))
 
-    events, outcome = _collect(
+    events, outcome = collect(
         stream_phase(
             llm,
             store,
             phase_title="Project Overview",
             phase_prompt="Generate an overview.",
-            project_id=_PROJECT,
+            project_id=PROJECT,
         )
     )
 
@@ -457,16 +375,16 @@ def test_phase_query_and_prompt_with_industry() -> None:
     )
     assert query == expected_query
 
-    store = _store("evidence text")
+    store = make_store("evidence text")
     messages = _build_prompt(
         title="Architecture",
         description="Core services",
         prompt="Explain backend structure",
         chunks=store.query(
-            _EMBED,
+            EMBED,
             top_k=1,
             min_score=0.0,
-            filters=RetrievalFilters(project_id=_PROJECT),
+            filters=RetrievalFilters(project_id=PROJECT),
         ),
         industry="Fintech / Banking",
     )
@@ -485,16 +403,16 @@ def test_phase_query_and_prompt_backward_compat_when_industry_none() -> None:
     )
     assert query == "Architecture Core services Explain backend structure"
 
-    store = _store("evidence text")
+    store = make_store("evidence text")
     messages = _build_prompt(
         title="Architecture",
         description="Core services",
         prompt="Explain backend structure",
         chunks=store.query(
-            _EMBED,
+            EMBED,
             top_k=1,
             min_score=0.0,
-            filters=RetrievalFilters(project_id=_PROJECT),
+            filters=RetrievalFilters(project_id=PROJECT),
         ),
         industry=None,
     )
@@ -503,15 +421,15 @@ def test_phase_query_and_prompt_backward_compat_when_industry_none() -> None:
 
 
 def test_assemble_phase_with_industry() -> None:
-    store = _store("the README explains the project and how to run it locally")
-    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+    store = make_store("the README explains the project and how to run it locally")
+    llm = make_llm(payload(steps=[step("Read the README", ["c1"])]))
 
     outcome = assemble_phase(
         llm,
         store,
         phase_title="Project Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         industry="Healthcare",
     )
 
@@ -520,15 +438,15 @@ def test_assemble_phase_with_industry() -> None:
 
 
 def test_fingerprint_includes_industry() -> None:
-    store = _store("the README explains the project and how to run it locally")
-    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+    store = make_store("the README explains the project and how to run it locally")
+    llm = make_llm(payload(steps=[step("Read the README", ["c1"])]))
 
     res_none = assemble_phase(
         llm,
         store,
         phase_title="Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         industry=None,
     )
     res_blank = assemble_phase(
@@ -536,7 +454,7 @@ def test_fingerprint_includes_industry() -> None:
         store,
         phase_title="Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         industry="   ",
     )
     res_fintech = assemble_phase(
@@ -544,7 +462,7 @@ def test_fingerprint_includes_industry() -> None:
         store,
         phase_title="Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         industry="Fintech",
     )
     res_healthcare = assemble_phase(
@@ -552,7 +470,7 @@ def test_fingerprint_includes_industry() -> None:
         store,
         phase_title="Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         industry="Healthcare",
     )
 
@@ -569,15 +487,15 @@ def test_fingerprint_includes_industry() -> None:
 
 
 def test_changing_industry_invalidates_fingerprint_cache() -> None:
-    store = _store("the README explains the project and how to run it locally")
-    llm = _llm(_payload(steps=[_step("Read the README", ["c1"])]))
+    store = make_store("the README explains the project and how to run it locally")
+    llm = make_llm(payload(steps=[step("Read the README", ["c1"])]))
 
     first = assemble_phase(
         llm,
         store,
         phase_title="Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         industry="Fintech",
     )
     assert first.status == "assembled"
@@ -586,11 +504,11 @@ def test_changing_industry_invalidates_fingerprint_cache() -> None:
 
     # Same industry + same last_fingerprint -> unchanged
     same_industry = assemble_phase(
-        _llm(json.dumps({"steps": []})),
+        make_llm(json.dumps({"steps": []})),
         store,
         phase_title="Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         last_fingerprint=fp_fintech,
         industry="Fintech",
     )
@@ -602,7 +520,7 @@ def test_changing_industry_invalidates_fingerprint_cache() -> None:
         store,
         phase_title="Overview",
         phase_prompt="Generate an overview.",
-        project_id=_PROJECT,
+        project_id=PROJECT,
         last_fingerprint=fp_fintech,
         industry="Healthcare",
     )

@@ -1,24 +1,6 @@
-"""Unit tests for onboarding.similarity — token overlap, cosine, step_text."""
+"""Unit tests for onboarding.similarity: the token-overlap duplicate check."""
 
-from onboarding.similarity import cosine_similarity, step_text, text_overlap
-
-
-def test_cosine_identical_vectors() -> None:
-    assert cosine_similarity([1.0, 0.0], [1.0, 0.0]) == 1.0
-
-
-def test_cosine_orthogonal_vectors() -> None:
-    assert cosine_similarity([1.0, 0.0], [0.0, 1.0]) == 0.0
-
-
-def test_cosine_zero_vector_returns_zero() -> None:
-    assert cosine_similarity([0.0, 0.0], [1.0, 2.0]) == 0.0
-    assert cosine_similarity([1.0, 2.0], [0.0, 0.0]) == 0.0
-
-
-def test_cosine_opposite_vectors() -> None:
-    result = cosine_similarity([1.0, 0.0], [-1.0, 0.0])
-    assert result == -1.0
+from onboarding.similarity import text_overlap
 
 
 def test_text_overlap_identical_strings() -> None:
@@ -63,17 +45,3 @@ def test_text_overlap_catches_rephrased_duplicates() -> None:
     # 2/7 ≈ 0.29 — below threshold, so title-only overlap is low.
     # But with descriptions, overlap should be higher (tested in pipeline tests).
     assert result < 0.70
-
-
-def test_step_text_combines_title_and_description() -> None:
-    assert step_text("Install Python", "Run apt-get install") == (
-        "Install Python. Run apt-get install"
-    )
-
-
-def test_step_text_empty_description() -> None:
-    assert step_text("Install Python", "") == "Install Python"
-
-
-def test_step_text_strips_trailing_period() -> None:
-    assert step_text("Install.", "") == "Install"

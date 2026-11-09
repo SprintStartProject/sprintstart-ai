@@ -1,0 +1,21 @@
+# Size, complexity and exception limits for Python. Checked by scripts/quality/ruff_limits.py against
+# ruff-limits-baseline.json, which may only shrink.
+extend = "ruff.toml"
+
+[lint]
+select = [
+    "C901",     # cyclomatic complexity
+    "PLR0912",  # branches
+    "PLR0913",  # arguments
+    "PLR0915",  # statements: function length
+    "BLE001",   # blind `except Exception`
+]
+ignore = []
+
+[lint.mccabe]
+max-complexity = 10
+
+[lint.pylint]
+max-args = 4
+max-branches = 10
+max-statements = 25

@@ -1,0 +1,29 @@
+--- system ---
+You are authoring one phase of a software-team onboarding path from the team's own knowledge base. The phase already has a title and an author's instruction (the prompt) prescribing what it should teach. The evidence below is the material this team actually has; produce the phase's content so a new member can complete it in this project.
+
+Return STRICT JSON only (no prose, no markdown fences):
+{"steps": [{"key": str, "title": str, "description": str, "tasks": [{"title": str, "description": str}], "resources": [{"title": str, "url": str}], "estimated_minutes": int|null, "expected_outcome": str, "chunk_ids": [str], "blocked_by": [str]}], "questions": [{"key": str, "type": "MULTIPLE_CHOICE"|"SHORT_TEXT", "question": str, "explanation": str, "correct_answer": str|null, "options": [{"label": str, "correct": bool}], "blocked_by": [str]}]}
+
+Rules:
+1. Make every step actionable and specific to this project: exact paths, exact commands, exact conventions. Generic software advice is worse than nothing because it costs the newcomer attention.
+2. EVERY step MUST reference at least one chunk id from the evidence; do not invent sources. A step that cites nothing will be dropped.
+3. Write 1-8 steps, ordered as a newcomer would do them, covering exactly what the prompt prescribes.
+4. Under each step give 0-4 small concrete tasks and at most 2 resources lifted from the evidence (a resource url must come from the evidence, if any).
+5. 'estimated_minutes' is the time a newcomer should expect to spend; 'expected_outcome' says what they can do once the step is done.
+6. Write 2-4 short knowledge-check questions about this phase's content, measuring understanding rather than recall. MULTIPLE_CHOICE: 3-4 options, exactly one correct (never mark most or all correct), plausible misconceptions as distractors, and an explanation. SHORT_TEXT: ask the learner to explain a consequence, trade-off or reasoning in their own words, with a non-empty 'correct_answer' capturing the expected idea and 'options' set to [].
+7. Base everything strictly on the evidence below; never invent facts it does not support. If the evidence says nothing about part of the prompt, omit that part — an honest gap beats invented content.
+8. Dependency edges. Give every step and question a short, unique key (e.g. "s1", "q2"). Set "blocked_by" to the keys of the items a newcomer must finish first for this one to make sense — e.g. read the README before running its build command, understand the domain before reviewing its conventions, or answer a knowledge check after the step that teaches it. Leave "blocked_by" empty only when the item is genuinely independent and can be done at any point; never use it just to restate the normal reading order, and only reference keys you defined.
+
+--- user ---
+Phase: Architecture
+
+Author's prompt:
+Walk the newcomer through the repository layout.
+
+Evidence:
+  [c1] (doc1.md | FILE) the README explains the repository layout
+  [c2] (doc2.md | FILE) the reports module lives in src/api/reports.py
+--- assistant ---
+not json at all
+--- user ---
+That response could not be validated: invalid phase output: no JSON object found in LLM output. Return the same grounded content again as one valid JSON object matching the schema exactly. Task entries must be objects like {"title": "...", "description": "..."}. Return JSON only, with all quotes escaped and all commas present.

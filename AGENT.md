@@ -62,15 +62,12 @@ Run lint + type-check + tests before considering a change done.
   messages are serialised, since caching matches on exact bytes.
 - **`store/`** — `VectorStore` interface (`base.py`), `chroma_store.py`
   implementation.
-- **`onboarding/`** (from #98) — deterministic staged pipeline for
-  generating personalized onboarding paths, not a free agentic loop:
-  `pipeline.py` runs select → filter → retrieve → synthesize → validate →
-  emit, yielding `StageProgress` markers the API turns into SSE events.
-  `blueprints.py` loads/selects blueprint content (from the top-level
-  `blueprints/drafts/` and `blueprints/versions/` dirs); `synthesis.py` adds
-  the LLM-personalized layer; `quality.py` gates the result (schema,
-  coverage, grounding, human-owned invariants) and falls back to
-  blueprint-only output if the LLM output fails a gate.
+- **`onboarding/`** — Deterministic staged assembly jobs (not agentic): phase
+  content (`phase.py`), task orientation (`orientation.py`), diagrams
+  (`diagram.py`) and starter work (`starter_work.py`). Each gates on the corpus
+  fingerprint, retrieves, generates with one correction round and keeps only
+  what the evidence grounds, emitting progress events (`progress.py`) the API
+  relays as SSE. The service is stateless; the backend persists the results.
 
 ## Conventions
 

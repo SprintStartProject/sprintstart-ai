@@ -1,111 +1,48 @@
-import json
-from collections.abc import Generator
-
 from onboarding.orientation import assemble_orientation, stream_orientation
 from onboarding.orientation_models import OrientationOutcome
-from onboarding.progress import ProgressEvent
 from rag.types import Chunk
+from tests.onboarding.orientation_fixtures import PIDS, TITLE, payload, section
+from tests.onboarding.pipeline_fixtures import EMBED, collect, make_llm, make_store
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 
 
-def _collect[T](
-    generator: Generator[ProgressEvent, None, T],
-) -> tuple[list[ProgressEvent], T]:
-    """Drain a progress generator, keeping both the events and the returned value."""
-    events: list[ProgressEvent] = []
-    try:
-        while True:
-            events.append(next(generator))
-    except StopIteration as stop:
-        return events, stop.value
-
-
-_EMBED = [1.0] + [0.0] * 767
-_TITLE = "Fix the stale cache header on /api/v1/reports"
-_PIDS = frozenset({"p1"})
-
-
-def _llm(payload: dict[str, object]) -> StubLLMClient:
-    llm = StubLLMClient(generate_response=json.dumps(payload))
-    llm.embedding = _EMBED
-    return llm
-
-
-def _store(*texts: str) -> StubVectorStore:
-    store = StubVectorStore()
-    store.add(
-        [
-            Chunk(
-                id=f"c{i}",
-                artifact_id=f"a{i}",
-                filename=f"doc{i}.md",
-                text=text,
-                embedding=_EMBED,
-                project_ids=("p1",),
-            )
-            for i, text in enumerate(texts, start=1)
-        ]
-    )
-    return store
-
-
-def _section(
-    step: str, title: str, chunk_ids: list[str] | None = None, body: str | None = None
-) -> dict[str, object]:
-    section: dict[str, object] = {
-        "step": step,
-        "title": title,
-        "body": body if body is not None else f"{title} body",
-    }
-    if chunk_ids is not None:
-        section["chunk_ids"] = chunk_ids
-    return section
-
-
-def _payload(*sections: dict[str, object], **extra: object) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "summary": "What you need to change the reports cache header.",
-        "sections": list(sections),
-    }
-    payload.update(extra)
-    return payload
-
-
 def test_assembles_a_step_segmented_packet_with_the_sources_it_drew_on() -> None:
-    store = _store(
+    store = make_store(
         "run make dev to start the service locally with the reports cache",
         "pull requests need one review and a green pipeline before merge",
     )
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Run it locally", ["c1"]),
-            _section("OPEN_THE_PR", "How review works here", ["c2"]),
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Run it locally", ["c1"]),
+            section("OPEN_THE_PR", "How review works here", ["c2"]),
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.status == "assembled"
     packet = outcome.packet
     assert packet is not None
     assert [s.step for s in packet.sections] == ["SET_UP", "OPEN_THE_PR"]
-    assert packet.task_title == _TITLE
+    assert packet.task_title == TITLE
     # The packet states which existing material it stands on.
     assert {s.filename for s in packet.sources} == {"doc1.md", "doc2.md"}
 
 
 def test_sections_are_ordered_by_step_not_by_the_model() -> None:
     """A hire must never be handed "open the PR" before "find the code"."""
-    store = _store("pull request review policy", "the reports module lives in src/api")
-    llm = _llm(
-        _payload(
-            _section("OPEN_THE_PR", "Review", ["c1"]),
-            _section("FIND_THE_CODE", "Where it lives", ["c2"]),
+    store = make_store(
+        "pull request review policy", "the reports module lives in src/api"
+    )
+    llm = make_llm(
+        payload(
+            section("OPEN_THE_PR", "Review", ["c1"]),
+            section("FIND_THE_CODE", "Where it lives", ["c2"]),
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.packet is not None
     assert [s.step for s in outcome.packet.sections] == ["FIND_THE_CODE", "OPEN_THE_PR"]
@@ -113,15 +50,15 @@ def test_sections_are_ordered_by_step_not_by_the_model() -> None:
 
 def test_drops_an_ungrounded_section_but_keeps_the_packet() -> None:
     """A statement with no source does not ship -- that is the whole rule."""
-    store = _store("run make dev to start the service locally")
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Grounded", ["c1"]),
-            _section("CHECK_LOCALLY", "Invented", ["nope"]),
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Grounded", ["c1"]),
+            section("CHECK_LOCALLY", "Invented", ["nope"]),
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.packet is not None
     assert [s.title for s in outcome.packet.sections] == ["Grounded"]
@@ -130,30 +67,30 @@ def test_drops_an_ungrounded_section_but_keeps_the_packet() -> None:
 
 def test_no_section_kind_is_exempt_from_citing() -> None:
     """Unlike a module's TASK/CHECK pages, every packet section is a claim."""
-    store = _store("run make dev to start the service locally")
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Grounded", ["c1"]),
-            _section("MAKE_THE_CHANGE", "Uncited", []),
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Grounded", ["c1"]),
+            section("MAKE_THE_CHANGE", "Uncited", []),
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.packet is not None
     assert [s.step for s in outcome.packet.sections] == ["SET_UP"]
 
 
 def test_drops_a_section_of_a_step_that_does_not_exist() -> None:
-    store = _store("run make dev to start the service locally")
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Grounded", ["c1"]),
-            _section("DEPLOY_IT", "Not a step of ours", ["c1"]),
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Grounded", ["c1"]),
+            section("DEPLOY_IT", "Not a step of ours", ["c1"]),
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.packet is not None
     assert [s.step for s in outcome.packet.sections] == ["SET_UP"]
@@ -163,30 +100,30 @@ def test_drops_a_section_of_a_step_that_does_not_exist() -> None:
 def test_collapses_sources_that_restate_each_other() -> None:
     """The README and the wiki saying the same thing is load paid for twice."""
     duplicate = "run make dev to start the reports service locally on port 8080"
-    store = _store(
+    store = make_store(
         duplicate, duplicate + " .", "pull requests need one approving review"
     )
-    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    llm = make_llm(payload(section("SET_UP", "Run it locally", ["c1"])))
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.chunks_collapsed == 1
     assert outcome.chunks_retrieved == 2
 
 
 def test_collapses_two_sections_of_a_step_that_say_the_same_thing() -> None:
-    store = _store("run make dev to start the service locally on port 8080")
+    store = make_store("run make dev to start the service locally on port 8080")
     body = "Run `make dev` to start the service locally on port 8080."
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Run it", ["c1"], body=body),
-            _section(
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Run it", ["c1"], body=body),
+            section(
                 "SET_UP", "Starting the service", ["c1"], body=body + " Then wait."
             ),
         )
     )
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.packet is not None
     assert [s.title for s in outcome.packet.sections] == ["Run it"]
@@ -195,10 +132,10 @@ def test_collapses_two_sections_of_a_step_that_say_the_same_thing() -> None:
 
 def test_skips_when_every_section_is_ungrounded() -> None:
     """An empty state, never a fabricated packet."""
-    store = _store("run make dev to start the service locally")
-    llm = _llm(_payload(_section("SET_UP", "Invented", ["nope"])))
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(payload(section("SET_UP", "Invented", ["nope"])))
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.status == "skipped"
     assert outcome.packet is None
@@ -206,7 +143,7 @@ def test_skips_when_every_section_is_ungrounded() -> None:
 
 def test_empty_corpus_is_skipped_not_an_empty_packet() -> None:
     outcome = assemble_orientation(
-        _llm(_payload()), StubVectorStore(), task_title=_TITLE, project_ids=_PIDS
+        make_llm(payload()), StubVectorStore(), task_title=TITLE, project_ids=PIDS
     )
 
     assert outcome.status == "skipped"
@@ -215,11 +152,11 @@ def test_empty_corpus_is_skipped_not_an_empty_packet() -> None:
 
 
 def test_unparseable_output_is_skipped_not_a_half_packet() -> None:
-    store = _store("run make dev to start the service locally")
+    store = make_store("run make dev to start the service locally")
     llm = StubLLMClient(generate_response="I'm afraid I can't do that.")
-    llm.embedding = _EMBED
+    llm.embedding = EMBED
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.status == "skipped"
     assert outcome.packet is None
@@ -227,8 +164,8 @@ def test_unparseable_output_is_skipped_not_a_half_packet() -> None:
 
 def test_broken_json_is_corrected_once_rather_than_losing_the_packet() -> None:
     """A local model's one missing quote used to cost the hire the whole packet."""
-    store = _store("run make dev to start the service locally")
-    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(payload(section("SET_UP", "Run it locally", ["c1"])))
     good = llm.generate
     replies = iter(['{"summary": "cut off', None])
     seen: list[list[object]] = []
@@ -240,7 +177,7 @@ def test_broken_json_is_corrected_once_rather_than_losing_the_packet() -> None:
 
     llm.generate = flaky  # type: ignore[method-assign]
 
-    outcome = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    outcome = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert outcome.status == "assembled"
     # The second call carries the broken reply and asks for it corrected.
@@ -249,16 +186,16 @@ def test_broken_json_is_corrected_once_rather_than_losing_the_packet() -> None:
 
 
 def test_unchanged_corpus_serves_the_cached_packet() -> None:
-    store = _store("run make dev to start the service locally")
-    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(payload(section("SET_UP", "Run it locally", ["c1"])))
 
-    first = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    first = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
     assert first.provenance is not None
     again = assemble_orientation(
         llm,
         store,
-        task_title=_TITLE,
-        project_ids=_PIDS,
+        task_title=TITLE,
+        project_ids=PIDS,
         last_fingerprint=first.provenance.corpus_fingerprint,
     )
 
@@ -267,10 +204,10 @@ def test_unchanged_corpus_serves_the_cached_packet() -> None:
 
 
 def test_a_moved_corpus_regenerates_rather_than_serving_stale_guidance() -> None:
-    store = _store("run make dev to start the service locally")
-    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(payload(section("SET_UP", "Run it locally", ["c1"])))
 
-    first = assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    first = assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
     assert first.provenance is not None
 
     store.add(
@@ -280,7 +217,7 @@ def test_a_moved_corpus_regenerates_rather_than_serving_stale_guidance() -> None
                 artifact_id="a9",
                 filename="CONTRIBUTING.md",
                 text="the dev command is now `just dev`, make dev was removed",
-                embedding=_EMBED,
+                embedding=EMBED,
                 project_ids=("p1",),
             )
         ]
@@ -288,8 +225,8 @@ def test_a_moved_corpus_regenerates_rather_than_serving_stale_guidance() -> None
     again = assemble_orientation(
         llm,
         store,
-        task_title=_TITLE,
-        project_ids=_PIDS,
+        task_title=TITLE,
+        project_ids=PIDS,
         last_fingerprint=first.provenance.corpus_fingerprint,
     )
 
@@ -298,8 +235,8 @@ def test_a_moved_corpus_regenerates_rather_than_serving_stale_guidance() -> None
 
 def test_assembly_is_sampled_deterministically() -> None:
     """Reloading the page must not hand a hire different instructions."""
-    store = _store("run make dev to start the service locally")
-    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(payload(section("SET_UP", "Run it locally", ["c1"])))
     temperatures: list[object] = []
     inner = llm.generate
 
@@ -309,15 +246,15 @@ def test_assembly_is_sampled_deterministically() -> None:
 
     llm.generate = recording  # type: ignore[method-assign]
 
-    assemble_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    assemble_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
 
     assert temperatures == [0.0]
 
 
 def test_the_task_and_its_paths_reach_the_prompt() -> None:
-    store = _store("the reports module lives in src/api/reports.py")
+    store = make_store("the reports module lives in src/api/reports.py")
     prompts: list[str] = []
-    llm = _llm(_payload(_section("FIND_THE_CODE", "Where it lives", ["c1"])))
+    llm = make_llm(payload(section("FIND_THE_CODE", "Where it lives", ["c1"])))
     inner = llm.generate
 
     def recording(messages: list[dict[str, str]], **kwargs: object) -> str:
@@ -329,14 +266,14 @@ def test_the_task_and_its_paths_reach_the_prompt() -> None:
     assemble_orientation(
         llm,
         store,
-        task_title=_TITLE,
-        project_ids=_PIDS,
+        task_title=TITLE,
+        project_ids=PIDS,
         task_body="The header is computed once at boot.",
         labels=["good first issue"],
         touched_paths=["src/api/reports.py"],
     )
 
-    assert _TITLE in prompts[0]
+    assert TITLE in prompts[0]
     assert "good first issue" in prompts[0]
     assert "src/api/reports.py" in prompts[0]
 
@@ -354,19 +291,19 @@ def test_takes_nothing_about_the_hire() -> None:
 
 
 def test_stream_emits_per_step_stages_grounded_items_and_a_done() -> None:
-    store = _store(
+    store = make_store(
         "run make dev to start the service locally with the reports cache",
         "pull requests need one review and a green pipeline before merge",
     )
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Run it locally", ["c1"]),
-            _section("OPEN_THE_PR", "How review works here", ["c2"]),
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Run it locally", ["c1"]),
+            section("OPEN_THE_PR", "How review works here", ["c2"]),
         )
     )
 
-    events, outcome = _collect(
-        stream_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    events, outcome = collect(
+        stream_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
     )
 
     # One retrieval stage per step of the path to a PR.
@@ -386,16 +323,16 @@ def test_stream_emits_per_step_stages_grounded_items_and_a_done() -> None:
 def test_stream_never_emits_an_ungrounded_section_as_an_item() -> None:
     # A section citing nothing is dropped, so it must never appear as a live item --
     # that is the whole promise of an `item` event.
-    store = _store("run make dev to start the service locally")
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Run it locally", ["c1"]),
-            _section("MAKE_THE_CHANGE", "Ungrounded advice", []),
+    store = make_store("run make dev to start the service locally")
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Run it locally", ["c1"]),
+            section("MAKE_THE_CHANGE", "Ungrounded advice", []),
         )
     )
 
-    events, _ = _collect(
-        stream_orientation(llm, store, task_title=_TITLE, project_ids=_PIDS)
+    events, _ = collect(
+        stream_orientation(llm, store, task_title=TITLE, project_ids=PIDS)
     )
 
     items = [e for e in events if e["type"] == "item"]
@@ -405,20 +342,22 @@ def test_stream_never_emits_an_ungrounded_section_as_an_item() -> None:
 def test_streaming_result_equals_the_non_streaming_packet() -> None:
     # The stream is a view of the same computation: its final packet must be what
     # the plain call returns (provenance timestamps aside).
-    store = _store(
+    store = make_store(
         "run make dev to start the service locally with the reports cache",
         "the reports module lives in src/api/reports.py",
     )
-    payload = _payload(
-        _section("SET_UP", "Run it locally", ["c1"]),
-        _section("FIND_THE_CODE", "Where it lives", ["c2"]),
+    generated = payload(
+        section("SET_UP", "Run it locally", ["c1"]),
+        section("FIND_THE_CODE", "Where it lives", ["c2"]),
     )
 
-    _, streamed = _collect(
-        stream_orientation(_llm(payload), store, task_title=_TITLE, project_ids=_PIDS)
+    _, streamed = collect(
+        stream_orientation(
+            make_llm(generated), store, task_title=TITLE, project_ids=PIDS
+        )
     )
     synchronous: OrientationOutcome = assemble_orientation(
-        _llm(payload), store, task_title=_TITLE, project_ids=_PIDS
+        make_llm(generated), store, task_title=TITLE, project_ids=PIDS
     )
 
     assert streamed.status == synchronous.status
@@ -426,9 +365,9 @@ def test_streaming_result_equals_the_non_streaming_packet() -> None:
 
 
 def test_an_empty_corpus_streams_a_skipped_done_not_an_error() -> None:
-    events, outcome = _collect(
+    events, outcome = collect(
         stream_orientation(
-            _llm(_payload()), StubVectorStore(), task_title=_TITLE, project_ids=_PIDS
+            make_llm(payload()), StubVectorStore(), task_title=TITLE, project_ids=PIDS
         )
     )
 
@@ -447,7 +386,7 @@ def test_orientation_scopes_to_requested_projects() -> None:
                 artifact_id="a1",
                 filename="p1_doc.md",
                 text="run make dev for project 1",
-                embedding=_EMBED,
+                embedding=EMBED,
                 project_ids=("p1",),
             ),
             Chunk(
@@ -455,14 +394,14 @@ def test_orientation_scopes_to_requested_projects() -> None:
                 artifact_id="a2",
                 filename="p2_doc.md",
                 text="run make dev for project 2",
-                embedding=_EMBED,
+                embedding=EMBED,
                 project_ids=("p2",),
             ),
         ]
     )
-    llm = _llm(_payload(_section("SET_UP", "Run it locally", ["c1"])))
+    llm = make_llm(payload(section("SET_UP", "Run it locally", ["c1"])))
     outcome = assemble_orientation(
-        llm, store, task_title=_TITLE, project_ids=frozenset({"p1"})
+        llm, store, task_title=TITLE, project_ids=frozenset({"p1"})
     )
     assert outcome.status == "assembled"
     assert outcome.packet is not None
@@ -478,7 +417,7 @@ def test_orientation_multi_project_union() -> None:
                 artifact_id="a1",
                 filename="p1_doc.md",
                 text="run make dev for project 1",
-                embedding=_EMBED,
+                embedding=EMBED,
                 project_ids=("p1",),
             ),
             Chunk(
@@ -486,7 +425,7 @@ def test_orientation_multi_project_union() -> None:
                 artifact_id="a2",
                 filename="p2_doc.md",
                 text="architecture layout for project 2",
-                embedding=_EMBED,
+                embedding=EMBED,
                 project_ids=("p2",),
             ),
             Chunk(
@@ -494,19 +433,19 @@ def test_orientation_multi_project_union() -> None:
                 artifact_id="a3",
                 filename="p3_doc.md",
                 text="pull requests for project 3",
-                embedding=_EMBED,
+                embedding=EMBED,
                 project_ids=("p3",),
             ),
         ]
     )
-    llm = _llm(
-        _payload(
-            _section("SET_UP", "Run it locally", ["c1"]),
-            _section("FIND_THE_CODE", "Where it lives", ["c2"]),
+    llm = make_llm(
+        payload(
+            section("SET_UP", "Run it locally", ["c1"]),
+            section("FIND_THE_CODE", "Where it lives", ["c2"]),
         )
     )
     outcome = assemble_orientation(
-        llm, store, task_title=_TITLE, project_ids=frozenset({"p1", "p2"})
+        llm, store, task_title=TITLE, project_ids=frozenset({"p1", "p2"})
     )
     assert outcome.status == "assembled"
     assert outcome.packet is not None

@@ -11,7 +11,6 @@ load_dotenv()
 from api.dependencies import get_llm, get_store  # noqa: E402
 from api.routes import (  # noqa: E402
     artifact_projects,
-    blueprints,
     buddy,
     diagram,
     grading,
@@ -21,7 +20,6 @@ from api.routes import (  # noqa: E402
     ingest_status,
     insights,
     knowledge_gaps,
-    onboarding,
     orientation,
     phase,
     projects,
@@ -87,12 +85,10 @@ api_router.include_router(ingest_status.router)
 api_router.include_router(artifact_projects.router)
 api_router.include_router(title.router)
 api_router.include_router(vector_db.router)
-api_router.include_router(onboarding.router)
 api_router.include_router(orientation.router)
 api_router.include_router(phase.router)
 api_router.include_router(diagram.router)
 api_router.include_router(starter_work.router)
-api_router.include_router(blueprints.router)
 api_router.include_router(summaries.router)
 api_router.include_router(sources.router)
 api_router.include_router(knowledge_gaps.router)

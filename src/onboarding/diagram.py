@@ -29,9 +29,20 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
+from onboarding.assembly import (
+    AssemblyError,
+    Generation,
+    Retrieval,
+    Search,
+    dump,
+    evidence_line,
+    generate_payload,
+    give_up,
+    retrieve_evidence,
+    sources_drawn_on,
+)
 from onboarding.citations import resolve_citations
 from onboarding.corpus import fingerprint_gate
 from onboarding.diagram_models import (
@@ -45,15 +56,12 @@ from onboarding.diagram_models import (
     DiagramSource,
 )
 from onboarding.progress import ProgressEvent, ProgressStream, drain
-from onboarding.similarity import OVERLAP_THRESHOLD, text_overlap
-from rag.hybrid import BM25IndexCache, hybrid_retrieve
 from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
 _TOP_K_PER_FACET = 6
-_MIN_SCORE = 0.3
 _MAX_SUBJECT = 200
 
 # A diagram past a dozen boxes stops being a picture and becomes a map somebody
@@ -66,12 +74,6 @@ _MAX_NODES = 12
 # Two boxes and an arrow is the smallest thing that is a diagram rather than a
 # word. Below it the board has better-shaped cards, so this returns `skipped`.
 _MIN_NODES = 2
-
-# Re-reading the board must not redraw the picture. Every card hydrates on every
-# page load, so a diagram that churns between loads would read as the system
-# changing its mind about the codebase.
-_TEMPERATURE = 0.0
-_MAX_GENERATION_ATTEMPTS = 2
 
 # Delimiter for the model-authored subject in the prompt. Same device the
 # artifact judge uses for hire-authored pull request text, for the same reason,
@@ -121,10 +123,6 @@ _EDGE_GUIDE = (
 )
 
 
-class AssemblyError(Exception):
-    """Raised when the LLM output for a diagram cannot be parsed/validated."""
-
-
 class _GenNode(BaseModel):
     id: str = ""
     label: str = ""
@@ -146,35 +144,6 @@ class _GenPayload(BaseModel):
     edges: list[_GenEdge] = Field(default_factory=list[_GenEdge])
 
 
-# --- evidence ------------------------------------------------------------------
-
-
-def _collapse_duplicates(chunks: list[ScoredChunk]) -> tuple[list[ScoredChunk], int]:
-    """Drop chunks that restate one already kept, best-scoring first.
-
-    Token overlap rather than embeddings: it needs no extra call, and a diagram
-    redrawn on every board load has to be reproducible.
-    """
-    kept: list[ScoredChunk] = []
-    collapsed = 0
-    for chunk in sorted(chunks, key=lambda c: (-c.score, c.id)):
-        if any(text_overlap(chunk.text, k.text) > OVERLAP_THRESHOLD for k in kept):
-            collapsed += 1
-            continue
-        kept.append(chunk)
-    return kept, collapsed
-
-
-def _evidence_line(chunk: ScoredChunk) -> str:
-    meta = chunk.artifact_type or "FILE"
-    if chunk.language:
-        meta += f"/{chunk.language}"
-    return f"  [{chunk.id}] ({chunk.filename} | {meta}) {chunk.text}"
-
-
-# --- prompt / parsing ----------------------------------------------------------
-
-
 def _fenced(subject: str) -> str:
     safe = subject.replace(_FENCE, "")
     return (
@@ -185,7 +154,7 @@ def _fenced(subject: str) -> str:
 
 
 def _build_prompt(subject: str, chunks: list[ScoredChunk]) -> list[Message]:
-    evidence = "\n".join(_evidence_line(c) for c in chunks)
+    evidence = "\n".join(evidence_line(c) for c in chunks)
     node_kinds = "|".join(sorted(NODE_KINDS))
     edge_kinds = "|".join(sorted(EDGE_KINDS))
 
@@ -257,9 +226,6 @@ def _parse_payload(raw: str) -> _GenPayload:
         return _GenPayload.model_validate_json(extract_json_object(raw))
     except (ValidationError, json.JSONDecodeError, ValueError) as exc:
         raise AssemblyError(f"invalid diagram output: {exc}") from exc
-
-
-# --- resolution ----------------------------------------------------------------
 
 
 def _normalise(text: str) -> str:
@@ -392,33 +358,6 @@ def _trim_to_cap(
     return kept_nodes, kept_edges, len(nodes) - len(kept_nodes)
 
 
-def _sources_drawn_on(
-    nodes: list[DiagramNode], chunks: list[ScoredChunk]
-) -> list[DiagramSource]:
-    """The distinct material the kept nodes actually cite, in first-use order."""
-    chunks_by_id = {c.id: c for c in chunks}
-    sources: list[DiagramSource] = []
-    seen: set[tuple[str, str | None]] = set()
-    for node in nodes:
-        for citation in node.citations:
-            chunk = chunks_by_id.get(citation.chunk_id or "")
-            key = (citation.filename, citation.source_url)
-            if key in seen:
-                continue
-            seen.add(key)
-            sources.append(
-                DiagramSource(
-                    filename=citation.filename,
-                    source_url=citation.source_url,
-                    artifact_type=chunk.artifact_type if chunk else None,
-                )
-            )
-    return sources
-
-
-# --- job -----------------------------------------------------------------------
-
-
 def stream_diagram(
     llm: LLMClient,
     store: VectorStore,
@@ -456,72 +395,63 @@ def stream_diagram(
         yield from early_events
         return early_outcome
 
-    bm25_cache = BM25IndexCache()
-    by_id: dict[str, ScoredChunk] = {}
-    for facet, query in _FACET_QUERIES.items():
-        yield progress.stage(
-            "retrieving", f"Searching the project: {_FACET_LABEL[facet]}"
-        )
-        for chunk in hybrid_retrieve(
-            question=f"{subject} {query}",
-            llm=llm,
-            store=store,
+    chunks, collapsed = yield from retrieve_evidence(
+        progress,
+        llm,
+        store,
+        Retrieval(
+            searches=[
+                Search(
+                    label=f"Searching the project: {_FACET_LABEL[facet]}",
+                    question=f"{subject} {query}",
+                )
+                for facet, query in _FACET_QUERIES.items()
+            ],
             top_k=_TOP_K_PER_FACET,
-            min_score=_MIN_SCORE,
-            bm25_cache=bm25_cache,
-            exclude_roles=GROUNDING_EXCLUDED_ROLES,
             filters=RetrievalFilters(project_ids=project_ids),
-        ):
-            existing = by_id.get(chunk.id)
-            if existing is None or chunk.score > existing.score:
-                by_id[chunk.id] = chunk
-    chunks, collapsed = _collapse_duplicates(list(by_id.values()))
+        ),
+    )
 
     if not chunks:
-        outcome = DiagramOutcome(
-            status="skipped",
-            notes=["no grounding evidence retrieved for this subject"],
+        return (
+            yield from give_up(
+                progress,
+                DiagramOutcome(
+                    status="skipped",
+                    notes=["no grounding evidence retrieved for this subject"],
+                ),
+                warning="Nothing in the project matched this subject closely enough",
+                done="No diagram could be assembled",
+            )
         )
-        yield progress.warning(
-            "Nothing in the project matched this subject closely enough"
-        )
-        yield progress.done("No diagram could be assembled", _dump(outcome))
-        return outcome
 
     yield progress.stage("generating", f"Drawing it from {len(chunks)} source(s)")
-    messages = _build_prompt(subject, chunks)
-    # One correction round, as phase assembly and orientation have: a small local
-    # model breaks the JSON now and then, and asked back it usually fixes it.
-    parse_error: AssemblyError | None = None
-    payload: _GenPayload | None = None
-    for attempt in range(_MAX_GENERATION_ATTEMPTS):
-        raw = llm.generate(messages, temperature=_TEMPERATURE)
-        try:
-            payload = _parse_payload(raw)
-            break
-        except AssemblyError as exc:
-            parse_error = exc
-            logger.warning(
-                "Diagram assembly attempt %d failed for subject %r: %s",
-                attempt + 1,
-                subject,
-                exc,
+    payload = yield from generate_payload(
+        progress,
+        llm,
+        _build_prompt(subject, chunks),
+        Generation(
+            parse=_parse_payload,
+            correct=_correction_prompt,
+            logger=logger,
+            failure="Diagram assembly attempt %d failed for subject %r: %s",
+            subject=subject,
+        ),
+    )
+    if isinstance(payload, AssemblyError):
+        return (
+            yield from give_up(
+                progress,
+                DiagramOutcome(
+                    status="skipped",
+                    chunks_retrieved=len(chunks),
+                    chunks_collapsed=collapsed,
+                    notes=[str(payload)],
+                ),
+                warning="The generated diagram could not be read",
+                done="No diagram could be assembled",
             )
-            if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
-                yield progress.stage("generating", "Correcting invalid generated JSON")
-                messages = _correction_prompt(messages, raw, exc)
-
-    if payload is None:
-        assert parse_error is not None
-        outcome = DiagramOutcome(
-            status="skipped",
-            chunks_retrieved=len(chunks),
-            chunks_collapsed=collapsed,
-            notes=[str(parse_error)],
         )
-        yield progress.warning("The generated diagram could not be read")
-        yield progress.done("No diagram could be assembled", _dump(outcome))
-        return outcome
 
     yield progress.stage("grounding", "Checking every part cites its source")
     nodes, remap, nodes_dropped = _resolve_nodes(payload, chunks)
@@ -538,17 +468,21 @@ def stream_diagram(
         )
 
     if len(nodes) < _MIN_NODES or not edges:
-        outcome = DiagramOutcome(
-            status="skipped",
-            chunks_retrieved=len(chunks),
-            chunks_collapsed=collapsed,
-            nodes_dropped=nodes_dropped + trimmed,
-            edges_dropped=edges_dropped,
-            notes=["not enough grounded, connected parts to draw a diagram"],
+        return (
+            yield from give_up(
+                progress,
+                DiagramOutcome(
+                    status="skipped",
+                    chunks_retrieved=len(chunks),
+                    chunks_collapsed=collapsed,
+                    nodes_dropped=nodes_dropped + trimmed,
+                    edges_dropped=edges_dropped,
+                    notes=["not enough grounded, connected parts to draw a diagram"],
+                ),
+                warning="Too little survived grounding to draw a diagram",
+                done="No diagram could be assembled",
+            )
         )
-        yield progress.warning("Too little survived grounding to draw a diagram")
-        yield progress.done("No diagram could be assembled", _dump(outcome))
-        return outcome
 
     notes: list[str] = []
     if collapsed:
@@ -567,7 +501,9 @@ def stream_diagram(
             summary=payload.summary.strip(),
             nodes=nodes,
             edges=edges,
-            sources=_sources_drawn_on(nodes, chunks),
+            sources=sources_drawn_on(
+                (c for n in nodes for c in n.citations), chunks, DiagramSource
+            ),
         ),
         provenance=DiagramProvenance(
             corpus_fingerprint=fingerprint,
@@ -581,13 +517,8 @@ def stream_diagram(
         edges_dropped=edges_dropped,
         notes=notes,
     )
-    yield progress.done("Diagram ready", _dump(outcome))
+    yield progress.done("Diagram ready", dump(outcome))
     return outcome
-
-
-def _dump(outcome: DiagramOutcome) -> dict[str, object]:
-    """The outcome as a JSON-safe dict for a ``done`` event's ``result``."""
-    return outcome.model_dump(mode="json")
 
 
 def assemble_diagram(

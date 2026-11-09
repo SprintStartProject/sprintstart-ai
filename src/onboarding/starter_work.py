@@ -72,9 +72,6 @@ class GenerationError(Exception):
     """Raised when the LLM output for a starter-work proposal can't be parsed."""
 
 
-# --- domain models -------------------------------------------------------------
-
-
 class StarterTaskCandidate(BaseModel):
     """One open issue considered for the starter-work pool."""
 
@@ -115,9 +112,6 @@ class StarterWorkOutcome(BaseModel):
     notes: list[str] = Field(default_factory=list[str])
 
 
-# --- LLM payload -----------------------------------------------------------------
-
-
 class _GenTask(BaseModel):
     source_id: str = ""
     safely_scoped: bool = False
@@ -128,9 +122,6 @@ class _GenTask(BaseModel):
 
 class _GenPayload(BaseModel):
     tasks: list[_GenTask] = Field(default_factory=list[_GenTask])
-
-
-# --- prompt / parsing --------------------------------------------------------------
 
 
 def _derive_title(text: str, fallback: str) -> str:
@@ -192,9 +183,6 @@ def _parse_payload(raw: str) -> _GenPayload:
         return _GenPayload.model_validate_json(extract_json_object(raw))
     except (ValidationError, json.JSONDecodeError, ValueError) as exc:
         raise GenerationError(f"invalid starter-work output: {exc}") from exc
-
-
-# --- candidate sourcing ------------------------------------------------------------
 
 
 def _issue_text(chunks: list[Chunk]) -> str:
@@ -314,9 +302,6 @@ def _mining_fingerprint_material(
     for source_id in sorted(active_source_ids or []):
         parts.append(f"pool:{source_id}")
     return parts
-
-
-# --- job -----------------------------------------------------------------------
 
 
 def stream_starter_work_pool(

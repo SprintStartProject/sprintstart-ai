@@ -77,8 +77,7 @@ Artifacts belong to one or more **projects** (the backend's `artifact_projects` 
 
 - **Ingest** carries the membership: `projectIds` on `POST /api/v1/ingest` and on each artifact of `POST /api/v1/ingest/sync`. It is written into the chunk metadata (as a delimited `project_ids` string plus one `project:<id>` marker key that Chroma can filter on server-side) and into the ingestion index.
 - **Retrieval** takes a `project_id` filter that is enforced on both halves of hybrid retrieval — the Chroma `where` clause and the in-memory/BM25 path (`rag/filters.py`) — as well as in the corpus-scanning agent tools (`grep`, `fetch_file`).
-- **Requests** must name the project: `projectId` is required on `/chat`, `/onboarding/path`, `/onboarding/path/yaml`, `/onboarding/blueprints/generate`, `/insights/knowledge-gaps/detect`, and `/insights/faq/group`. The backend authorizes the caller for that project (`ProjectAuthorization`) and passes it through.
-- **Blueprints** are project-qualified: generated scopes are `project:<projectId>|global` and `project:<projectId>|area:<name>`, and the corpus fingerprint that makes generation idempotent covers only that project's chunks. Blueprints scoped to another project — or unqualified, i.e. generated before project separation — are ignored when a path is assembled.
+- **Requests** must name the project: `projectId` is required on `/insights/knowledge-gaps/detect` and `/insights/faq/group`, and `projectIds` on the orientation, diagram and starter-work requests. The backend authorizes the caller for that project (`ProjectAuthorization`) and passes it through.
 
 Filtering is **fail-closed**: a chunk with no project association is invisible to every project rather than visible to all of them. Chunks ingested before `projectIds` was sent therefore stop being retrievable — re-run a full `POST /api/v1/ingest/sync` with `projectIds` populated to backfill them.
 
@@ -88,23 +87,7 @@ Filtering is **fail-closed**: a chunk with no project association is invisible t
 |---|---|---|
 | `GET` | `/api/v1/health` | Reports service health including LLM backend status. Returns `503` if Ollama is unreachable. |
 | `POST` | `/api/v1/ingest` | Parses, chunks, and embeds a document and stores it in the vector store. Re-ingesting the same `artifact_id` replaces existing chunks. `projectIds` records which projects may retrieve it (see [Project separation](#project-separation)). Supports text files and images (send image content as base64; requires `OLLAMA_VISION_MODEL`). Text/PDF content can optionally be chunked using the LLM-based [context-aware chunker](#context-aware-chunking) (opt-in, off by default). |
-| `POST` | `/api/v1/chat` | Retrieves relevant chunks from the given `projectId` and streams a generated answer as Server-Sent Events (SSE). |
 | `POST` | `/api/v1/title` | Generates a short descriptive title from a user prompt. |
-| `POST` | `/api/v1/onboarding/path` | Generates a personalized onboarding path for one `projectId` (SSE). Blueprints are passed in by the backend on each request — the service is stateless. |
-| `POST` | `/api/v1/onboarding/blueprints/generate` | Batch job: generates `source: generated` blueprints from one project's corpus and returns them. The backend owns persistence — it passes its active blueprints in and stores the results. |
-
-### Chat SSE stream
-
-The `/api/v1/chat` endpoint streams newline-delimited JSON events:
-
-| Event type | Description |
-|---|---|
-| `tool_use` | A capability the agent invoked, in order. Has `name` and `kind` (currently always `tool`; `agent` is reserved for a delegating capability) |
-| `reasoning` | A live reasoning fragment in the `reasoning` field. It is never part of the final answer or persisted message content. Models without a reasoning channel simply omit these events. |
-| `token` | A single token fragment of the answer |
-| `citation` | A source chunk used to generate the answer |
-| `done` | Signals the end of the stream |
-| `error` | Emitted on failure instead of the above |
 
 ## Context-aware chunking
 
@@ -125,23 +108,6 @@ Resulting chunks carry extra metadata so context/overlap portions of a chunk's c
 
 **Scope:** only text and PDF content are affected; code and image parsing are unchanged. For PDFs, the LLM is invoked **per page** (pages are already parsed independently), so semantic boundaries and context blocks are page-scoped, not whole-document-scoped. The batch endpoint `POST /api/v1/ingest/sync` (GitHub run sync) does not expose these flags and always uses the plain chunker — changing that would mean changing the batch wire contract with the backend, which is a separate decision.
 
-
-## AI-proposed onboarding blueprints
-
-Onboarding paths are assembled from versioned **blueprints** scoped by project and audience: `project:<projectId>|global` or `project:<projectId>|area:<name>`. Blueprints carry a `source`: `authored` (human-written) or `generated` (drafted by the AI from the ingested corpus). The backend owns blueprint persistence, versioning, and rollback — the AI service is stateless and only returns generated data.
-
-The generation job analyzes the requested project's corpus and returns proposed blueprints for the backend to persist. Every generated step is **grounded** (cites an ingested chunk), the job is **idempotent** (a blueprint records the `corpus_fingerprint` it was drafted from, so an unchanged corpus is a no-op), and **human-owned invariants are protected** — it may not remove or downgrade a `required` or `invariant: true` step; such changes are re-injected and the outcome is escalated, never silently applied.
-
-Blueprint management (trigger generation, list versions, rollback) is exposed through the backend API at `POST /api/v1/onboarding/blueprints/generate`, `GET /api/v1/onboarding/blueprints/{scope}/versions`, and `POST /api/v1/onboarding/blueprints/{scope}/rollback`.
-
-### Cost / performance
-
-A full refresh is **O(number of scopes)**, not O(corpus size) or per onboarding request. Per scope it performs:
-
-- **1 hybrid retrieval** (one embedding call + a cached in-memory BM25 pass over the corpus), and
-- **1 LLM `generate` call** drafting the blueprint from the top ~12 retrieved chunks.
-
-So a refresh of *global + N areas* is `N+1` retrievals and `N+1` generate calls — typically single-digit LLM calls for a whole organization. Scopes whose corpus fingerprint is unchanged are skipped entirely (no LLM call). The job is batch and schedulable; the latency-sensitive `/onboarding/path` request path never invokes generation.
 
 ## Running Tests
 

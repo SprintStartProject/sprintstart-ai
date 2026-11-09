@@ -1,0 +1,47 @@
+name: Mutation testing
+
+# On a PR: the modules it changed must have a mutation score of at least MUTATION_MIN.
+# Nightly: the whole service, as a report for the quality trend (never fails).
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Mutation gate on changed modules
+        if: github.event_name == 'pull_request'
+        run: bash scripts/quality/mutation.sh "origin/${{ github.base_ref }}"
+
+      - name: Mutation report on the whole service
+        if: github.event_name != 'pull_request'
+        run: bash scripts/quality/mutation.sh --all "origin/${{ github.event.repository.default_branch }}"
+
+      - name: Keep the statistics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-stats
+          path: mutants/mutmut-cicd-stats.json
+          if-no-files-found: ignore

@@ -1,0 +1,260 @@
+{
+  "$defs": {
+    "BuddyAgentMessageSchema": {
+      "properties": {
+        "content": {
+          "default": "",
+          "description": "Text content; empty for a pure tool-call turn.",
+          "title": "Content",
+          "type": "string"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "On an assistant turn, the model's plain-text reasoning. Opaque to the caller; carry it back verbatim.",
+          "title": "Reasoning"
+        },
+        "reasoning_details": {
+          "description": "On an assistant turn, the provider's structured (possibly signed) reasoning blocks. Opaque to the caller; carry them back verbatim, because a provider with extended thinking rejects a resumed tool turn that lost them.",
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Reasoning Details",
+          "type": "array"
+        },
+        "role": {
+          "description": "One of system | user | assistant | tool.",
+          "title": "Role",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "On a tool-result turn, the id of the call it answers.",
+          "title": "Tool Call Id"
+        },
+        "tool_calls": {
+          "description": "Tool calls made on an assistant turn.",
+          "items": {
+            "$ref": "#/$defs/BuddyToolCallSchema"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "role"
+      ],
+      "title": "BuddyAgentMessageSchema",
+      "type": "object"
+    },
+    "BuddyCitationSchema": {
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "start_line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Line"
+        },
+        "start_page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Page"
+        }
+      },
+      "required": [
+        "artifact_id"
+      ],
+      "title": "BuddyCitationSchema",
+      "type": "object"
+    },
+    "BuddyToolCallSchema": {
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "description": "Arguments the model passed to the tool.",
+          "title": "Arguments",
+          "type": "object"
+        },
+        "id": {
+          "description": "Provider-assigned id of this tool call; its result must echo it.",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name of the tool the model wants to run.",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "BuddyToolCallSchema",
+      "type": "object"
+    }
+  },
+  "$id": "https://sprintstart.dev/contracts/agent-stream-events.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "const": "reasoning"
+        }
+      },
+      "required": [
+        "type",
+        "content"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "const": "token"
+        }
+      },
+      "required": [
+        "type",
+        "content"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "const": "tool_use"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "arguments"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "const": "error"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "citations": {
+          "description": "Sources the grounded searches drew on.",
+          "items": {
+            "$ref": "#/$defs/BuddyCitationSchema"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "final": {
+          "description": "True when `text` is the answer; false when `pending_tool_calls` run first.",
+          "title": "Final",
+          "type": "boolean"
+        },
+        "messages": {
+          "description": "The full running conversation to carry back verbatim on a resume.",
+          "items": {
+            "$ref": "#/$defs/BuddyAgentMessageSchema"
+          },
+          "title": "Messages",
+          "type": "array"
+        },
+        "pending_tool_calls": {
+          "description": "Backend tools to run; append each result as a `tool`, then re-call.",
+          "items": {
+            "$ref": "#/$defs/BuddyToolCallSchema"
+          },
+          "title": "Pending Tool Calls",
+          "type": "array"
+        },
+        "reasoning": {
+          "description": "The model's reasoning on this hop, one entry per model call that returned any, oldest first. Display-only: never part of `messages`, so it is not carried back and never re-enters the model's context. Each hop returns only its own; a caller showing a whole turn concatenates the hops. Empty when the provider exposes none.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasoning",
+          "type": "array"
+        },
+        "text": {
+          "default": "",
+          "description": "The answer to show the hire, when `final`.",
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "const": "result"
+        }
+      },
+      "required": [
+        "type",
+        "final",
+        "messages"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Buddy agent stream event (sprintstart-ai -> sprintstart-backend)"
+}

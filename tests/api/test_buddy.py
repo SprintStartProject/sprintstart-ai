@@ -13,6 +13,7 @@ from llm.errors import LLMUnavailableError
 from rag.filters import NO_FILTERED_RESULTS_MESSAGE
 from rag.types import Chunk
 from tests.conftest import parse_sse_events
+from tests.stubs.app_client import scripted_client
 from tests.stubs.llm import ScriptedLLMClient, StubLLMClient
 from tests.stubs.store import StubVectorStore
 
@@ -244,37 +245,11 @@ def test_open_stream_without_team_mode_is_the_hire_greeting() -> None:
     assert "project's manager" not in recorded[0]
 
 
-def _scripted_client(llm: ScriptedLLMClient) -> Generator[TestClient, Any, None]:
-    store = StubVectorStore()
-    store.add(
-        [
-            Chunk(
-                id="c1",
-                artifact_id="a1",
-                filename="auth.md",
-                text="the login handler lives in auth.py",
-                embedding=[0.0] * 768,
-                source_system="GITHUB",
-                project_ids=("p1",),
-            )
-        ]
-    )
-    app.dependency_overrides[get_llm] = lambda: llm
-    app.dependency_overrides[get_store] = lambda: store
-    app.dependency_overrides[get_source_state_store] = lambda: SourceStateStore(
-        ":memory:"
-    )
-    try:
-        yield TestClient(app)
-    finally:
-        app.dependency_overrides.clear()
-
-
 def test_filters_reach_the_searches_and_an_empty_result_is_said_plainly() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login handler"]})]], answer="ungrounded"
     )
-    for client in _scripted_client(llm):
+    for client in scripted_client(llm):
         response = client.post(
             _URL,
             json={
@@ -293,7 +268,7 @@ def test_empty_source_systems_mean_all() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login handler"]})]], answer="In auth.py."
     )
-    for client in _scripted_client(llm):
+    for client in scripted_client(llm):
         response = client.post(
             _URL,
             json={
@@ -489,7 +464,7 @@ def test_a_turn_waiting_on_a_backend_tool_carries_its_reasoning() -> None:
         reasoning="check the board",
         reasoning_details=_SIGNED_DETAILS,
     )
-    for client in _scripted_client(llm):
+    for client in scripted_client(llm):
         response = client.post(
             _URL,
             json={
@@ -508,7 +483,7 @@ def test_a_turn_waiting_on_a_backend_tool_carries_its_reasoning() -> None:
 
 def test_a_resumed_turn_hands_the_carried_reasoning_back_to_the_model() -> None:
     llm = ScriptedLLMClient(turns=[], answer="Your next step is the setup.")
-    for client in _scripted_client(llm):
+    for client in scripted_client(llm):
         response = client.post(
             _URL,
             json={
@@ -558,12 +533,12 @@ def test_the_stream_endpoint_emits_progress_then_the_buffered_response() -> None
         "capabilities_enabled": False,
         "project_ids": ["p1"],
     }
-    for client in _scripted_client(llm):
+    for client in scripted_client(llm):
         streamed = client.post(_STREAM_URL, json=payload)
     llm_again = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login"]})]], answer="In auth.py."
     )
-    for client in _scripted_client(llm_again):
+    for client in scripted_client(llm_again):
         buffered = client.post(_URL, json=payload)
 
     assert streamed.status_code == 200
@@ -586,7 +561,7 @@ def test_the_stream_endpoint_emits_reasoning_deltas() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login"]})]], reasoning="grep for it"
     )
-    for client in _scripted_client(llm):
+    for client in scripted_client(llm):
         response = client.post(
             _STREAM_URL,
             json={
@@ -627,7 +602,7 @@ def test_the_stream_endpoint_applies_the_filters_to_its_answer() -> None:
     llm = ScriptedLLMClient(
         turns=[[("grep", {"patterns": ["login handler"]})]], answer="ungrounded"
     )
-    for client in _scripted_client(llm):
+    for client in scripted_client(llm):
         response = client.post(
             _STREAM_URL,
             json={

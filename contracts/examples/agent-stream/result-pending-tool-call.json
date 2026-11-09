@@ -1,0 +1,12 @@
+{
+  "type": "result",
+  "final": false,
+  "text": "",
+  "messages": [
+    {"role": "user", "content": "What is my next step?", "tool_calls": [], "tool_call_id": null, "reasoning": null, "reasoning_details": []},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "name": "get_my_path", "arguments": {}}], "tool_call_id": null, "reasoning": null, "reasoning_details": []}
+  ],
+  "pending_tool_calls": [{"id": "call_1", "name": "get_my_path", "arguments": {}}],
+  "citations": [],
+  "reasoning": []
+}

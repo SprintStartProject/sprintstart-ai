@@ -29,9 +29,19 @@ from typing import cast
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
+from onboarding.assembly import (
+    AssemblyError,
+    Generation,
+    Retrieval,
+    Search,
+    dump,
+    evidence_line,
+    generate_payload,
+    give_up,
+    retrieve_evidence,
+)
 from onboarding.citations import resolve_citations
 from onboarding.corpus import fingerprint_gate
 from onboarding.models import CheckOption, CheckQuestion
@@ -44,25 +54,18 @@ from onboarding.phase_models import (
 )
 from onboarding.progress import ProgressEvent, ProgressStream, drain
 from onboarding.similarity import OVERLAP_THRESHOLD, text_overlap
-from rag.hybrid import BM25IndexCache, hybrid_retrieve
 from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
 
 _TOP_K = 12
-_MIN_SCORE = 0.3
 _MAX_PROMPT_TEXT = 4000
-# Deterministic so two assemblies against the same corpus and prompt give
-# materially the same phase — a hire who re-personalizes should not read
-# different instructions than their teammates.
-_TEMPERATURE = 0.0
 
 # How far into the phase block the step list should go; questions are quiz
 # extras, not the phase's substance.
 _MIN_STEPS = 1
 _MAX_STEPS = 8
-_MAX_GENERATION_ATTEMPTS = 2
 
 
 class _GenTask(BaseModel):
@@ -133,9 +136,6 @@ class _GenPayload(BaseModel):
     questions: list[_GenQuestion] = Field(default_factory=list[_GenQuestion])
 
 
-# --- evidence ------------------------------------------------------------------
-
-
 def _phase_query(
     title: str,
     description: str,
@@ -149,33 +149,6 @@ def _phase_query(
     return " ".join(p for p in parts if p.strip())[:_MAX_PROMPT_TEXT]
 
 
-def _collapse_duplicates(chunks: list[ScoredChunk]) -> tuple[list[ScoredChunk], int]:
-    """Drop chunks that restate one already kept, best-scoring first.
-
-    The README and the wiki repeating each other is load the model pays for
-    twice. Comparison is token overlap rather than embeddings: it needs no
-    extra call, and a phase must be reproducible.
-    """
-    kept: list[ScoredChunk] = []
-    collapsed = 0
-    for chunk in sorted(chunks, key=lambda c: (-c.score, c.id)):
-        if any(text_overlap(chunk.text, k.text) > OVERLAP_THRESHOLD for k in kept):
-            collapsed += 1
-            continue
-        kept.append(chunk)
-    return kept, collapsed
-
-
-def _evidence_line(chunk: ScoredChunk) -> str:
-    meta = chunk.artifact_type or "FILE"
-    if chunk.language:
-        meta += f"/{chunk.language}"
-    return f"  [{chunk.id}] ({chunk.filename} | {meta}) {chunk.text}"
-
-
-# --- prompt / parsing ----------------------------------------------------------
-
-
 def _build_prompt(
     title: str,
     description: str,
@@ -183,7 +156,7 @@ def _build_prompt(
     chunks: list[ScoredChunk],
     industry: str | None = None,
 ) -> list[Message]:
-    evidence = "\n".join(_evidence_line(c) for c in chunks)
+    evidence = "\n".join(evidence_line(c) for c in chunks)
     description_line = f"\nPhase description: {description}" if description else ""
     industry_line = (
         f"\nProject industry/domain: {industry.strip()}"
@@ -253,11 +226,11 @@ def _parse_payload(raw: str) -> _GenPayload:
         payload = json.loads(extract_json_object(raw), strict=False)
         return _GenPayload.model_validate(payload)
     except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(f"invalid phase output: {exc}") from exc
+        raise AssemblyError(f"invalid phase output: {exc}") from exc
 
 
 def _correction_prompt(
-    messages: list[Message], raw: str, error: ValueError
+    messages: list[Message], raw: str, error: AssemblyError
 ) -> list[Message]:
     """Ask once for the same answer with only its JSON/shape corrected."""
     return [
@@ -274,9 +247,6 @@ def _correction_prompt(
             ),
         ),
     ]
-
-
-# --- resolution ----------------------------------------------------------------
 
 
 def _resolve_steps(
@@ -346,9 +316,8 @@ def _resolve_steps(
 def _validate_question(item: _GenQuestion) -> CheckQuestion | None:
     """Drop a question that doesn't meet the check-question constraints.
 
-    Mirrors ``onboarding.checks._validate_question`` so the phase's quiz obeys
-    the same shape the backend's knowledge-check UI expects. Positions are
-    assigned later over survivors only.
+    The phase's quiz obeys the shape the backend's knowledge-check UI expects.
+    Positions are assigned later over survivors only.
     """
     if not item.question.strip():
         return None
@@ -430,9 +399,6 @@ def _resolve_dependencies(
         question.blocked_by = resolve(question.key, question.blocked_by)
 
 
-# --- job -----------------------------------------------------------------------
-
-
 def stream_phase(
     llm: LLMClient,
     store: VectorStore,
@@ -478,71 +444,71 @@ def stream_phase(
         yield from early_events
         return early_outcome
 
-    yield progress.stage("retrieving", f"Searching the project for: {phase_title}")
-    bm25_cache = BM25IndexCache()
-    chunks = hybrid_retrieve(
-        question=_phase_query(
-            phase_title, phase_description, phase_prompt, normalized_industry
+    chunks, collapsed = yield from retrieve_evidence(
+        progress,
+        llm,
+        store,
+        Retrieval(
+            searches=[
+                Search(
+                    label=f"Searching the project for: {phase_title}",
+                    question=_phase_query(
+                        phase_title,
+                        phase_description,
+                        phase_prompt,
+                        normalized_industry,
+                    ),
+                )
+            ],
+            top_k=_TOP_K,
+            filters=RetrievalFilters(project_id=project_id),
         ),
-        llm=llm,
-        store=store,
-        top_k=_TOP_K,
-        min_score=_MIN_SCORE,
-        bm25_cache=bm25_cache,
-        exclude_roles=GROUNDING_EXCLUDED_ROLES,
-        filters=RetrievalFilters(project_id=project_id),
     )
-    chunks, collapsed = _collapse_duplicates(chunks)
 
     if not chunks:
-        outcome = PhaseOutcome(
-            status="skipped",
-            notes=["no grounding evidence retrieved for this phase"],
+        return (
+            yield from give_up(
+                progress,
+                PhaseOutcome(
+                    status="skipped",
+                    notes=["no grounding evidence retrieved for this phase"],
+                ),
+                warning="Nothing in the project matched this phase",
+                done="No phase content could be assembled",
+            )
         )
-        yield progress.warning("Nothing in the project matched this phase")
-        yield progress.done("No phase content could be assembled", _dump(outcome))
-        return outcome
 
     yield progress.stage(
         "generating", f"Writing the phase from {len(chunks)} source(s)"
     )
-    messages = _build_prompt(
-        phase_title,
-        phase_description,
-        phase_prompt,
-        chunks,
-        normalized_industry,
+    payload = yield from generate_payload(
+        progress,
+        llm,
+        _build_prompt(
+            phase_title, phase_description, phase_prompt, chunks, normalized_industry
+        ),
+        Generation(
+            parse=_parse_payload,
+            correct=_correction_prompt,
+            logger=logger,
+            failure="Phase assembly attempt %d failed for %r: %s",
+            subject=phase_title,
+        ),
     )
-    parse_error: ValueError | None = None
-    payload: _GenPayload | None = None
-    for attempt in range(_MAX_GENERATION_ATTEMPTS):
-        raw = llm.generate(messages, temperature=_TEMPERATURE)
-        try:
-            payload = _parse_payload(raw)
-            break
-        except ValueError as exc:
-            parse_error = exc
-            logger.warning(
-                "Phase assembly attempt %d failed for %r: %s",
-                attempt + 1,
-                phase_title,
-                exc,
+    if isinstance(payload, AssemblyError):
+        return (
+            yield from give_up(
+                progress,
+                PhaseOutcome(
+                    status="skipped",
+                    chunks_retrieved=len(chunks),
+                    chunks_collapsed=collapsed,
+                    notes=[str(payload)],
+                ),
+                warning="The generated content could not be read",
+                done="No phase content could be assembled",
             )
-            if attempt + 1 < _MAX_GENERATION_ATTEMPTS:
-                yield progress.stage("generating", "Correcting invalid generated JSON")
-                messages = _correction_prompt(messages, raw, exc)
-
-    if payload is None:
-        assert parse_error is not None
-        outcome = PhaseOutcome(
-            status="skipped",
-            chunks_retrieved=len(chunks),
-            chunks_collapsed=collapsed,
-            notes=[str(parse_error)],
         )
-        yield progress.warning("The generated content could not be read")
-        yield progress.done("No phase content could be assembled", _dump(outcome))
-        return outcome
 
     yield progress.stage("grounding", "Checking every step cites its source")
     steps, steps_dropped = _resolve_steps(payload, chunks)
@@ -564,17 +530,21 @@ def stream_phase(
         yield progress.warning(f"Dropped {questions_dropped} invalid question(s)")
 
     if not steps and not questions:
-        outcome = PhaseOutcome(
-            status="skipped",
-            chunks_retrieved=len(chunks),
-            chunks_collapsed=collapsed,
-            steps_dropped=steps_dropped,
-            questions_dropped=questions_dropped,
-            notes=["no grounded steps or valid questions assembled"],
+        return (
+            yield from give_up(
+                progress,
+                PhaseOutcome(
+                    status="skipped",
+                    chunks_retrieved=len(chunks),
+                    chunks_collapsed=collapsed,
+                    steps_dropped=steps_dropped,
+                    questions_dropped=questions_dropped,
+                    notes=["no grounded steps or valid questions assembled"],
+                ),
+                warning="Nothing usable survived grounding",
+                done="No phase content could be assembled",
+            )
         )
-        yield progress.warning("Nothing usable survived grounding")
-        yield progress.done("No phase content could be assembled", _dump(outcome))
-        return outcome
 
     notes: list[str] = []
     if collapsed:
@@ -600,13 +570,8 @@ def stream_phase(
         questions_dropped=questions_dropped,
         notes=notes,
     )
-    yield progress.done("Phase content ready", _dump(outcome))
+    yield progress.done("Phase content ready", dump(outcome))
     return outcome
-
-
-def _dump(outcome: PhaseOutcome) -> dict[str, object]:
-    """The outcome as a JSON-safe dict for a ``done`` event's ``result``."""
-    return outcome.model_dump(mode="json")
 
 
 def assemble_phase(

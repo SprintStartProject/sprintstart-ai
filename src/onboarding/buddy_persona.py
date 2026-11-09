@@ -29,9 +29,8 @@ from collections.abc import Collection
 
 from onboarding.vocabulary import DEFAULT_VOCABULARY, Vocabulary
 
-# The buddy is a tutor, not a second onboarding. The onboarding is the path a PM's
-# blueprint prescribes; the old framing -- "from their first day to doing real work" --
-# described a ramp towards a first accepted contribution that no longer exists.
+# The buddy is a tutor, not a second onboarding: the onboarding is the path a PM's
+# blueprint prescribes.
 _IDENTITY = (
     "You are the onboarding buddy: the tutor who guides a new hire through their "
     "onboarding and helps with whatever comes up along the way. You are warm, "

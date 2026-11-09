@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import Literal, TypeGuard
 
+from ingestion.models import ChunkKind
 from ingestion.source_role import SourceRole
 
-ChunkKind = Literal["text", "code", "pdf", "image"]
 SourceSystem = Literal["GITHUB", "BITBUCKET", "JIRA", "CONFLUENCE", "NOTION", "UPLOAD"]
 
 
@@ -54,9 +54,8 @@ class Chunk:
     source_system: SourceSystem | None = None
     created_at: str | None = None
     # Projects the owning artifact belongs to. The backend owns this mapping
-    # (``artifact_projects``) and sends it on ingest; an empty tuple means the
-    # chunk predates project separation and is unreachable by project-scoped
-    # retrieval until it is re-synced.
+    # (``artifact_projects``) and sends it on ingest; with an empty tuple, project-
+    # scoped retrieval cannot reach the chunk until it is re-synced.
     project_ids: tuple[str, ...] = ()
     # 1-based line the chunk starts on in the source file. Only meaningful for
     # "text"/"code" chunks; PDFs track the source page instead (``start_page``).

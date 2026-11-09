@@ -1,0 +1,16 @@
+# What decides how strictly this repository is checked needs the approval of a
+# code owner, who is somebody other than the author. Replace the team with a dedicated quality team
+# if the project creates one.
+/AI_RULES.md                   @SprintStartProject/ai
+/AGENTS.md                     @SprintStartProject/ai
+/.claude/                      @SprintStartProject/ai
+/.github/                      @SprintStartProject/ai
+/scripts/quality/              @SprintStartProject/ai
+/scripts/ai-guard/             @SprintStartProject/ai
+/ruff.toml                     @SprintStartProject/ai
+/ruff-limits.toml              @SprintStartProject/ai
+/ruff-limits-baseline.json     @SprintStartProject/ai
+/pyrightconfig.json            @SprintStartProject/ai
+/.importlinter                 @SprintStartProject/ai
+/quality-metrics.properties    @SprintStartProject/ai
+/contracts/                    @SprintStartProject/ai

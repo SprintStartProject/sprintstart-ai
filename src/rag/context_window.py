@@ -46,9 +46,8 @@ def expand_context_window(
     for hit in direct:
         if hit.position is None:
             continue
-        # PDF positions are page-local. Without a page we cannot distinguish
-        # position 1 on page 2 from position 1 on every other page, so legacy
-        # PDF chunks lacking this locator are deliberately not widened.
+        # PDF positions are page-local, so a PDF chunk without a page cannot be placed
+        # among its neighbours and is not widened.
         if hit.kind == "pdf" and hit.start_page is None:
             continue
         locator = (hit.artifact_id, hit.start_page if hit.kind == "pdf" else None)
