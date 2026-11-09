@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import Literal, TypeGuard
 
+from ingestion.models import ChunkKind
 from ingestion.source_role import SourceRole
 
-ChunkKind = Literal["text", "code", "pdf", "image"]
 SourceSystem = Literal["GITHUB", "BITBUCKET", "JIRA", "CONFLUENCE", "NOTION", "UPLOAD"]
 
 
