@@ -118,6 +118,8 @@ baseline_entries() {
 check_baselines() {
     local file before after
     for file in "${LINT_BASELINES[@]}"; do
+        # A baseline the base branch does not have yet is being introduced; only later changes are held to it.
+        git cat-file -e "$BASE:$file" 2>/dev/null || continue
         before=$(baseline_entries "$BASE" "$file")
         after=$(baseline_entries worktree "$file")
         if [ "$after" -gt "$before" ]; then
