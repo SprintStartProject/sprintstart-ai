@@ -37,6 +37,10 @@ import os
 
 from pydantic import BaseModel, Field, ValidationError
 
+from ingestion.chunking.chunk_fitting import (
+    fit_chunks,
+    to_parsed_chunks_from_pieces,
+)
 from ingestion.chunking.chunker import (
     chunk_overlap as default_chunk_overlap,
 )
@@ -47,7 +51,6 @@ from ingestion.chunking.chunker import (
     chunk_text,
     group_paragraphs_into_chunks,
     split_into_paragraphs,
-    to_parsed_chunk,
 )
 from ingestion.models import ParsedChunk
 from llm.base import LLMClient, Message
@@ -65,30 +68,6 @@ try:
     max_chars: int = int(os.getenv("CONTEXT_AWARE_CHUNKING_MAX_CHARS", "24000"))
 except ValueError as err:
     raise ValueError("CONTEXT_AWARE_CHUNKING_MAX_CHARS must be an integer") from err
-
-# A context block is a brief situating sentence. Blocks shorter than
-# this threshold carry negligible situating value (noise), while blocks
-# exceeding this fraction of chunk_size would crowd out the chunk body.
-_CONTEXT_MIN_CHARS = 15
-_CONTEXT_MAX_FRACTION = 0.25
-
-
-def _sanitize_context_block(raw: str | None, chunk_size: int) -> str | None:
-    """Validate and trim an LLM-provided context block.
-
-    Drops blocks that are blank or too short to carry meaningful situating
-    context (fewer than ~3 words), and truncates blocks that exceed the
-    context budget fraction (25% of chunk_size by default) so adequate
-    space remains for the chunk body.
-    """
-    if raw is None:
-        return None
-    text = raw.strip()
-    min_len = min(_CONTEXT_MIN_CHARS, max(1, chunk_size // 4))
-    if not text or len(text) < min_len:
-        return None
-    max_len = max(int(chunk_size * _CONTEXT_MAX_FRACTION), min_len)
-    return text[:max_len] if len(text) > max_len else text
 
 
 def exceeds_llm_limit(text: str, max_chars: int = max_chars) -> bool:
@@ -265,74 +244,22 @@ def _request_chunking_plan(
     return payload
 
 
-def _hard_split_with_context(
-    context_block: str,
-    body: str,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> list[tuple[str, tuple[int, int] | None, bool, tuple[int, int] | None]]:
-    """Split an oversized ``context_block + body`` chunk into sub-chunks.
-
-    The context block is re-prepended to every resulting sub-chunk (it is
-    small and self-contained, so duplicating it preserves the situating
-    context each sub-chunk would otherwise lose). The remaining budget
-    (``chunk_size`` minus the context block) is then hard-split the same
-    way :func:`ingestion.chunking.chunker.group_paragraphs_into_chunks` hard-splits
-    oversized paragraphs — overlapping character windows of ``chunk_size -
-    chunk_overlap`` stride.
-
-    Args:
-        context_block (str):
-            The situating context block text, already including its
-            trailing separator (empty string if there is none).
-
-        body (str):
-            The chunk's own content, without the context block.
-
-        chunk_size (int):
-            Maximum size of each resulting sub-chunk, in characters,
-            including the re-prepended context block.
-
-        chunk_overlap (int):
-            Overlap between consecutive sub-chunk bodies.
-
-    Returns:
-        list[tuple[str, tuple[int, int] | None, bool, tuple[int, int] | None]]:
-            One tuple per sub-chunk: ``(content, context_block_range,
-            has_overlap, overlap_range)``.
-    """
-    results: list[tuple[str, tuple[int, int] | None, bool, tuple[int, int] | None]] = []
-    context_len = len(context_block)
-    # Final safety: context block is pre-validated by _sanitize_context_block,
-    # but ensure at least 1 character of body budget so the sliding window
-    # stride is strictly positive and can never stall.
-    body_budget = max(chunk_size - context_len, 1)
-    body_overlap = min(chunk_overlap, body_budget - 1) if body_budget > 1 else 0
-
-    start = 0
-    first = True
-    while start < len(body) or first:
-        body_slice = body[start : start + body_budget]
-        content = context_block + body_slice
-
-        context_range = (0, context_len) if context_len else None
-        # The carried overlap is a prefix of this piece's body, located
-        # directly after the prepended context block. Clamp the overlap length
-        # to the actual slice length so the range never exceeds content.
-        actual_overlap = min(body_overlap, len(body_slice))
-        has_overlap = not first and actual_overlap > 0
-        overlap_range = (
-            (context_len, context_len + actual_overlap) if has_overlap else None
+def _raw_chunks(
+    paragraphs: list[str],
+    segments: list[str],
+    payload: _Payload,
+    semantic_boundaries: bool,
+) -> list[str]:
+    """Join paragraphs at the LLM's boundaries, or keep the pre-grouped segments."""
+    if not semantic_boundaries:
+        return segments
+    boundaries = payload.boundaries or [0]
+    return [
+        "\n\n".join(paragraphs[start:end])
+        for start, end in zip(
+            boundaries, [*boundaries[1:], len(paragraphs)], strict=True
         )
-
-        results.append((content, context_range, has_overlap, overlap_range))
-
-        if start + body_budget >= len(body):
-            break
-        start += body_budget - body_overlap
-        first = False
-
-    return results
+    ]
 
 
 def chunk_text_context_aware(
@@ -429,58 +356,7 @@ def chunk_text_context_aware(
         )
         return chunk_text(filename, text, chunk_size, chunk_overlap)
 
-    if semantic_boundaries:
-        boundaries = payload.boundaries or [0]
-        raw_chunks = [
-            "\n\n".join(paragraphs[start:end])
-            for start, end in zip(
-                boundaries, [*boundaries[1:], len(paragraphs)], strict=True
-            )
-        ]
-    else:
-        raw_chunks = segments
-
-    final_chunks: list[
-        tuple[str, tuple[int, int] | None, bool, tuple[int, int] | None]
-    ] = []
-    for order_index, chunk_body in enumerate(raw_chunks):
-        context_text = (
-            payload.context_blocks.get(str(order_index)) if contextualize else None
-        )
-        # Validate and bound context block length before prefixing
-        context_text = _sanitize_context_block(context_text, chunk_size)
-        context_block = f"{context_text}\n\n" if context_text else ""
-        combined = context_block + chunk_body
-
-        if len(combined) <= chunk_size:
-            context_range = (0, len(context_block)) if context_block else None
-            final_chunks.append((combined, context_range, False, None))
-            continue
-
-        final_chunks.extend(
-            _hard_split_with_context(
-                context_block, chunk_body, chunk_size, chunk_overlap
-            )
-        )
-
-    total_chunks_amount = len(final_chunks)
-
-    return [
-        to_parsed_chunk(
-            content,
-            "text",
-            filename,
-            chunk_index,
-            total_chunks_amount,
-            has_context_block=context_range is not None,
-            context_block_range=context_range,
-            has_overlap=has_overlap,
-            overlap_range=overlap_range,
-        )
-        for chunk_index, (
-            content,
-            context_range,
-            has_overlap,
-            overlap_range,
-        ) in enumerate(final_chunks)
-    ]
+    raw_chunks = _raw_chunks(paragraphs, segments, payload, semantic_boundaries)
+    context_blocks = payload.context_blocks if contextualize else {}
+    pieces = fit_chunks(raw_chunks, context_blocks, chunk_size, chunk_overlap)
+    return to_parsed_chunks_from_pieces(filename, pieces)

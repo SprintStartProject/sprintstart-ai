@@ -69,22 +69,22 @@
       "count": 1
     }
   },
-  "src/buddy/agent.py::_ensure_persona": {
-    "PLR0913": {
-      "count": 1
-    }
-  },
-  "src/buddy/agent.py::_persona_prompt": {
-    "PLR0913": {
-      "count": 1
-    }
-  },
   "src/buddy/agent.py::run_agent_turn": {
     "PLR0913": {
       "count": 1
     }
   },
   "src/buddy/agent.py::stream_agent_turn": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/buddy/conversation.py::_persona_prompt": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/buddy/conversation.py::ensure_persona": {
     "PLR0913": {
       "count": 1
     }
@@ -96,20 +96,6 @@
   },
   "src/buddy/opening.py::stream_session": {
     "PLR0913": {
-      "count": 1
-    },
-    "PLR0915": {
-      "count": 1
-    }
-  },
-  "src/buddy/persona.py::build_persona": {
-    "C901": {
-      "count": 1
-    },
-    "PLR0912": {
-      "count": 1
-    },
-    "PLR0915": {
       "count": 1
     }
   },
@@ -131,16 +117,13 @@
       "count": 1
     }
   },
-  "src/ingestion/chunking/chunker.py::to_parsed_chunk": {
+  "src/ingestion/chunking/context_aware_chunker.py::chunk_text_context_aware": {
     "PLR0913": {
       "count": 1
     }
   },
-  "src/ingestion/chunking/context_aware_chunker.py::chunk_text_context_aware": {
+  "src/ingestion/chunking/parsed_chunk.py::to_parsed_chunk": {
     "PLR0913": {
-      "count": 1
-    },
-    "PLR0915": {
       "count": 1
     }
   },
@@ -159,10 +142,12 @@
       "count": 1
     }
   },
-  "src/ingestion/parsing/pdf_parser.py::parse_pdf": {
+  "src/ingestion/parsing/pdf_parser.py::_page_texts": {
     "BLE001": {
       "count": 2
-    },
+    }
+  },
+  "src/ingestion/parsing/pdf_parser.py::parse_pdf": {
     "PLR0913": {
       "count": 1
     }
@@ -202,19 +187,19 @@
       "count": 1
     }
   },
-  "src/llm/anthropic_client.py::_to_anthropic_messages": {
+  "src/llm/anthropic_client.py::chat_stream": {
     "C901": {
+      "count": 1
+    },
+    "PLR0912": {
       "count": 1
     },
     "PLR0915": {
       "count": 1
     }
   },
-  "src/llm/anthropic_client.py::chat_stream": {
+  "src/llm/anthropic_wire.py::to_anthropic_messages": {
     "C901": {
-      "count": 1
-    },
-    "PLR0912": {
       "count": 1
     },
     "PLR0915": {
@@ -228,17 +213,6 @@
   },
   "src/llm/openai_client.py::__init__": {
     "PLR0913": {
-      "count": 1
-    }
-  },
-  "src/llm/openai_client.py::chat_stream": {
-    "C901": {
-      "count": 1
-    },
-    "PLR0912": {
-      "count": 1
-    },
-    "PLR0915": {
       "count": 1
     }
   },
@@ -286,21 +260,23 @@
       "count": 1
     }
   },
+  "src/store/chroma_membership.py::_rewrite": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
   "src/store/chroma_store.py::_max_write_page": {
     "BLE001": {
       "count": 1
     }
   },
-  "src/store/chroma_store.py::_rewrite_membership": {
+  "src/store/chroma_store.py::_search_stable": {
     "PLR0913": {
       "count": 1
     }
   },
   "src/store/chroma_store.py::query": {
     "PLR0913": {
-      "count": 1
-    },
-    "PLR0915": {
       "count": 1
     }
   },

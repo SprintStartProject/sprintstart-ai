@@ -115,9 +115,22 @@ The planned form of D1 ("a declared sequence of shared `assembly` stages") was n
 share the retrieval and generation stages that were already in `assembly.py`, but their grounding and
 outcome steps differ too much for one generic runner to read better than four short pipelines.
 
-`suggest_skills` (140 → 36) is #100. Still over 100 lines: `chunk_text_context_aware` (143),
-`buddy.opening.stream_session` (121), `buddy.persona.build_persona` (120),
-`openai_client.chat_stream` (120), `chroma_store.query` (116) and `parse_pdf` (111).
+`suggest_skills` (140 → 36) is #100, `chroma_store.query` and `parse_pdf` are done, and the context-aware
+chunker is already split. `OpenAIClient.chat_stream` (120 → 18 lines) hands the fold of a streamed
+tool-decision turn to `ChatStreamAccumulator` in the new `llm/openai_stream.py`, together with the reasoning
+helpers it uses; `openai_client.py` fell from 653 to 464 lines. A golden pins the request body and the events
+across fifteen reply shapes, four chunk sizes, five configurations and the failure modes.
+`buddy/agent.py` (513 → 158 lines) keeps the two entry points; the turn itself moved to `buddy/turn.py` and the
+message list it carries to `buddy/conversation.py`. The chunker's `to_parsed_chunk` moved to
+`ingestion/chunking/parsed_chunk.py` (440 → 357 lines).
+`chroma_store.py` (960 → 399 lines) hands the record conversion to `store/chroma_records.py`, the
+membership rewrite to `store/chroma_membership.py`, the revocation bookkeeping to
+`store/revocation_ledger.py` and the client cache to `store/chroma_client.py`; the existing store tests
+pin the behaviour and the new modules have direct tests.
+`metadata_store.py` (741 → 396 lines) keeps the artifact records; the tombstone and revision tables moved
+to `store/revocation_tables.py`, mixed into `IngestionMetadataStore` so no caller changes.
+
+Still over 100 lines: `buddy.opening.stream_session` and `buddy.persona.build_persona`, each in its own PR.
 
 ### Stage E: typed identifiers (P8) — begun
 
@@ -152,8 +165,6 @@ logger (`assembly.phase.draft`, not the module the code used to live in).
 2. Whether the BM25 index should be per project. Nothing measures it today; track the index size
    before deciding.
 3. What to call a domain `ProjectId` next to the wire alias of the same name.
-4. What to do about the files that stay over 400 lines and are not on this plan: `chroma_store.py`
-   (961), `metadata_store.py` (741), the three provider clients (653, 433, 428) and `buddy_persona.py`
-   (645). They are grandfathered by the ratchet and not covered by any stage; a stage F would own them.
-   `buddy/agent.py` (513) and the two chunkers (445, 440) are also over, but smaller and partly
-   covered by stage D.
+4. What to do about the files that stay over 400 lines and are not on this plan: `buddy/agent.py` (513)
+   and the two chunkers (445, 440), which are partly covered by stage D.
+   They are grandfathered by the ratchet and not covered by any stage; a stage F would own them.
