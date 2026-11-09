@@ -1,5 +1,6 @@
 import io
 import logging
+from collections.abc import Callable, Iterator
 
 from pypdf import PdfReader
 
@@ -78,14 +79,29 @@ def parse_pdf(
             enriched with page and chunk metadata.
     """
 
+    chunk_page = _page_chunker(llm, semantic_boundaries, contextualize)
+    pdf_chunks: list[ParsedChunk] = []
+    for page_number, text in _page_texts(filename, content):
+        for chunk in chunk_page(filename, text):
+            chunk.kind = "pdf"
+            chunk.metadata["global_pdf_chunk_index"] = str(len(pdf_chunks))
+            chunk.metadata["page_number"] = str(page_number)
+            pdf_chunks.append(chunk)
+
+    return pdf_chunks
+
+
+def _page_texts(filename: str, content: bytes) -> Iterator[tuple[int, str]]:
+    """Yield ``(page_number, text)`` for every page with extractable text.
+
+    An unreadable PDF yields nothing; a page whose text cannot be extracted is skipped.
+    """
     try:
         reader = PdfReader(io.BytesIO(content))  # in memory processing
     except Exception as e:
         logger.error("Failed to read PDF %s: %s", filename, e)
-        return []
+        return
 
-    pdf_chunks: list[ParsedChunk] = []
-    global_pdf_chunk_index: int = 0
     for page_number, page in enumerate(reader.pages, start=1):
         try:
             text = page.extract_text()
@@ -102,23 +118,20 @@ def parse_pdf(
             logger.warning("Skipping empty page %s in %s", page_number, filename)
             continue
 
-        use_context_aware_chunking = semantic_boundaries or contextualize
-        chunks: list[ParsedChunk] = (
-            chunk_text(filename, text)
-            if not use_context_aware_chunking or llm is None
-            else chunk_text_context_aware(
-                filename,
-                text,
-                llm,
-                semantic_boundaries=semantic_boundaries,
-                contextualize=contextualize,
-            )
-        )
-        for chunk in chunks:
-            chunk.kind = "pdf"
-            chunk.metadata["global_pdf_chunk_index"] = str(global_pdf_chunk_index)
-            chunk.metadata["page_number"] = str(page_number)
-            pdf_chunks.append(chunk)
-            global_pdf_chunk_index += 1
+        yield page_number, text
 
-    return pdf_chunks
+
+def _page_chunker(
+    llm: LLMClient | None, semantic_boundaries: bool, contextualize: bool
+) -> Callable[[str, str], list[ParsedChunk]]:
+    """Pick the chunker for a page: the LLM one only when it has work to do."""
+    if llm is None or not (semantic_boundaries or contextualize):
+        return chunk_text
+    client = llm
+    return lambda filename, text: chunk_text_context_aware(
+        filename,
+        text,
+        client,
+        semantic_boundaries=semantic_boundaries,
+        contextualize=contextualize,
+    )

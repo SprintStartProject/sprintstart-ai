@@ -53,4 +53,7 @@ dev = [
 paths_to_mutate = ["src/"]
 tests_dir = ["tests/"]
 also_copy = ["contracts/", "tests/"]
+# chromadb starts background threads when it is imported, so a worker forked from a
+# process that has imported it hangs; without this every mutant of the store times out.
+process_isolation = "forkserver"
 pytest_add_cli_args = ["-p", "no:cacheprovider", "-m", "not integration"]
