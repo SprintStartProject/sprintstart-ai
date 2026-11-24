@@ -1,7 +1,7 @@
+from corpus.source_filter import SourceExclusions
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk
 from rag.context_window import expand_context_window
 from rag.hybrid import to_scored_chunk
-from rag.source_filter import SourceExclusions
-from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from tests.stubs.store import StubVectorStore
 
 

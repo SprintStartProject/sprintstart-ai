@@ -15,13 +15,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from api.schemas import IndustryEvaluationResponse
-from ingestion.source_role import GROUNDING_EXCLUDED_ROLES
+from corpus.source_role import GROUNDING_EXCLUDED_ROLES
+from corpus.types import RetrievalFilters, ScoredChunk
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
+from projects.models import IndustryEvaluation
 from rag.hybrid import BM25IndexCache, hybrid_retrieve
 from rag.retriever import get_bm25_cache
-from rag.types import RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -37,8 +37,8 @@ class _Payload(BaseModel):
     evidence: list[Any] = Field(default_factory=list)
 
 
-def _fallback_response() -> IndustryEvaluationResponse:
-    return IndustryEvaluationResponse(industry="", confidence="low", evidence=[])
+def _fallback_response() -> IndustryEvaluation:
+    return IndustryEvaluation(industry="", confidence="low")
 
 
 def _coerce_evidence(items: list[Any]) -> list[str]:
@@ -80,7 +80,7 @@ def evaluate_industry(
     project_id: str,
     *,
     bm25_cache: BM25IndexCache | None = None,
-) -> IndustryEvaluationResponse:
+) -> IndustryEvaluation:
     """Evaluate the industry/domain of a project from its ingested corpus.
 
     Retrieves grounding evidence scoped to ``project_id`` and prompts the LLM for
@@ -121,7 +121,7 @@ def evaluate_industry(
     if not industry:
         return _fallback_response()
 
-    return IndustryEvaluationResponse(
+    return IndustryEvaluation(
         industry=industry,
         confidence=payload.confidence,
         evidence=_coerce_evidence(payload.evidence),

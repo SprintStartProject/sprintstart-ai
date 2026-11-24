@@ -11,7 +11,7 @@ from api.schemas import (
     IngestStatusResponse,
     StatusArtifactId,
 )
-from ingestion.metadata_store import (
+from store.metadata_store import (
     ArtifactRecord,
     IngestionMetadataStore,
     IngestionStatus,

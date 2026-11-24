@@ -12,12 +12,11 @@ Calls go down. Nothing imports a package above it.
 | Layer | Packages | Responsibility |
 |---|---|---|
 | 1 Adapters | `api` | HTTP: routes, wire models (`schemas`), SSE framing, the composition root (`dependencies`). No business flow. |
-| 2 Features | `buddy`, `assembly`, `insights`, `projects`, `skills` | One user-facing capability each. Independent of each other. Own their prompts, models and orchestration. |
-| 3 Agent kit | `agents` | The tool registry and the retrieval / grep tools the Buddy loop uses. |
-| 4 Retrieval | `rag` | Hybrid search, context window, citations, source classification by path. |
-| 5 Ingestion | `ingestion` | Parse, chunk, embed and store an artifact, as one pipeline. |
-| 6 Persistence | `store` | `VectorStore`, the Chroma implementation, and the ingestion metadata and source-state stores. |
-| 7 Leaves | `corpus`, `llm` | `corpus`: the vocabulary of the indexed material (chunk, filters, ids, source role). `llm`: the model interface and its three providers. Neither imports another of our packages. |
+| 2 Features | `buddy`, `assembly`, `insights`, `projects`, `skills`, `summaries` | One user-facing capability each. Independent of each other. Own their prompts, models and orchestration. The Buddy's tool kit lives in `buddy/tools`. |
+| 3 Retrieval | `rag` | Hybrid search, context window, citations, source classification by path. |
+| 4 Ingestion | `ingestion` | Parse, chunk, embed and store an artifact, as one pipeline. |
+| 5 Persistence | `store` | `VectorStore`, the Chroma implementation, and the ingestion metadata and source-state stores. |
+| 6 Leaves | `corpus`, `llm` | `corpus`: the vocabulary of the indexed material (chunk, filters, ids, source role). `llm`: the model interface and its three providers. Neither imports another of our packages. |
 
 `corpus` is new; the rest exist. The change from today is that `corpus` takes over what `rag`,
 `ingestion` and `store` were all importing from each other, and `onboarding` becomes `buddy` and
@@ -25,12 +24,11 @@ Calls go down. Nothing imports a package above it.
 
 ```
 api
- └─ buddy · assembly · insights · projects · skills        (independent of each other)
-     └─ agents
-         └─ rag
-             └─ ingestion
-                 └─ store
-                     └─ corpus · llm
+ └─ buddy · assembly · insights · projects · skills · summaries   (independent of each other)
+     └─ rag
+         └─ ingestion
+             └─ store
+                 └─ corpus · llm
 ```
 
 ## 3.2 Principles

@@ -1,4 +1,4 @@
-from rag.types import Citation, ScoredChunk
+from corpus.types import Citation, ScoredChunk
 
 
 def build_citations(chunks: list[ScoredChunk]) -> list[Citation]:

@@ -18,10 +18,10 @@ from fastapi.responses import StreamingResponse
 from api.dependencies import get_llm, get_store
 from api.schemas import AssembleOrientationRequest, ValidationErrorResponse
 from api.sse import stream_progress
+from assembly.orientation.job import assemble_orientation, stream_orientation
+from assembly.orientation.models import OrientationOutcome
 from llm.base import LLMClient
 from llm.errors import LLMUnavailableError
-from onboarding.orientation import assemble_orientation, stream_orientation
-from onboarding.orientation_models import OrientationOutcome
 from store.base import VectorStore
 
 router = APIRouter(prefix="/onboarding/orientation", tags=["onboarding-orientation"])

@@ -1,0 +1,15 @@
+--- system ---
+
+You generate short descriptive titles.
+
+Rules:
+
+- return only the title
+- no quotes
+- no explanations
+- respect the character limit
+
+--- user ---
+Create a title with maximum 40 characters.
+
+How do REST and GraphQL differ?

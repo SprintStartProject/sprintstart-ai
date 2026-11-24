@@ -1,44 +1,63 @@
 # The layers of the AI service. Higher layers may import lower ones, never the other
-# way round, and the features on one line are independent of each other. `ignore_imports` lists the
-# violations that existed when this was introduced; it may only shrink (an entry that no longer
-# matches fails the check). Run with `PYTHONPATH=src uv run lint-imports`.
+# way round, and the features on one line are independent of each other. There are no known
+# violations: a new one fails the check, and an `ignore_imports` entry needs a human decision.
+# Run with `PYTHONPATH=src uv run lint-imports`.
 
 [importlinter]
+include_external_packages = True
 root_packages =
     api
-    onboarding
+    buddy
+    assembly
     insights
     projects
     skills
-    agents
+    summaries
     rag
     ingestion
     store
     llm
+    corpus
 
 [importlinter:contract:layers]
-name = Layers: api > features > agents > rag > ingestion > store > llm
+name = Layers: api > features > rag > ingestion > store > llm | corpus
 type = layers
 layers =
     api
-    onboarding | insights | projects | skills
-    agents
+    buddy | assembly | insights | projects | skills | summaries
+    rag
+    ingestion
+    store
+    llm | corpus
+
+
+[importlinter:contract:routes-adapt]
+name = Routes adapt: api.routes does not reach into parsing, chunking or the Chroma store
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    api.routes
+forbidden_modules =
+    ingestion.parsing
+    ingestion.chunking
+    store.chroma_store
+
+[importlinter:contract:http-only-in-api]
+name = Only api knows the web framework
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    buddy
+    assembly
+    insights
+    projects
+    skills
+    summaries
     rag
     ingestion
     store
     llm
-ignore_imports =
-    ingestion.mapper -> rag.filters
-    ingestion.mapper -> rag.types
-    ingestion.metadata_store -> rag.filters
-    ingestion.source_state_store -> rag.source_filter
-    projects.evaluation -> api.schemas
-    skills.suggestion -> api.schemas
-    store.base -> ingestion.source_role
-    store.base -> rag.source_filter
-    store.base -> rag.types
-    store.chroma_store -> ingestion.metadata_store
-    store.chroma_store -> ingestion.source_role
-    store.chroma_store -> rag.filters
-    store.chroma_store -> rag.source_filter
-    store.chroma_store -> rag.types
+    corpus
+forbidden_modules =
+    fastapi
+    starlette

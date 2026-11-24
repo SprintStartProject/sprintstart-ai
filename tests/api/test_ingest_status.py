@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from api.app import app
 from api.dependencies import get_ingestion_metadata_store
-from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
+from store.metadata_store import ArtifactRecord, IngestionMetadataStore
 
 _URL = "/api/v1/ingest/status"
 _CREATED = "2026-01-01T00:00:00+00:00"

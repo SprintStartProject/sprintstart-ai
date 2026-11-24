@@ -1,5 +1,5 @@
+from corpus.types import ScoredChunk
 from rag.citation import build_citations
-from rag.types import ScoredChunk
 
 
 def test_build_citations_maps_chunk_fields() -> None:

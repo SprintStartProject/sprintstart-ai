@@ -1,125 +1,17 @@
-import json
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ValidationError
 
 from api.dependencies import get_llm
 from api.schemas import (
-    GradeAnswerItem,
     GradeAnswerResult,
     GradeAnswersRequest,
     GradeAnswersResponse,
     ValidationErrorResponse,
 )
-from llm.base import LLMClient, Message
+from assembly import grading
+from llm.base import LLMClient
 from llm.errors import LLMUnavailableError
-from llm.parsing import extract_json_object
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_MAX_GRADING_ATTEMPTS = 2
-
-SYSTEM_PROMPT = """
-You grade short-text answers to onboarding knowledge-check questions.
-
-For each answer, decide whether it is semantically correct against the
-reference answer:
-
-- Judge the core meaning, not exact wording. Paraphrases, different casing,
-  and typos are fine as long as the key fact/command is right.
-- No extra facts beyond the reference answer are required.
-- If the core claim is wrong, missing, or contradicts the reference, mark it
-  incorrect.
-- 'feedback' is one short sentence shown to the user explaining the verdict.
-
-Return STRICT JSON only (no prose, no markdown fences), correlating results
-by 'id', in the same order as the input:
-{"results": [{"id": str, "correct": bool, "confidence": number 0..1, "feedback": str}]}
-"""
-
-
-class _GradedItem(BaseModel):
-    id: str
-    correct: bool
-    confidence: float | None = None
-    feedback: str = ""
-
-
-class _Payload(BaseModel):
-    results: list[_GradedItem]
-
-
-def _build_prompt(answers: list[GradeAnswerItem]) -> list[Message]:
-    blocks = [
-        f"id: {item.id}\n"
-        f"question: {item.question}\n"
-        f"reference_answer: {item.reference_answer}\n"
-        f"user_answer: {item.user_answer}"
-        for item in answers
-    ]
-    return [
-        Message(role="system", content=SYSTEM_PROMPT),
-        Message(role="user", content="\n\n".join(blocks)),
-    ]
-
-
-def _grade(llm: LLMClient, to_grade: list[GradeAnswerItem]) -> dict[str, _GradedItem]:
-    """Grade in one call, asking once more when the reply is unusable.
-
-    An unreadable reply marks every answer in it "could not be graded" -- which the
-    caller records as wrong. A small local model breaks its JSON now and then, and
-    a hire whose right answer came back wrong for that reason has been told
-    something false about their own knowledge. One correction round is cheap
-    against that.
-
-    Valid JSON is not enough: a reply that leaves an answer out (``{}``, or one id
-    missing) would record that answer as wrong just the same, so it gets the same
-    correction round. It must hold exactly one grade per requested id.
-    """
-    expected_ids = {item.id for item in to_grade}
-    messages = _build_prompt(to_grade)
-    for attempt in range(_MAX_GRADING_ATTEMPTS):
-        try:
-            raw = llm.generate(messages)
-        except LLMUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        try:
-            payload = _Payload.model_validate_json(extract_json_object(raw))
-            graded_by_id = {item.id: item for item in payload.results}
-            if (
-                len(payload.results) != len(to_grade)
-                or set(graded_by_id) != expected_ids
-            ):
-                raise ValueError(
-                    "grading response does not match the requested answer ids: "
-                    f"expected {sorted(expected_ids)}, got "
-                    f"{[item.id for item in payload.results]}"
-                )
-            return graded_by_id
-        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
-            logger.warning(
-                "Could not parse grade-answers output (attempt %d): %s",
-                attempt + 1,
-                exc,
-            )
-            if attempt + 1 == _MAX_GRADING_ATTEMPTS:
-                break
-            messages = [
-                *messages,
-                Message(role="assistant", content=raw),
-                Message(
-                    role="user",
-                    content=(
-                        f"That response could not be validated: {exc}. Return the same "
-                        "grades again as one valid JSON object matching the schema "
-                        "exactly. Return JSON only."
-                    ),
-                ),
-            ]
-    return {}
 
 
 @router.post(
@@ -170,31 +62,27 @@ def grade_answers(
         HTTPException:
             - 503: If the LLM backend is unavailable or unreachable.
     """
-    results: dict[str, GradeAnswerResult] = {}
-    to_grade = [item for item in body.answers if item.user_answer.strip()]
-    for item in body.answers:
-        if not item.user_answer.strip():
-            results[item.id] = GradeAnswerResult(
-                id=item.id, correct=False, feedback="No answer submitted."
+    answers = [
+        grading.AnswerToGrade(
+            id=item.id,
+            question=item.question,
+            reference_answer=item.reference_answer,
+            user_answer=item.user_answer,
+        )
+        for item in body.answers
+    ]
+    try:
+        grades = grading.grade_answers(llm, answers)
+    except LLMUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return GradeAnswersResponse(
+        results=[
+            GradeAnswerResult(
+                id=grade.id,
+                correct=grade.correct,
+                confidence=grade.confidence,
+                feedback=grade.feedback,
             )
-
-    if to_grade:
-        graded_by_id = _grade(llm, to_grade)
-
-        for item in to_grade:
-            graded = graded_by_id.get(item.id)
-            if graded is None:
-                results[item.id] = GradeAnswerResult(
-                    id=item.id,
-                    correct=False,
-                    feedback="Could not be graded automatically.",
-                )
-            else:
-                results[item.id] = GradeAnswerResult(
-                    id=item.id,
-                    correct=graded.correct,
-                    confidence=graded.confidence,
-                    feedback=graded.feedback,
-                )
-
-    return GradeAnswersResponse(results=[results[item.id] for item in body.answers])
+            for grade in grades
+        ]
+    )

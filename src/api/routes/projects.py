@@ -41,7 +41,12 @@ def evaluate_project_industry(
     llm: Annotated[LLMClient, Depends(get_llm)],
 ) -> IndustryEvaluationResponse:
     try:
-        return evaluate_industry(llm, store, project_id=project_id)
+        evaluation = evaluate_industry(llm, store, project_id=project_id)
+        return IndustryEvaluationResponse(
+            industry=evaluation.industry,
+            confidence=evaluation.confidence,
+            evidence=evaluation.evidence,
+        )
     except LLMUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

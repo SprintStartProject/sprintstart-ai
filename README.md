@@ -76,7 +76,7 @@ The service runs on port `8000`.
 Artifacts belong to one or more **projects** (the backend's `artifact_projects` mapping), and every retrieval-backed feature is scoped to exactly one project. Concretely:
 
 - **Ingest** carries the membership: `projectIds` on `POST /api/v1/ingest` and on each artifact of `POST /api/v1/ingest/sync`. It is written into the chunk metadata (as a delimited `project_ids` string plus one `project:<id>` marker key that Chroma can filter on server-side) and into the ingestion index.
-- **Retrieval** takes a `project_id` filter that is enforced on both halves of hybrid retrieval — the Chroma `where` clause and the in-memory/BM25 path (`rag/filters.py`) — as well as in the corpus-scanning agent tools (`grep`, `fetch_file`).
+- **Retrieval** takes a `project_id` filter that is enforced on both halves of hybrid retrieval — the Chroma `where` clause and the in-memory/BM25 path (`corpus/filters.py`) — as well as in the corpus-scanning agent tools (`grep`, `fetch_file`).
 - **Requests** must name the project: `projectId` is required on `/insights/knowledge-gaps/detect` and `/insights/faq/group`, and `projectIds` on the orientation, diagram and starter-work requests. The backend authorizes the caller for that project (`ProjectAuthorization`) and passes it through.
 
 Filtering is **fail-closed**: a chunk with no project association is invisible to every project rather than visible to all of them. Chunks ingested before `projectIds` was sent therefore stop being retrievable — re-run a full `POST /api/v1/ingest/sync` with `projectIds` populated to backfill them.

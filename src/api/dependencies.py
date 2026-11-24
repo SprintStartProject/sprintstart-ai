@@ -2,8 +2,6 @@ import logging
 import os
 from functools import lru_cache
 
-from ingestion.metadata_store import IngestionMetadataStore
-from ingestion.source_state_store import SourceStateStore
 from llm.anthropic_client import AnthropicClient
 from llm.base import LLMClient
 from llm.ollama_client import OllamaClient
@@ -11,6 +9,8 @@ from llm.openai_client import OpenAIClient
 from llm.split_client import SplitLLMClient
 from store.base import VectorStore
 from store.chroma_store import ChromaVectorStore
+from store.metadata_store import IngestionMetadataStore
+from store.source_state_store import SourceStateStore
 
 logger = logging.getLogger(__name__)
 

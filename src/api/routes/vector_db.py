@@ -12,9 +12,9 @@ from api.schemas import (
     VectorDbSearchResponse,
     VectorDbStatusResponse,
 )
+from corpus.types import Chunk, ScoredChunk
 from llm.base import LLMClient
 from llm.errors import LLMUnavailableError
-from rag.types import Chunk, ScoredChunk
 from store.base import VectorStore
 
 router = APIRouter(prefix="/vector-db", tags=["vector-db"])

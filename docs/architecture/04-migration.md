@@ -1,92 +1,159 @@
 # 4 Migration
 
-> **Status: draft (2026-10-22), proposed.** From the [as-is](02-as-is.md) to the
+> **Status: in progress (updated 2026-10-22).** Stages A, B and C are done, the folder structure pass is
+> open as #101, stage D is half done and stage E has begun. From the [as-is](02-as-is.md) to the
 > [target](03-target.md) in small PRs. Every PR passes the full gate set (`ruff`, limits, `pyright`,
-> `pytest`, `lint-imports`, the ratchet) and none changes behaviour or an HTTP contract. Each stage
-> has an exit measure, so progress shows up as numbers.
+> `pytest`, `lint-imports`, the ratchet, and mutation testing on the code it adds) and none changes
+> behaviour or an HTTP contract. Each stage has an exit measure, so progress shows up as numbers.
 
 ## 4.1 Tracked numbers
 
-| Number | Today | Target | Source |
-|---|---:|---:|---|
-| Ignored imports in `.importlinter` | 14 | 0 | `.importlinter` |
-| Mutual package pairs | 3 | 0 | `lint-imports` |
-| Features importing `api` | 2 | 0 | `lint-imports` |
-| Route modules that import parsers, chunkers or the Chroma store | 2 (`ingest`, `ingest_run`) | 0 | forbidden contract |
-| Route handlers over 45 lines | 7 (see [§2.4](02-as-is.md#24-orchestration-sits-in-the-api-layer)) | 0 | AST |
-| Ingest pipelines | 2 | 1 | `ingestion.pipeline` |
-| Functions over 100 lines | 14 | 0 | `ruff-limits` / AST |
-| Functions over 60 lines | 40 | ≤ 15 | AST |
-| `*_id` parameters typed `str` | 50 | 0 | AST |
-| Packages named in the contract | 10 | 12 (`corpus` added, `onboarding` split into `buddy` and `assembly`) | `.importlinter` |
+*Before* is the as-is snapshot (`c188b82`, [§2](02-as-is.md)). *Now* is `main` at `0aa3429`, after
+PRs #88 to #97, measured with the same scripts. The package count includes the folder structure pass (#101), which is open.
+
+| Number | Before | Now | Target | Source |
+|---|---:|---:|---:|---|
+| Ignored imports in `.importlinter` | 14 | **0** | 0 | `lint-imports` |
+| Mutual package pairs | 5 | **0** | 0 | AST pass |
+| Features importing `api` | 2 | **0** | 0 | `lint-imports` |
+| Route modules that import parsers, chunkers or the Chroma store | 2 | **0**, now enforced | 0 | forbidden contract |
+| Route handlers over 45 lines | 7 | **0** | 0 | AST |
+| Ingest pipelines | 2 | **1** | 1 | `ingestion.pipeline` |
+| Functions over 100 lines | 14 | **7** | 0 | AST |
+| Functions over 60 lines | 40 | 36 | ≤ 15 | AST |
+| Functions over 30 lines | 111 | 115 | — | AST |
+| Functions | 499 | 579 | — | AST |
+| Files over 400 lines | 15 | 10 | — | line count |
+| `*_id` parameters typed `str` | 50 | 49 | 0 | AST |
+| Packages named in the layers contract | 10 | 12 (with #101) | 12 | `.importlinter` |
+| Duplicated lines | 119 | 82 | — | `metrics.sh` |
+| Dead-code findings | 15 | 15 | — | `metrics.sh` |
+| `ruff-limits` baseline | 56 entries, 93 violations | 53 entries, 74 violations | 0 | `ruff-limits-baseline.json` |
+| Passing tests | 1,079 | 1,154 | — | `pytest` |
+| Source lines | 18,701 | 19,639 | — | line count |
+
+Three things in this table are less good than they look and are worth reading as such:
+
+- **The count of long functions barely moves below 100 lines.** Splitting a 170-line function gives a
+  60-line function and ten small ones, so the number over 30 lines went *up* by four and the number
+  over 60 went down by only four. What fell is the long tail: seven of the 14 functions over 100 lines
+  are gone, and the longest is now 143 lines instead of 239.
+- **Source grew by 5 %.** Named stages, small dataclasses and the shared pipeline cost lines. The
+  gain is that each function now does one thing, not that there is less code.
+- **Coverage was not re-measured here.** The recorded 92.6 % is enforced by CI, which the changed
+  code passes.
 
 ## 4.2 Stages
 
-### Stage A: make the layering true (cheap, high yield)
+### Stage A: make the layering true — done
 
-Moves only. No logic changes, and every PR leaves the suite unchanged.
+Moves only. No logic changes, and every PR left the suite unchanged.
 
-| PR | Change | Exit measure |
+| PR | Change | Ignored imports |
 |---|---|---|
-| A1 | Create `corpus`. Move `rag.types`, `ingestion.source_role`, `rag.source_filter` and the pure helpers of `rag.filters` (`normalize_source_system`, the project-id encoding and metadata keys, `matches_retrieval_filters`, `has_narrowing_filters`, timestamp helpers) into it. | 14 → 4 |
-| A2 | Move `where_filter_for_chroma` from `rag.filters` to `store`. | 4 → 3 |
-| A3 | Move `IngestionMetadataStore` and `SourceStateStore` into `store`. | 3 → 2 |
-| A4 | `projects.evaluation` and `skills.suggestion` return feature result types; `api` maps them to `schemas`. | 2 → 0 |
-| A5 | Rewrite `.importlinter` to the seven layers of [§3.1](03-target.md#31-layers) with an empty `ignore_imports`, plus the `corpus` contract. | mutual pairs 3 → 0 |
+| A1 · #88 | Created `corpus` and moved the chunk and filter types, `SourceRole`, `SourceExclusions` and the pure filter predicates into it. | 14 → 4 |
+| A2 · #89 | Moved `where_filter_for_chroma` from `rag` to `store`. | 4 → 3 |
+| A3 · #90 | Moved `IngestionMetadataStore` and `SourceStateStore` into `store`. | 3 → 2 |
+| A4 · #91 | `projects.evaluation` and `skills.suggestion` return feature result types; `api` maps them to the wire models. | 2 → 0 |
 
-### Stage B: routes adapt, services orchestrate
+The planned A5 (rewrite `.importlinter`) needed no PR of its own: `corpus` joined the bottom layer in
+A1 and the `ignore_imports` key was deleted in A4, so a new violation now fails the check.
 
-| PR | Change | Exit measure |
-|---|---|---|
-| B1 | Extract `ingestion/pipeline.py` from `ingest_run.py` and `ingest.py`, with the shared steps as separate small functions. Both routes call it. | ingest pipelines 2 → 1; `_ingest_one` 239 → ≤ 60 |
-| B2 | Move answer grading (`grading.py`), the membership rewrite (`artifact_projects.py`), the summary generation in `summaries.py` and the title generation in `title.py` out of the route modules into the package that owns each, and let `buddy_agent_stream` hand its event mapping to the Buddy. | route handlers over 45 lines 7 → 0 (with B1) |
-| B3 | Add the `forbidden` contracts for `api.routes` and `fastapi` ([§3.4](03-target.md#enforcement)). | rules 3 and 4 enforced |
-
-### Stage C: one package per feature
-
-Moves only.
+### Stage B: routes adapt, services orchestrate — done
 
 | PR | Change |
 |---|---|
-| C1 | `onboarding` → `buddy` (agent, open, compact, persona, query fence, vocabulary). |
-| C2 | `onboarding` → `assembly` (assembly stages, phase, orientation, diagram, starter work, their models, corpus fingerprint gate, citations, progress, similarity). |
-| C3 | Add the `independence` contract over `buddy`, `assembly`, `insights`, `projects`, `skills`. |
+| B1 · #92 | One ingest pipeline: shared steps in `ingestion/pipeline.py`, the upload and synced-artifact flows in `upload_ingest.py` and `sync_ingest.py`. `_ingest_one` 239 lines and `ingest` 156 lines are gone. Sixteen characterization tests were written first. |
+| B2 · #93 | Answer grading and title generation moved to `onboarding/grading.py` and `onboarding/titles.py`. |
+| B2 · #94 | The Buddy and summary streams share `api.sse.stream_events`; `ArtifactSummaryAgent.events` owns the loop over model output; the buffered and streaming Buddy endpoints share one set of turn options. |
+| B3 · #95 | Two `forbidden` contracts: `api.routes` may not import parsers, chunkers or the Chroma store directly, and only `api` may import `fastapi` or `starlette`. |
 
-### Stage D: long functions (P7)
+Two changes from the original plan. The membership rewrite in `artifact_projects.py` stayed where it
+is: its handler is 36 lines and imports nothing it should not, so moving it would have been churn.
+And the `forbidden` contract allows indirect imports, because the ingest routes legitimately reach
+the parsers through the pipeline.
 
-Each PR removes one of the recurring shapes from [§2.6](02-as-is.md#26-long-functions-and-raw-values).
-Prompt goldens and contract suites must stay green without edits.
+### Stage C: one package per feature — done (#99)
 
-| PR | Change | Exit measure |
+Moves only. `onboarding` held two features with no import between them, so the split needed no new
+seam.
+
+| PR | Change |
+|---|---|
+| C1+C2 · #99 | `onboarding` → `buddy` (agent, events, evidence, opening, compact, persona, query fence, vocabulary) and `assembly` (the four jobs with their drafts and models, grading, titles, citations, progress, similarity, `stages`, `fingerprint`). Tests mirror the layout and the shared golden helper moves to `tests/support`. |
+| C3 · #99 | Both packages join the independent features in the layers contract. A planted `buddy` → `assembly` import fails it. |
+
+Two files were renamed to avoid confusion: `assembly.py` became `assembly/stages.py`, and
+`onboarding/corpus.py` became `assembly/fingerprint.py`, so it is not mistaken for the top-level `corpus`
+package. The planned separate PRs C1 to C3 were one, because the split is only checkable once both
+packages and the contract exist together.
+
+### Folder structure pass — open (#101)
+
+Renames only, after stage C. Three groupings, one commit each:
+
+- `assembly` (21 flat files) became four job packages, `phase/`, `orientation/`, `diagram/` and
+  `starter_work/`, each with `job.py`, `draft.py` and `models.py`.
+- `ingestion` (17 flat files) became `parsing/`, `chunking/` and `pipeline/` (`steps`, `upload`, `sync`).
+  The "routes adapt" contract now names two packages instead of eight modules.
+- `agents` was removed. It held the Buddy's tool kit and one unrelated file, so the tools became
+  `buddy/tools/` and `artifact_summary` became its own feature, `summaries/`. The layers contract lost
+  a layer and gained a feature.
+
+Left alone on purpose: `projects` (139 lines) and `skills` (303 lines) are small, but each is one
+cohesive feature, and merging them would weaken the independence contract. `store` still holds both
+the vector store and the SQLite stores, and `api/schemas.py` is still one 1,563-line file.
+
+### Stage D: long functions (P7) — half done
+
+| PR | Change | Result |
 |---|---|---|
-| D1 | `phase.stream_phase` becomes a declared sequence of `assembly` stages. | 173 → ≤ 60 |
-| D2 | Same for `orientation.stream_orientation` and `diagram.stream_diagram`. | 161, 161 → ≤ 60 |
-| D3 | Same for `starter_work.stream_starter_work_pool`. | 148 → ≤ 60 |
-| D4 | `buddy_agent.stream_agent_turn`: separate the hop loop, the tool dispatch and the event framing. | 219 → ≤ 60 |
-| D5 | `buddy_open.stream_session`, `buddy_persona.build_persona`. | 121, 120 → ≤ 60 |
-| D6 | `suggest_skills`, `chunk_text_context_aware`, `parse_pdf`. | 140, 143, 111 → ≤ 60 |
-| D7 | Provider stream handling: `openai_client.chat_stream`, `chroma_store.query`. | 120, 116 → ≤ 60 |
+| D1 · #96 | The four assembly jobs become named stages. Each job is two files: `<job>.py` (the stages) and `<job>_draft.py` (what the model drafts and how it is read); the starter-work result types move to `starter_work_models.py`. | 173 → 65, 161 → 64, 161 → 62, 148 → 78 |
+| D2 · #97 | The Buddy turn becomes a `_Turn` with named hop, search, record and forced-answer methods; the events move to `buddy_events.py` and the search tools to `buddy_evidence.py`. | 219 → 64 |
 
-### Stage E: typed identifiers (P8)
+The planned form of D1 ("a declared sequence of shared `assembly` stages") was not built. The four jobs
+share the retrieval and generation stages that were already in `assembly.py`, but their grounding and
+outcome steps differ too much for one generic runner to read better than four short pipelines.
 
-| PR | Change | Exit measure |
-|---|---|---|
-| E1 | Add `ProjectId`, `ArtifactId`, `ConnectorId` to `corpus`. Convert at the API boundary (`schemas` stay `str` on the wire). | types exist, `api` converts |
-| E2 | Retrieval, ingestion and persistence take the types. | `str` ids 50 → ≤ 15 |
-| E3 | Features and agent tools take the types. | 50 → 0 |
+`suggest_skills` (140 → 36) is #100. Still over 100 lines: `chunk_text_context_aware` (143),
+`buddy.opening.stream_session` (121), `buddy.persona.build_persona` (120),
+`openai_client.chat_stream` (120), `chroma_store.query` (116) and `parse_pdf` (111).
 
-## 4.3 Order and dependencies
+### Stage E: typed identifiers (P8) — begun
 
-A → B → C is the order that keeps each PR small: A makes `corpus` and the layer rule exist, B removes
-the orchestration that A's layer rule would otherwise flag in `api`, and C is a rename that is only
-cheap once the imports are clean. D and E are independent of C and of each other and can run in
-parallel branches after A.
+`corpus/ids.py` holds `ArtifactId` and `SourceId`, introduced with B1 because the ratchet rejects new
+raw `*_id: str` fields. They are used by the ingest pipeline, the summary agent and their routes, and
+converted from the wire at the route. `ProjectId` and `ConnectorId` are not added yet:
+`api.schemas.ProjectId` is already a validated string alias, so a domain `ProjectId` needs a decision
+about naming first. Remaining raw ids: `artifact_id` 28, `project_id` 15, `connector_id` 4.
+
+## 4.3 What the gates taught us
+
+The gates shaped the work, and three lessons repeat:
+
+- **A file over the size limit may not grow, whatever the reason.** Extracting stages added scaffolding,
+  so the four assembly jobs and the Buddy agent each had to be split to shrink. That is why a
+  refactoring of functions produced new modules.
+- **Moved code counts as added code for mutation testing.** Every move needed tests that pin what
+  moved: the skill suggestion change (#91) failed the gate at 58 % until it had them, and the
+  streaming and assembly PRs were hardened with them before pushing. Prompt goldens do most of this
+  work.
+- **Characterization tests before extraction find wrong assumptions.** Writing them for the ingest
+  paths showed that the sync route prepends the title before the size check and that an unreadable
+  PDF completes with zero chunks. The refactoring then kept both, on purpose.
+
+One side effect to know about: log messages emitted by moved code now come from the new module's
+logger (`assembly.phase.draft`, not the module the code used to live in).
 
 ## 4.4 Open questions
 
-1. Whether to give each feature its own wire models (splitting `api/schemas.py`) once A4 is done.
-   It changes no structure, so it is left to a later pass.
+1. Whether to give each feature its own wire models (splitting `api/schemas.py`, 1,563 lines). It
+   changes no structure, so it is left to a later pass.
 2. Whether the BM25 index should be per project. Nothing measures it today; track the index size
-   after stage A before deciding.
-3. Whether `agents` stays a separate layer or becomes a sub-package of `buddy`. Today only the
-   Buddy uses it; keep it until a second consumer or a third tool set appears.
+   before deciding.
+3. What to call a domain `ProjectId` next to the wire alias of the same name.
+4. What to do about the files that stay over 400 lines and are not on this plan: `chroma_store.py`
+   (961), `metadata_store.py` (741), the three provider clients (653, 433, 428) and `buddy_persona.py`
+   (645). They are grandfathered by the ratchet and not covered by any stage; a stage F would own them.
+   `buddy/agent.py` (513) and the two chunkers (445, 440) are also over, but smaller and partly
+   covered by stage D.
