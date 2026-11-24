@@ -147,7 +147,7 @@ connector id are all `str` and can be swapped without the type checker noticing.
 | State | Where | Note |
 |---|---|---|
 | BM25 index | `rag.retriever._BM25_CACHE` | One index over the **whole** corpus, shared by all callers and rebuilt when the shared corpus revision changes. Project scoping is applied after the fact. Memory grows with the corpus. |
-| Chroma clients | `store.chroma_store._CLIENT_CACHE` | One per path |
+| Chroma clients | `store.chroma_client.CLIENT_CACHE` | One per path |
 | LLM, store and metadata clients | `api.dependencies` (`lru_cache`) | The composition root |
 
 This is acceptable for one instance (see [drivers §1.6](01-drivers.md#16-what-is-deliberately-not-a-driver)),

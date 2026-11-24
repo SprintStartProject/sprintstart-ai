@@ -56,12 +56,13 @@ triggers Docker image publish to `ghcr.io/sprintstartproject/sprintstart-ai`.
 - **`api/`** — FastAPI app (`app.py`), DI (`dependencies.py`), `schemas.py`,
   SSE helpers (`sse.py`), and route modules under `routes/`.
 - **`buddy/`** — The Buddy. `agent.py` is the conversation engine (`run_agent_turn`
-  and the `_Turn` that drives it): one flat tool loop over a single message list — it
+  and the `Turn` in `turn.py` that drives it, over the message list `conversation.py` keeps): one flat tool loop over a single message list — it
   searches while the model asks, then answers from that same conversation. Tool results
   carry the retrieved text, so the loop that searched is the loop that answers.
   `tools/` holds the tool kit (`ToolRegistry`, retrieval, grep, evidence budget),
   `events.py` the stream events, `evidence.py` the local search tools and how their results
-  are shown, plus `opening.py`, `compact.py`, `persona.py`, `query_fence.py` and
+  are shown, plus `opening.py`, `compact.py`, `persona.py` (its wording in
+  `persona_clauses.py`, the manager's variant in `team_persona.py`), `query_fence.py` and
   `vocabulary.py`. `api/routes/buddy.py` serves it.
 - **`assembly/`** — Deterministic staged assembly jobs (not agentic). One package per job:
   `phase/`, `orientation/`, `diagram/` and `starter_work/`, each with `job.py` (the
@@ -77,22 +78,28 @@ triggers Docker image publish to `ghcr.io/sprintstartproject/sprintstart-ai`.
 - **`rag/`** — `retriever.py`, `hybrid.py` (BM25 + vector hybrid retrieval
   with RRF fusion), `citation.py`, `prompt.py`.
 - **`ingestion/`** — `parsing/` (per-filetype parsers behind `parser.py`), `chunking/`
-  (`chunker.py`, `context_aware_chunker.py`) and `pipeline/` (the shared steps and the
+  (`chunker.py`, `context_aware_chunker.py`, `parsed_chunk.py`) and `pipeline/` (the shared steps and the
   upload and synced-artifact flows), plus `mapper.py` and `membership.py`.
-- **`store/`** — `VectorStore` protocol (`base.py`), `chroma_store.py`, and the
-  SQLite stores for ingestion metadata (`metadata_store.py`) and source state
+- **`store/`** — `VectorStore` protocol (`base.py`), `chroma_store.py` (with
+  `chroma_records.py` for turning Chroma records into chunks, `chroma_membership.py` for
+  rewriting project membership, `revocation_ledger.py` for what must be hidden right now and
+  `chroma_client.py` for the per-path client), and the SQLite stores for ingestion metadata
+  (`metadata_store.py`, with the tombstone and revision tables in `revocation_tables.py`) and
+  source state
   (`source_state_store.py`).
 - **`corpus/`** — the vocabulary of the indexed material, with no I/O and no
   dependency on our other packages: `types.py` (`Chunk`, `ScoredChunk`,
   `RetrievalFilters`), `source_role.py`, `source_filter.py`, and the pure
   filter predicates and project-id encoding in `filters.py`.
 - **`llm/`** — `LLMClient` protocol (`base.py`) with implementations:
-  `ollama_client.py`, `openai_client.py`, `anthropic_client.py`.
+  `ollama_client.py`, `openai_client.py` (its streamed tool turn in `openai_stream.py`),
+  `anthropic_client.py`; each has a `*_wire.py` beside it with the conversion of our messages
+  and tools to that provider's format.
   `SplitLLMClient` lets generation and embeddings use different backends
   (`LLM_BACKEND` vs `EMBED_BACKEND`). All three take a request timeout
   (`LLM_TIMEOUT_SECONDS`, default 600). The Anthropic client sets
   prompt-cache breakpoints; caching matches on exact bytes, so read
-  `anthropic_client._user_message` before changing message serialisation.
+  `anthropic_wire.user_message` before changing message serialisation.
 
 ## Project separation
 

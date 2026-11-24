@@ -162,7 +162,38 @@ def stream_session(
     """
     system = _TEAM_STREAM_SYSTEM if team_mode else _STREAM_SYSTEM
     fallback = _TEAM_FALLBACK_GREETING if team_mode else _FALLBACK_GREETING
-    prompt = [
+    splitter = _GreetingSplitter()
+    try:
+        for event in llm.stream(_opening_prompt(system, memory, recent, state)):
+            if isinstance(event, TextDelta) and event.text:
+                emit = splitter.feed(event.text)
+                if emit:
+                    yield {"type": "token", "content": emit}
+    except LLMUnavailableError:
+        yield {"type": "done", "greeting": fallback, "action": None}
+        return
+
+    flushed = splitter.finish()
+    if flushed:
+        yield {"type": "token", "content": flushed}
+
+    label, question = _read_action_tail(splitter.tail)
+    yield {
+        "type": "done",
+        # Byte-identical to the concatenated tokens, deliberately. The client renders
+        # the tokens and the caller persists this; if they differed, the message a hire
+        # watched arrive would not be the one they see after a reload.
+        "greeting": splitter.greeting if splitter.greeting.strip() else fallback,
+        "action": (
+            {"label": label, "question": question} if label and question else None
+        ),
+    }
+
+
+def _opening_prompt(
+    system: str, memory: str | None, recent: list[Message], state: str
+) -> list[Message]:
+    return [
         Message(role="system", content=system),
         Message(
             role="user",
@@ -176,66 +207,61 @@ def stream_session(
         ),
     ]
 
-    greeting = ""
-    tail = ""
-    pending = ""
-    in_greeting = True
 
-    try:
-        for event in llm.stream(prompt):
-            if not isinstance(event, TextDelta):
-                continue
-            chunk = event.text
-            if not chunk:
-                continue
-            if not in_greeting:
-                tail += chunk
-                continue
-            pending += chunk
-            cut = pending.find(_ACTION_MARKER)
-            if cut != -1:
-                # Trailing whitespace before the marker is formatting, not greeting.
-                head = pending[:cut].rstrip()
-                if head:
-                    greeting += head
-                    yield {"type": "token", "content": head}
-                tail = pending[cut + len(_ACTION_MARKER) :]
-                pending = ""
-                in_greeting = False
-                continue
-            # A suffix that could still grow into the marker is held back, never
-            # emitted and never treated as the end of the greeting: "<<<ACT" is both a
-            # partial marker and a legitimate six characters of prose, and only the
-            # next chunk decides which. Holding back only that suffix is what keeps a
-            # short greeting streaming instead of waiting for a fixed-size buffer.
-            keep = _held_back_len(pending)
-            if keep < len(pending):
-                emit, pending = (
-                    pending[: len(pending) - keep],
-                    pending[len(pending) - keep :],
-                )
-                greeting += emit
-                yield {"type": "token", "content": emit}
-    except LLMUnavailableError:
-        yield {"type": "done", "greeting": fallback, "action": None}
-        return
+class _GreetingSplitter:
+    """Separates the streamed greeting from the action section behind the marker.
 
-    # Whatever is still held back was never a marker after all, so it is prose.
-    if in_greeting and pending:
-        greeting += pending
-        yield {"type": "token", "content": pending}
+    Chunks arrive at arbitrary boundaries, so :meth:`feed` returns only the text that
+    is certainly greeting; a suffix that could still grow into the marker stays held
+    back until the next chunk decides what it was.
+    """
 
-    label, question = _read_action_tail(tail)
-    yield {
-        "type": "done",
-        # Byte-identical to the concatenated tokens, deliberately. The client renders
-        # the tokens and the caller persists this; if they differed, the message a hire
-        # watched arrive would not be the one they see after a reload.
-        "greeting": greeting if greeting.strip() else fallback,
-        "action": (
-            {"label": label, "question": question} if label and question else None
-        ),
-    }
+    def __init__(self) -> None:
+        self.greeting = ""
+        self.tail = ""
+        self._pending = ""
+        self._in_greeting = True
+
+    def feed(self, chunk: str) -> str:
+        """Takes the next chunk and returns the greeting text it makes safe to emit."""
+        if not self._in_greeting:
+            self.tail += chunk
+            return ""
+        self._pending += chunk
+        cut = self._pending.find(_ACTION_MARKER)
+        if cut != -1:
+            return self._enter_action(cut)
+        # A suffix that could still grow into the marker is held back, never
+        # emitted and never treated as the end of the greeting: "<<<ACT" is both a
+        # partial marker and a legitimate six characters of prose, and only the
+        # next chunk decides which. Holding back only that suffix is what keeps a
+        # short greeting streaming instead of waiting for a fixed-size buffer.
+        keep = _held_back_len(self._pending)
+        if keep == len(self._pending):
+            return ""
+        emit, self._pending = (
+            self._pending[: len(self._pending) - keep],
+            self._pending[len(self._pending) - keep :],
+        )
+        self.greeting += emit
+        return emit
+
+    def finish(self) -> str:
+        """Returns what was still held back: it was never a marker after all."""
+        if not (self._in_greeting and self._pending):
+            return ""
+        flushed = self._pending
+        self.greeting += flushed
+        return flushed
+
+    def _enter_action(self, cut: int) -> str:
+        # Trailing whitespace before the marker is formatting, not greeting.
+        head = self._pending[:cut].rstrip()
+        self.greeting += head
+        self.tail = self._pending[cut + len(_ACTION_MARKER) :]
+        self._pending = ""
+        self._in_greeting = False
+        return head
 
 
 def _held_back_len(text: str) -> int:

@@ -3,6 +3,11 @@ import json
 import pytest
 from pytest import MonkeyPatch
 
+from ingestion.chunking.chunker import (
+    chunk_text,
+    group_paragraphs_into_chunks,
+    split_into_paragraphs,
+)
 from ingestion.chunking.context_aware_chunker import (
     chunk_text_context_aware,
     exceeds_llm_limit,
@@ -274,3 +279,138 @@ def test_build_prompt_includes_segment_count_and_range():
     assert "There are exactly 3 numbered paragraphs" in system_msg
     assert "between 0 and 2 (inclusive)" in system_msg
     assert "Do not invent indices above this range." in system_msg
+
+
+class _RecordingLLMClient(StubLLMClient):
+    def __init__(self, generate_response: str) -> None:
+        super().__init__(generate_response=generate_response)
+        self.prompts: list[str] = []
+
+    def generate(
+        self, messages: list[Message], *, temperature: float | None = None
+    ) -> str:
+        self.prompts.append("\n".join(message["content"] for message in messages))
+        return self.generate_response
+
+
+_LONG_TEXT = "\n\n".join(f"Paragraph number {n} with some words." for n in range(8))
+
+
+def test_fallback_forwards_chunk_size_and_overlap_to_chunk_text():
+    expected = chunk_text("file.txt", _LONG_TEXT, 90, 25)
+    llm = StubLLMClient(generate_response="not valid json at all")
+
+    chunks = chunk_text_context_aware(
+        "file.txt", _LONG_TEXT, llm, chunk_size=90, chunk_overlap=25
+    )
+
+    assert [c.content for c in chunks] == [c.content for c in expected]
+    assert [c.metadata for c in chunks] == [c.metadata for c in expected]
+
+
+def test_oversized_text_fallback_forwards_chunk_size_and_overlap(
+    monkeypatch: MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "ingestion.chunking.context_aware_chunker.max_chars", 10, raising=False
+    )
+    expected = chunk_text("file.txt", _LONG_TEXT, 90, 25)
+
+    chunks = chunk_text_context_aware(
+        "file.txt", _LONG_TEXT, StubLLMClient(), chunk_size=90, chunk_overlap=25
+    )
+
+    assert [c.content for c in chunks] == [c.content for c in expected]
+
+
+def test_disabled_flags_forward_chunk_size_and_overlap_to_chunk_text():
+    expected = chunk_text("file.txt", _LONG_TEXT, 90, 25)
+
+    chunks = chunk_text_context_aware(
+        "file.txt",
+        _LONG_TEXT,
+        StubLLMClient(),
+        semantic_boundaries=False,
+        contextualize=False,
+        chunk_size=90,
+        chunk_overlap=25,
+    )
+
+    assert [c.content for c in chunks] == [c.content for c in expected]
+
+
+def test_whitespace_only_text_falls_back_without_calling_the_llm():
+    llm = _RecordingLLMClient("{}")
+
+    blank = " \n\n \n\n "
+
+    chunks = chunk_text_context_aware(
+        "file.txt", blank, llm, chunk_size=90, chunk_overlap=10
+    )
+
+    assert chunks == chunk_text("file.txt", blank, 90, 10)
+    assert llm.prompts == []
+
+
+def test_fixed_segments_are_the_pre_grouped_chunks_for_the_given_size_and_overlap():
+    expected = group_paragraphs_into_chunks(split_into_paragraphs(_LONG_TEXT), 90, 25)
+    llm = _RecordingLLMClient(json.dumps({"boundaries": [], "context_blocks": {}}))
+
+    chunks = chunk_text_context_aware(
+        "file.txt",
+        _LONG_TEXT,
+        llm,
+        semantic_boundaries=False,
+        contextualize=True,
+        chunk_size=90,
+        chunk_overlap=25,
+    )
+
+    assert [c.content for c in chunks] == expected
+    assert f"[{len(expected) - 1}]" in llm.prompts[0]
+
+
+def test_prompt_depends_on_the_semantic_boundaries_and_contextualize_flags():
+    plan = json.dumps({"boundaries": [0], "context_blocks": {}})
+    semantic = _RecordingLLMClient(plan)
+    plain = _RecordingLLMClient(plan)
+
+    chunk_text_context_aware(
+        "f.txt", _LONG_TEXT, semantic, semantic_boundaries=True, contextualize=False
+    )
+    chunk_text_context_aware(
+        "f.txt", _LONG_TEXT, plain, semantic_boundaries=False, contextualize=True
+    )
+
+    assert semantic.prompts != plain.prompts
+    assert "paragraph" in semantic.prompts[0]
+
+
+def test_context_blocks_are_ignored_when_contextualize_is_off():
+    plan = json.dumps({"boundaries": [0], "context_blocks": {"0": "SHOULD NOT APPEAR"}})
+    llm = StubLLMClient(generate_response=plan)
+
+    chunks = chunk_text_context_aware(
+        "file.txt",
+        "Paragraph A\n\nParagraph B",
+        llm,
+        semantic_boundaries=True,
+        contextualize=False,
+        chunk_size=1000,
+    )
+
+    assert [c.content for c in chunks] == ["Paragraph A\n\nParagraph B"]
+    assert chunks[0].metadata["has_context_block"] == "false"
+
+
+def test_a_failed_plan_is_logged_with_the_file_and_the_reason(
+    caplog: pytest.LogCaptureFixture,
+):
+    with caplog.at_level("WARNING", logger="ingestion.chunking.context_aware_chunker"):
+        chunk_text_context_aware(
+            "report.txt", _LONG_TEXT, StubLLMClient(generate_response="nope")
+        )
+
+    message = caplog.records[-1].getMessage()
+    assert message.startswith("Context-aware chunking failed for report.txt (")
+    assert message.endswith("— falling back to chunk_text")

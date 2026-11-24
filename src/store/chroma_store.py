@@ -1,65 +1,33 @@
-import threading
-from collections.abc import Callable, Iterator, Mapping
-from dataclasses import replace
-from typing import Any, cast
+from collections.abc import Iterator, Mapping
+from typing import cast
 
 import chromadb
 import chromadb.api
 from chromadb.api.types import Metadata, PyEmbeddings, QueryResult, Where
-from chromadb.config import Settings
 
-from corpus.filters import (
-    PROJECT_IDS_METADATA_KEY,
-    decode_project_ids,
-    encode_project_ids,
-    normalize_source_system,
-    project_metadata_key,
-    timestamp_from_iso,
-)
+from corpus.ids import ArtifactId, ChunkId
 from corpus.source_filter import SourceExclusions
 from corpus.source_role import SourceRole
-from corpus.types import Chunk, RetrievalFilters, ScoredChunk, is_chunk_kind
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk
+from store import chroma_records
+from store.chroma_client import get_persistent_client
+from store.chroma_membership import ChromaMembership, iter_metadata_records
+from store.chroma_records import (
+    chunk_metadata,
+    chunks_from_get_result,
+    chunks_without_embeddings_from_get_result,
+    retrieval_fingerprint,
+    scored_chunk,
+    visible_chunks,
+)
 from store.chroma_where import where_filter_for_chroma
-from store.metadata_store import IngestionMetadataStore, RevocationReason
+from store.metadata_store import IngestionMetadataStore
+from store.revocation_ledger import RevocationLedger
 
-_NO_POSITION: int = -1
-# Keep every Chroma ``get`` comfortably below SQLite's 32,766 bind-variable
-# ceiling. A page includes ids, documents, and metadata, so using the backend
-# ceiling itself would still be too large once Chroma hydrates those records.
-_MAX_GET_PAGE: int = 10_000
 # Used only when the client cannot report its own write ceiling. Chroma's local
 # ceiling is 5,461 (the 32,766 bind-variable budget over the six columns a write
 # fills), so staying under that is safe for any backend we run against.
 _MAX_WRITE_PAGE_FALLBACK: int = 5_000
-
-_CLIENT_CACHE: dict[str, chromadb.api.ClientAPI] = {}
-_CLIENT_CACHE_LOCK = threading.Lock()
-
-
-def _get_persistent_client(path: str) -> chromadb.api.ClientAPI:
-    client = _CLIENT_CACHE.get(path)
-    if client is not None:
-        return client
-
-    # FastAPI resolves synchronous dependencies in a thread pool, so the first
-    # buddy turn and its asynchronous analytics fan-out can arrive here together.
-    # Chroma's PersistentClient instances share process-wide, refcounted state;
-    # constructing two for one path concurrently can make one failed init tear
-    # down the other's system. Re-check inside the lock so exactly one thread
-    # constructs and publishes the client.
-    with _CLIENT_CACHE_LOCK:
-        client = _CLIENT_CACHE.get(path)
-        if client is not None:
-            return client
-
-        settings = Settings(
-            anonymized_telemetry=False,
-            is_persistent=True,
-            allow_reset=True,
-        )
-        client = chromadb.PersistentClient(path=path, settings=settings)
-        _CLIENT_CACHE[path] = client
-        return client
 
 
 class ChromaVectorStore:
@@ -73,7 +41,7 @@ class ChromaVectorStore:
         if client is not None:
             self._client: chromadb.api.ClientAPI = client
         elif path is not None:
-            self._client = _get_persistent_client(path)
+            self._client = get_persistent_client(path)
         else:
             self._client = chromadb.EphemeralClient()
 
@@ -82,180 +50,13 @@ class ChromaVectorStore:
             metadata={"hnsw:space": "cosine"},
         )
         self._revision_store = revision_store
-        self._local_revision = 0
-        self._local_revocation_revision = 0
-        self._local_revocations: dict[tuple[str, RevocationReason, str], int] = {}
-        self._local_failed_revocations: set[tuple[str, RevocationReason, str]] = set()
-        self._cached_revocation_revision = -1
-        self._cached_revocations: frozenset[str] = frozenset()
-        self._revision_lock = threading.Lock()
-
-    def _bump_corpus_revision(self) -> None:
-        if self._revision_store is not None:
-            self._revision_store.bump_corpus_revision()
-            return
-
-        # Directly constructed ephemeral stores used by tests and local tools do
-        # not share a datastore, but they still need correct in-process caching.
-        with self._revision_lock:
-            self._local_revision += 1
-
-    def _revocation_revision(self) -> int:
-        if self._revision_store is not None:
-            return self._revision_store.revocation_revision()
-
-        with self._revision_lock:
-            return self._local_revocation_revision
-
-    def _revocation_snapshot(self) -> tuple[int, frozenset[str]]:
-        revision = self._revocation_revision()
-        with self._revision_lock:
-            if revision == self._cached_revocation_revision:
-                return revision, self._cached_revocations
-
-        if self._revision_store is not None:
-            revision, revoked = self._revision_store.revocation_snapshot()
-        else:
-            with self._revision_lock:
-                revision = self._local_revocation_revision
-                revoked = frozenset(
-                    artifact_id
-                    for artifact_id, _reason, _owner in self._local_revocations
-                )
-
-        with self._revision_lock:
-            self._cached_revocation_revision = revision
-            self._cached_revocations = revoked
-        return revision, revoked
-
-    def _begin_revocations(
-        self,
-        artifact_ids: frozenset[str],
-        reason: RevocationReason,
-        owner: str,
-    ) -> dict[str, int]:
-        if not artifact_ids:
-            return {}
-
-        if self._revision_store is not None:
-            return self._revision_store.begin_revocation_operations(
-                sorted(artifact_ids),
-                reason=reason,
-                owner=owner,
-            )
-
-        with self._revision_lock:
-            visible_change = False
-            generations: dict[str, int] = {}
-            for artifact_id in artifact_ids:
-                key = (artifact_id, reason, owner)
-                visible_change = visible_change or key not in self._local_revocations
-                generation = self._local_revocations.get(key, 0) + 1
-                self._local_revocations[key] = generation
-                self._local_failed_revocations.discard(key)
-                generations[artifact_id] = generation
-            if visible_change:
-                self._local_revocation_revision += 1
-                self._local_revision += 1
-            return generations
-
-    def _fail_revocations(
-        self,
-        generations: Mapping[str, int],
-        reason: RevocationReason,
-        owner: str,
-    ) -> None:
-        if not generations:
-            return
-
-        if self._revision_store is not None:
-            self._revision_store.fail_revocation_operations(
-                generations,
-                reason=reason,
-                owner=owner,
-            )
-            return
-
-        with self._revision_lock:
-            for artifact_id, generation in generations.items():
-                key = (artifact_id, reason, owner)
-                if self._local_revocations.get(key) == generation:
-                    self._local_failed_revocations.add(key)
-
-    def _complete_revocations(
-        self,
-        generations: Mapping[str, int],
-        reason: RevocationReason,
-        owner: str,
-    ) -> None:
-        if not generations:
-            return
-
-        if self._revision_store is not None:
-            self._revision_store.complete_revocation_operations(
-                generations,
-                reason=reason,
-                owner=owner,
-            )
-            return
-
-        with self._revision_lock:
-            changed = False
-            for artifact_id, generation in generations.items():
-                key = (artifact_id, reason, owner)
-                if self._local_revocations.get(key) == generation:
-                    del self._local_revocations[key]
-                    self._local_failed_revocations.discard(key)
-                    changed = True
-            if changed:
-                self._local_revocation_revision += 1
-                self._local_revision += 1
-
-    def _revocation_artifacts(
-        self,
-        reason: RevocationReason,
-        owner: str,
-    ) -> frozenset[str]:
-        if self._revision_store is not None:
-            return self._revision_store.revocation_artifacts(reason, owner)
-
-        with self._revision_lock:
-            return frozenset(
-                artifact_id
-                for artifact_id, stored_reason, stored_owner in self._local_revocations
-                if stored_reason == reason and stored_owner == owner
-            )
-
-    def _revocation_operations_for_artifact(
-        self,
-        artifact_id: str,
-        reason: RevocationReason,
-    ) -> dict[str, int]:
-        if self._revision_store is not None:
-            return self._revision_store.revocation_operations_for_artifact(
-                artifact_id,
-                reason,
-            )
-
-        with self._revision_lock:
-            return {
-                owner: generation
-                for (stored_id, stored_reason, owner), generation in (
-                    self._local_revocations.items()
-                )
-                if stored_id == artifact_id
-                and stored_reason == reason
-                and (stored_id, stored_reason, owner) in self._local_failed_revocations
-            }
-
-    @staticmethod
-    def _visible_chunks(
-        chunks: list[Chunk],
-        revoked_artifact_ids: frozenset[str],
-    ) -> list[Chunk]:
-        return [
-            chunk for chunk in chunks if chunk.artifact_id not in revoked_artifact_ids
-        ]
+        self._ledger = RevocationLedger(revision_store)
+        self._membership = ChromaMembership(
+            self._collection,
+            self._ledger,
+            revision_store,
+            lambda chunks: self.add(chunks),
+        )
 
     def add(self, chunks: list[Chunk]) -> None:
         if not chunks:
@@ -263,42 +64,13 @@ class ChromaVectorStore:
 
         embeddings: list[list[float]] = [chunk.embedding for chunk in chunks]
 
-        metadatas: list[dict[str, str | int | float | bool]] = []
-        for chunk in chunks:
-            metadata: dict[str, str | int | float | bool] = {
-                "artifact_id": chunk.artifact_id,
-                "filename": chunk.filename,
-                "position": (
-                    chunk.position if chunk.position is not None else _NO_POSITION
-                ),
-                "kind": chunk.kind,
-                "source_role": chunk.source_role,
-                "source_url": chunk.source_url or "",
-                "artifact_type": chunk.artifact_type or "",
-                "language": chunk.language or "",
-                "connector_id": chunk.connector_id or "",
-                "connector_source_id": chunk.connector_source_id or "",
-                "source_system": chunk.source_system or "",
-                "created_at": chunk.created_at or "",
-                "created_at_ts": timestamp_from_iso(chunk.created_at),
-                PROJECT_IDS_METADATA_KEY: encode_project_ids(chunk.project_ids),
-            }
-            # One boolean marker per project so Chroma can filter membership
-            # server-side ($eq on a key documents of other projects don't have);
-            # metadata values themselves cannot be lists.
-            for project_id in chunk.project_ids:
-                metadata[project_metadata_key(project_id)] = True
-            if chunk.start_line is not None:
-                metadata["start_line"] = chunk.start_line
-            if chunk.start_page is not None:
-                metadata["start_page"] = chunk.start_page
-            metadatas.append(metadata)
+        metadatas = [chunk_metadata(chunk) for chunk in chunks]
 
         ids = [chunk.id for chunk in chunks]
         documents = [chunk.text for chunk in chunks]
 
         # A single write may not exceed the backend's batch ceiling, which is
-        # far below what a ``get`` can page (see ``_MAX_GET_PAGE``). Exceeding
+        # far below what a ``get`` can page (see ``MAX_GET_PAGE``). Exceeding
         # it raises *after* the delete below has already committed, which would
         # leave the batch deleted and never rewritten, so the batching has to
         # happen here rather than in any one caller.
@@ -329,13 +101,13 @@ class ChromaVectorStore:
             # Bump even when a later page fails: an earlier delete/upsert may
             # already have changed retrieval-visible state.
             if mutated:
-                self._bump_corpus_revision()
+                self._ledger.bump_corpus_revision()
 
     def _max_write_page(self) -> int:
         """Largest id count one ``delete``/``upsert`` pair may carry.
 
         The client reports its own ceiling, so a remote backend with a different
-        budget is honoured too. It is still capped at ``_MAX_GET_PAGE``, because
+        budget is honoured too. It is still capped at ``MAX_GET_PAGE``, because
         the ``delete`` half of the pair spends the same bind variables a ``get``
         does, whatever the upsert would allow.
         """
@@ -343,7 +115,11 @@ class ChromaVectorStore:
             limit = int(self._client.get_max_batch_size())
         except Exception:  # pragma: no cover - older clients / custom doubles
             return _MAX_WRITE_PAGE_FALLBACK
-        return min(limit, _MAX_GET_PAGE) if limit > 0 else _MAX_WRITE_PAGE_FALLBACK
+        return (
+            min(limit, chroma_records.MAX_GET_PAGE)
+            if limit > 0
+            else _MAX_WRITE_PAGE_FALLBACK
+        )
 
     def query(
         self,
@@ -357,38 +133,13 @@ class ChromaVectorStore:
         if self._collection.count() == 0 or top_k <= 0:
             return []
 
-        # Every constraint goes into the ``where`` clause, which Chroma applies
-        # before limiting to ``n_results``. Filtering the returned window
-        # instead would let higher-ranked ineligible chunks push every eligible
-        # one out of it.
-        raw_result: QueryResult | None = None
-        revoked_artifact_ids: frozenset[str] = frozenset()
-        for _attempt in range(2):
-            revocation_revision, revoked_artifact_ids = self._revocation_snapshot()
-            where_filter = where_filter_for_chroma(
-                filters,
-                exclude_roles,
-                exclusions,
-                revoked_artifact_ids,
-            )
-
-            raw_result = self._collection.query(
-                query_embeddings=[embedding],
-                n_results=top_k,
-                where=where_filter,
-                include=["documents", "metadatas", "distances"],
-            )
-            if self._revocation_revision() == revocation_revision:
-                break
-        else:
-            # Revocations changed throughout both searches. Returning no
-            # candidates is bounded and fail-closed; the next request retries
-            # against a stable snapshot.
+        searched = self._search_stable(
+            embedding, top_k, filters, exclude_roles, exclusions
+        )
+        if searched is None:
             return []
+        raw_result, revoked_artifact_ids = searched
 
-        assert raw_result is not None
-
-        ids = raw_result["ids"][0]
         documents = (raw_result["documents"] or [[]])[0]
         metadatas = cast(
             list[Mapping[str, object]],
@@ -397,80 +148,65 @@ class ChromaVectorStore:
         distances = (raw_result["distances"] or [[]])[0]
 
         results: list[ScoredChunk] = []
-
         for chunk_id, text, metadata, distance in zip(
-            ids,
-            documents,
-            metadatas,
-            distances,
-            strict=True,
+            raw_result["ids"][0], documents, metadatas, distances, strict=True
         ):
-            artifact_id = str(metadata["artifact_id"])
-            if artifact_id in revoked_artifact_ids:
-                # Defensive check for custom/older Chroma clients that do not
-                # enforce the metadata predicate exactly as expected.
+            if str(metadata["artifact_id"]) in revoked_artifact_ids:
+                # Defensive: custom/older Chroma clients may not enforce the predicate.
                 continue
-
             score = 1.0 - distance
-
-            if score < min_score:
-                continue
-
-            raw_position = metadata.get("position")
-            position = (
-                None
-                if not isinstance(raw_position, (int, float))
-                or raw_position == _NO_POSITION
-                else int(raw_position)
-            )
-
-            kind_str = str(metadata.get("kind", "text"))
-            if not is_chunk_kind(kind_str):
-                raise ValueError(f"Unknown chunk kind {kind_str!r}")
-
-            source_system = normalize_source_system(
-                _optional_str(metadata.get("source_system"))
-            )
-
-            results.append(
-                ScoredChunk(
-                    id=str(chunk_id),
-                    artifact_id=artifact_id,
-                    filename=str(metadata["filename"]),
-                    position=position,
-                    kind=kind_str,
-                    text=str(text),
-                    score=score,
-                    source_role=_source_role_from_metadata(metadata),
-                    source_url=_optional_str(metadata.get("source_url")),
-                    artifact_type=_optional_str(metadata.get("artifact_type")),
-                    language=_optional_str(metadata.get("language")),
-                    connector_id=_optional_str(metadata.get("connector_id")),
-                    connector_source_id=_optional_str(
-                        metadata.get("connector_source_id")
-                    ),
-                    source_system=source_system,
-                    created_at=_optional_str(metadata.get("created_at")),
-                    start_line=_optional_int(metadata.get("start_line")),
-                    start_page=_optional_int(metadata.get("start_page")),
-                    project_ids=decode_project_ids(
-                        metadata.get(PROJECT_IDS_METADATA_KEY)
-                    ),
+            if score >= min_score:
+                results.append(
+                    scored_chunk(ChunkId(str(chunk_id)), str(text), metadata, score)
                 )
-            )
 
         results.sort(key=lambda c: c.score, reverse=True)
         return results
 
+    def _search_stable(
+        self,
+        embedding: list[float],
+        top_k: int,
+        filters: RetrievalFilters | None,
+        exclude_roles: frozenset[SourceRole],
+        exclusions: SourceExclusions,
+    ) -> tuple[QueryResult, frozenset[str]] | None:
+        """Search against a revocation snapshot that did not change meanwhile.
+
+        Every constraint goes into the ``where`` clause, which Chroma applies
+        before limiting to ``n_results``; filtering the returned window instead
+        would let higher-ranked ineligible chunks push every eligible one out.
+
+        Returns ``None`` when revocations changed throughout both attempts:
+        no candidates is bounded and fail-closed, and the next request retries.
+        """
+        for _attempt in range(2):
+            revocation_revision, revoked_artifact_ids = self._ledger.snapshot()
+            where_filter = where_filter_for_chroma(
+                filters,
+                exclude_roles,
+                exclusions,
+                revoked_artifact_ids,
+            )
+            raw_result = self._collection.query(
+                query_embeddings=[embedding],
+                n_results=top_k,
+                where=where_filter,
+                include=["documents", "metadatas", "distances"],
+            )
+            if self._ledger.revocation_revision() == revocation_revision:
+                return raw_result, revoked_artifact_ids
+        return None
+
     def delete(self, artifact_id: str, exclude_ids: list[str] | None = None) -> int:
         tombstone = frozenset({artifact_id})
-        membership_recoveries = self._revocation_operations_for_artifact(
-            artifact_id,
+        membership_recoveries = self._ledger.failed_operations_for_artifact(
+            ArtifactId(artifact_id),
             reason="membership",
         )
         # Commit the revocation before the first Chroma read. If that read, the
         # delete, or the process itself fails, retrieval remains fail-closed.
-        delete_operation = self._begin_revocations(
+        delete_operation = self._ledger.begin(
             tombstone,
             reason="delete",
             owner="delete",
@@ -494,7 +230,7 @@ class ChromaVectorStore:
             finally:
                 # Invalidate caches even if the backend reports an error after
                 # partially applying the deletion.
-                self._bump_corpus_revision()
+                self._ledger.bump_corpus_revision()
 
         # Deleting zero chunks also confirms that nothing remains to expose.
         # If cleanup fails, report failure and retain the safe over-redaction.
@@ -504,12 +240,12 @@ class ChromaVectorStore:
         # whose membership rewrite later fails. Each owner/generation is
         # completed conditionally, so a newer retry stays protected.
         for owner, generation in membership_recoveries.items():
-            self._complete_revocations(
+            self._ledger.complete(
                 {artifact_id: generation},
                 reason="membership",
                 owner=owner,
             )
-        self._complete_revocations(
+        self._ledger.complete(
             delete_operation,
             reason="delete",
             owner="delete",
@@ -522,8 +258,8 @@ class ChromaVectorStore:
             offset=offset,
             include=["documents", "metadatas", "embeddings"],
         )
-        _, revoked = self._revocation_snapshot()
-        return self._visible_chunks(_chunks_from_get_result(raw_result), revoked)
+        _, revoked = self._ledger.snapshot()
+        return visible_chunks(chunks_from_get_result(raw_result), revoked)
 
     def list_chunks_by_artifact(
         self,
@@ -531,7 +267,7 @@ class ChromaVectorStore:
         limit: int,
         offset: int = 0,
     ) -> list[Chunk]:
-        _, revoked = self._revocation_snapshot()
+        _, revoked = self._ledger.snapshot()
         if artifact_id in revoked:
             return []
 
@@ -541,10 +277,10 @@ class ChromaVectorStore:
             offset=offset,
             include=["documents", "metadatas", "embeddings"],
         )
-        _, current_revoked = self._revocation_snapshot()
+        _, current_revoked = self._ledger.snapshot()
         if artifact_id in current_revoked:
             return []
-        return _chunks_from_get_result(raw_result)
+        return chunks_from_get_result(raw_result)
 
     def list_chunks_by_positions(
         self,
@@ -555,7 +291,7 @@ class ChromaVectorStore:
         if not positions:
             return []
 
-        _, revoked = self._revocation_snapshot()
+        _, revoked = self._ledger.snapshot()
         if artifact_id in revoked:
             return []
 
@@ -570,18 +306,18 @@ class ChromaVectorStore:
             where={"$and": conditions},
             # Re-ingestion can temporarily leave more than one row at a logical
             # position. Do not assume one stored row per requested position.
-            limit=_MAX_GET_PAGE,
+            limit=chroma_records.MAX_GET_PAGE,
             include=["documents", "metadatas"],
         )
 
         # A deletion can become visible while Chroma is serving the read. Check
         # again before publishing any content so revocation remains fail-closed.
-        _, current_revoked = self._revocation_snapshot()
+        _, current_revoked = self._ledger.snapshot()
         if artifact_id in current_revoked:
             return []
 
         return sorted(
-            _chunks_without_embeddings_from_get_result(raw_result),
+            chunks_without_embeddings_from_get_result(raw_result),
             key=lambda chunk: (
                 chunk.start_page if chunk.start_page is not None else 0,
                 chunk.position if chunk.position is not None else -1,
@@ -589,7 +325,7 @@ class ChromaVectorStore:
         )
 
     def count_by_artifact(self, artifact_id: str) -> int:
-        _, revoked = self._revocation_snapshot()
+        _, revoked = self._ledger.snapshot()
         if artifact_id in revoked:
             return 0
 
@@ -597,7 +333,7 @@ class ChromaVectorStore:
             where={"artifact_id": artifact_id},
             include=[],
         )
-        _, current_revoked = self._revocation_snapshot()
+        _, current_revoked = self._ledger.snapshot()
         return 0 if artifact_id in current_revoked else len(raw_result["ids"])
 
     def all_chunks_without_embeddings(self) -> list[Chunk]:
@@ -610,11 +346,11 @@ class ChromaVectorStore:
 
         while offset < total:
             page = self.list_chunks_without_embeddings(
-                limit=_MAX_GET_PAGE,
+                limit=chroma_records.MAX_GET_PAGE,
                 offset=offset,
             )
             yield from page
-            offset += min(_MAX_GET_PAGE, total - offset)
+            offset += min(chroma_records.MAX_GET_PAGE, total - offset)
 
     def list_chunks_without_embeddings(
         self, limit: int, offset: int = 0
@@ -624,338 +360,39 @@ class ChromaVectorStore:
             limit=limit,
             offset=offset,
         )
-        chunks = _chunks_without_embeddings_from_get_result(raw_result)
-        _, revoked = self._revocation_snapshot()
-        return self._visible_chunks(chunks, revoked)
+        chunks = chunks_without_embeddings_from_get_result(raw_result)
+        _, revoked = self._ledger.snapshot()
+        return visible_chunks(chunks, revoked)
 
     def all_ids(self) -> frozenset[str]:
         raw_result = self._collection.get(include=[])
         return frozenset(str(chunk_id) for chunk_id in raw_result["ids"])
 
     def corpus_revision(self) -> int:
-        if self._revision_store is not None:
-            return self._revision_store.corpus_revision()
-
-        with self._revision_lock:
-            return self._local_revision
+        return self._ledger.corpus_revision()
 
     def retrieval_fingerprints(self) -> frozenset[str]:
-        _, revoked = self._revocation_snapshot()
+        _, revoked = self._ledger.snapshot()
         return frozenset(
-            _retrieval_fingerprint(chunk_id, metadata)
-            for chunk_id, metadata in self._iter_metadata_records()
+            retrieval_fingerprint(ChunkId(chunk_id), metadata)
+            for chunk_id, metadata in iter_metadata_records(self._collection)
             if str(metadata["artifact_id"]) not in revoked
         )
 
     def project_ids_for_artifact(self, artifact_id: str) -> frozenset[str]:
-        return frozenset(
-            project_id
-            for _, metadata in self._iter_metadata_records(
-                where={"artifact_id": artifact_id}
-            )
-            for project_id in decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY))
-        )
+        return self._membership.project_ids_for_artifact(ArtifactId(artifact_id))
 
     def set_project_ids_for_artifact(
         self,
         artifact_id: str,
         project_ids: tuple[str, ...],
     ) -> int:
-        normalized = tuple(dict.fromkeys(pid for pid in project_ids if pid))
-        revocation_owner = f"artifact:{artifact_id}"
-        recovery_operations = self._revocation_operations_for_artifact(
-            artifact_id,
-            reason="membership",
-        )
-        own_recovery = artifact_id in self._revocation_artifacts(
-            reason="membership",
-            owner=revocation_owner,
-        )
-        return self._rewrite_membership(
-            {"artifact_id": artifact_id},
-            lambda _chunk: normalized,
-            recovery_artifact_ids=(
-                frozenset({artifact_id})
-                if recovery_operations or own_recovery
-                else frozenset()
-            ),
-            revocation_owner=revocation_owner,
-            recovery_operations={artifact_id: recovery_operations},
+        return self._membership.set_project_ids_for_artifact(
+            ArtifactId(artifact_id), project_ids
         )
 
     def remove_project(self, project_id: str) -> int:
-        # Selected by the boolean marker rather than the delimited string,
-        # because the marker is what retrieval filters on -- a chunk that still
-        # carries it is still reachable, whatever the string says.
-        revocation_owner = f"project:{project_id}"
-        recovery_artifact_ids = self._revocation_artifacts(
-            reason="membership",
-            owner=revocation_owner,
-        )
-        if self._revision_store is not None:
-            recovery_artifact_ids |= frozenset(
-                artifact.id
-                for artifact in self._revision_store.list_artifacts(
-                    status=None,
-                    project_id=project_id,
-                )
-            )
-        return self._rewrite_membership(
-            {project_metadata_key(project_id): {"$eq": True}},
-            lambda project_ids: tuple(pid for pid in project_ids if pid != project_id),
-            recovery_artifact_ids=recovery_artifact_ids,
-            revocation_owner=revocation_owner,
-        )
-
-    def _rewrite_membership(
-        self,
-        where: dict[str, Any],
-        membership: Callable[[tuple[str, ...]], tuple[str, ...]],
-        recovery_artifact_ids: frozenset[str] = frozenset(),
-        revocation_owner: str = "membership",
-        recovery_operations: Mapping[str, Mapping[str, int]] | None = None,
-    ) -> int:
-        """Rewrite membership while keeping removals fail-closed on failure.
-
-        Matching metadata is collected before mutation. Any artifact losing a
-        project is tombstoned before the first page is rewritten, so a partial
-        failure cannot leave later pages searchable through stale markers.
-        """
-        records = list(self._iter_metadata_records(where=cast(Any, where)))
-        ids = [chunk_id for chunk_id, _ in records]
-        tombstones = recovery_artifact_ids | frozenset(
-            str(metadata["artifact_id"])
-            for _, metadata in records
-            if set(decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)))
-            - set(
-                membership(decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)))
-            )
-        )
-        operations = self._begin_revocations(
-            tombstones,
-            reason="membership",
-            owner=revocation_owner,
-        )
-
-        try:
-            # Any failure leaves every affected artifact tombstoned until a
-            # retry repairs all of its chunks.
-            for start in range(0, len(ids), _MAX_GET_PAGE):
-                raw_result = self._collection.get(
-                    ids=ids[start : start + _MAX_GET_PAGE],
-                    include=["documents", "metadatas", "embeddings"],
-                )
-                self.add(
-                    [
-                        replace(
-                            chunk,
-                            project_ids=membership(chunk.project_ids),
-                        )
-                        for chunk in _chunks_from_get_result(raw_result)
-                    ]
-                )
-
-            self._complete_revocations(
-                operations,
-                reason="membership",
-                owner=revocation_owner,
-            )
-            for artifact_id, owner_generations in (recovery_operations or {}).items():
-                for owner, generation in owner_generations.items():
-                    self._complete_revocations(
-                        {artifact_id: generation},
-                        reason="membership",
-                        owner=owner,
-                    )
-        except Exception:
-            self._fail_revocations(
-                operations,
-                reason="membership",
-                owner=revocation_owner,
-            )
-            raise
-        return len(ids)
-
-    def _iter_metadata_records(
-        self,
-        where: Where | None = None,
-    ) -> Iterator[tuple[str, Mapping[str, object]]]:
-        """Yield ids and metadata through bounded reads without hydrating text."""
-        offset = 0
-
-        while True:
-            raw_result = self._collection.get(
-                where=where,
-                include=["metadatas"],
-                limit=_MAX_GET_PAGE,
-                offset=offset,
-            )
-            ids = raw_result["ids"]
-            if not ids:
-                return
-
-            metadatas = cast(
-                list[Mapping[str, object]],
-                raw_result.get("metadatas") or [],
-            )
-            yield from zip(ids, metadatas, strict=True)
-            offset += len(ids)
+        return self._membership.remove_project(project_id)
 
     def count(self) -> int:
         return self._collection.count()
-
-
-# Metadata a cached BM25 index filters on. Chunk ids are content-hashed, so an
-# id already stands for the chunk's text — but not for any of these, which the
-# backend can change without touching the content (moving an artifact between
-# projects, reclassifying it as test material, disabling its connector). They
-# belong in the fingerprint or a stale index keeps filtering on the old values.
-_FILTER_METADATA_KEYS = (
-    PROJECT_IDS_METADATA_KEY,
-    "source_role",
-    "connector_id",
-    "connector_source_id",
-    "source_system",
-    "created_at",
-)
-
-
-def _retrieval_fingerprint(chunk_id: str, metadata: Mapping[str, object]) -> str:
-    parts = [chunk_id]
-    parts.extend(str(metadata.get(key, "")) for key in _FILTER_METADATA_KEYS)
-    return "\x00".join(parts)
-
-
-def _chunks_from_get_result(raw_result: Any) -> list[Chunk]:
-    ids = cast(list[str], raw_result["ids"])
-    documents = cast(list[str], raw_result.get("documents") or [])
-    metadatas = cast(list[Mapping[str, object]], raw_result.get("metadatas") or [])
-    raw_embeddings = raw_result.get("embeddings")
-    if raw_embeddings is None:
-        embeddings: list[list[float]] = []
-    elif hasattr(raw_embeddings, "tolist"):
-        embeddings = cast(list[list[float]], raw_embeddings.tolist())
-    else:
-        embeddings = cast(list[list[float]], raw_embeddings)
-
-    chunks: list[Chunk] = []
-
-    for chunk_id, text, metadata, embedding in zip(
-        ids,
-        documents,
-        metadatas,
-        embeddings,
-        strict=True,
-    ):
-        raw_position = metadata.get("position")
-        position = (
-            None
-            if not isinstance(raw_position, (int, float))
-            or raw_position == _NO_POSITION
-            else int(raw_position)
-        )
-
-        kind_str = str(metadata.get("kind", "text"))
-        if not is_chunk_kind(kind_str):
-            raise ValueError(f"Unknown chunk kind {kind_str!r}")
-
-        source_system = normalize_source_system(
-            _optional_str(metadata.get("source_system"))
-        )
-
-        chunks.append(
-            Chunk(
-                id=str(chunk_id),
-                artifact_id=str(metadata["artifact_id"]),
-                filename=str(metadata["filename"]),
-                position=position,
-                kind=kind_str,
-                text=str(text),
-                embedding=[float(value) for value in embedding],
-                source_role=_source_role_from_metadata(metadata),
-                source_url=_optional_str(metadata.get("source_url")),
-                artifact_type=_optional_str(metadata.get("artifact_type")),
-                language=_optional_str(metadata.get("language")),
-                connector_id=_optional_str(metadata.get("connector_id")),
-                connector_source_id=_optional_str(metadata.get("connector_source_id")),
-                source_system=source_system,
-                created_at=_optional_str(metadata.get("created_at")),
-                start_line=_optional_int(metadata.get("start_line")),
-                start_page=_optional_int(metadata.get("start_page")),
-                project_ids=decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)),
-            )
-        )
-
-    return chunks
-
-
-def _chunks_without_embeddings_from_get_result(raw_result: Any) -> list[Chunk]:
-    ids = cast(list[str], raw_result["ids"])
-    documents = cast(list[str], raw_result.get("documents") or [])
-    metadatas = cast(list[Mapping[str, object]], raw_result.get("metadatas") or [])
-
-    chunks: list[Chunk] = []
-    for chunk_id, text, metadata in zip(ids, documents, metadatas, strict=True):
-        raw_position = metadata.get("position")
-        position = (
-            None
-            if not isinstance(raw_position, (int, float))
-            or raw_position == _NO_POSITION
-            else int(raw_position)
-        )
-
-        kind_str = str(metadata.get("kind", "text"))
-        if not is_chunk_kind(kind_str):
-            raise ValueError(f"Unknown chunk kind {kind_str!r}")
-
-        chunks.append(
-            Chunk(
-                id=str(chunk_id),
-                artifact_id=str(metadata["artifact_id"]),
-                filename=str(metadata["filename"]),
-                position=position,
-                kind=kind_str,
-                text=str(text),
-                embedding=[],
-                source_role=_source_role_from_metadata(metadata),
-                source_url=_optional_str(metadata.get("source_url")),
-                artifact_type=_optional_str(metadata.get("artifact_type")),
-                language=_optional_str(metadata.get("language")),
-                connector_id=_optional_str(metadata.get("connector_id")),
-                connector_source_id=_optional_str(metadata.get("connector_source_id")),
-                source_system=normalize_source_system(
-                    _optional_str(metadata.get("source_system"))
-                ),
-                created_at=_optional_str(metadata.get("created_at")),
-                start_line=_optional_int(metadata.get("start_line")),
-                start_page=_optional_int(metadata.get("start_page")),
-                project_ids=decode_project_ids(metadata.get(PROJECT_IDS_METADATA_KEY)),
-            )
-        )
-
-    return chunks
-
-
-def _source_role_from_metadata(metadata: Mapping[str, object]) -> SourceRole:
-    raw_source_role = metadata.get("source_role")
-    if raw_source_role in {"primary", "test"}:
-        return cast(SourceRole, raw_source_role)
-
-    return "primary"
-
-
-def _optional_str(value: object) -> str | None:
-    if value is None or value == "":
-        return None
-
-    return str(value)
-
-
-def _optional_int(value: object) -> int | None:
-    """Return the metadata value as an int, or None.
-
-    Chroma metadata cannot store ``None`` directly, so absent optional ints
-    (e.g. ``start_line``/``start_page``) are simply never written and read
-    back as missing rather than via a sentinel like ``_NO_POSITION``.
-    """
-    return int(value) if isinstance(value, (int, float)) else None
