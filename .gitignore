@@ -227,3 +227,5 @@ opencode.json
 # Hermes agent working files (per-developer)
 .worktrees/
 .worktreeinclude
+# mutmut (scripts/quality/mutation.sh)
+mutants/

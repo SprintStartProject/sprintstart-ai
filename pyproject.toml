@@ -19,23 +19,6 @@ dependencies = [
     "tree-sitter-language-pack>=1.10.7",
 ]
 
-[tool.ruff]
-line-length = 88
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
-ignore = [
-    "B008",  # Depends() in default args is standard FastAPI pattern
-]
-
-[tool.pyright]
-pythonVersion = "3.12"
-typeCheckingMode = "strict"
-venvPath = "."
-venv = ".venv"
-extraPaths = ["src"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
@@ -59,4 +42,15 @@ dev = [
     "pyyaml>=6.0",
     "rank-bm25",
     "rich>=14.0",
+    "jsonschema==4.26.0",
+    "import-linter==2.15",
+    "vulture==2.16",
+    "mutmut==3.8.0",
 ]
+
+[tool.mutmut]
+# scripts/quality/mutation.sh mutates the modules a branch changed. Needs Linux or WSL.
+paths_to_mutate = ["src/"]
+tests_dir = ["tests/"]
+also_copy = ["contracts/", "tests/"]
+pytest_add_cli_args = ["-p", "no:cacheprovider", "-m", "not integration"]

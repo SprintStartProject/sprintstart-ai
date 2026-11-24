@@ -85,8 +85,8 @@ _SEARCH_TOOL: ToolSpec = {
 }
 
 _TOP_K = 5
-# Same retrieval floor / confidence line as the legacy buddy: `retrieve` drops
-# anything below it, so an empty result means nothing indexed answers with confidence.
+# The retrieval floor and confidence line: `retrieve` drops anything below it, so an
+# empty result means nothing indexed answers with confidence.
 _MIN_SCORE = 0.3
 
 GREP = "grep"

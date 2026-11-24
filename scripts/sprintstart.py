@@ -4,15 +4,12 @@ A single entrypoint over the running service with subcommands that share one
 HTTP client (`_client.ServiceClient`):
 
     sprintstart ingest <path> [id]         ingest a file or directory
-    sprintstart onboard -a backend -e junior   generate an onboarding path
     sprintstart corpus                     show what's ingested (status + artifacts)
     sprintstart corpus list [--artifact ID]
     sprintstart corpus search "<query>"
 
 The offline chunk inspector lives separately in `chunk_inspector_cli.py`, since
 it parses local files and never talks to the service.
-
-Blueprint management (generate, versions, rollback) is owned by the backend.
 
 Run with:  uv run python scripts/sprintstart.py <subcommand> ...
 """
@@ -23,12 +20,10 @@ import argparse
 
 import corpus_cli
 import ingest_cli
-import onboarding_cli
 from _client import add_base_url_arg
 
 _COMMANDS = {
     "ingest": ingest_cli,
-    "onboard": onboarding_cli,
     "corpus": corpus_cli,
 }
 

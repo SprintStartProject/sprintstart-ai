@@ -1,0 +1,68 @@
+name: Quality ratchet
+
+# Fails a PR that adds suppressions, skipped tests, raw-typed ids,
+# lint-baseline entries or oversized files, or that changes protected configuration without a
+# `quality-exception` label set by somebody other than the PR author.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check who granted a quality exception
+        id: exception
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'quality-exception') }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR: ${{ github.event.pull_request.number }}
+          SOLO: ${{ vars.QUALITY_SOLO }}
+        run: |
+          granted=0
+          if [ "$HAS_LABEL" = "true" ]; then
+            labeller=$(gh api "repos/${{ github.repository }}/issues/$PR/events" --paginate \
+              --jq '.[] | select(.event == "labeled" and .label.name == "quality-exception") | .actor.login' | tail -1)
+            # QUALITY_SOLO (a repository variable) marks a repository only one person works in, such
+            # as a personal fork: there the author's own label counts, because nobody else can set it.
+            if [ -n "$labeller" ] && { [ "$labeller" != "$AUTHOR" ] || [ "$SOLO" = "true" ]; }; then
+              granted=1
+              echo "quality-exception granted by $labeller"
+            else
+              echo "::warning::quality-exception was set by the PR author ($labeller); it only counts when set by somebody else."
+            fi
+          fi
+          echo "granted=$granted" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Ratchet against the base branch
+        env:
+          QUALITY_EXCEPTION: ${{ steps.exception.outputs.granted }}
+        run: bash scripts/quality/ratchet.sh "origin/${{ github.base_ref }}"
+
+      - name: Metrics against the base branch (duplication, dead code)
+        run: bash scripts/quality/metrics.sh "origin/${{ github.base_ref }}"
+
+      - name: Contract copies match their owners
+        env:
+          CONTRACT_REF: ${{ github.base_ref }}
+        run: bash scripts/quality/contracts-sync.sh

@@ -222,9 +222,8 @@ class BM25IndexCache:
         self._lock = threading.Lock()
 
     def get(self, store: VectorStore) -> BM25Index:
-        # One scalar SQLite read replaces the previous metadata scan over every
-        # Chroma chunk. Any instance that changes retrieval-visible state bumps
-        # this shared revision through ChromaVectorStore.
+        # One scalar SQLite read. Any instance that changes retrieval-visible state
+        # bumps this shared revision through ChromaVectorStore.
         current_revision = store.corpus_revision()
 
         snapshot = self._snapshot

@@ -1,14 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
-from src.ingestion.source_role import SourceRole
-from src.rag import hybrid as hybrid_module
-from src.rag.hybrid import (
+from ingestion.source_role import SourceRole
+from rag import hybrid as hybrid_module
+from rag.hybrid import (
     BM25IndexCache,
     hybrid_retrieve,
     reciprocal_rank_fusion,
 )
-from src.rag.source_filter import SourceExclusions
-from src.rag.types import Chunk, RetrievalFilters, ScoredChunk
+from rag.source_filter import SourceExclusions
+from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 

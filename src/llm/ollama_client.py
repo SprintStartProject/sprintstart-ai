@@ -138,10 +138,8 @@ class _OllamaAdapter:
         # ``timeout=None`` reproduces that default when nothing is configured.
         self._client = ollama.Client(host=host, timeout=timeout)
         self._options: dict[str, Any] = {"temperature": temperature}
-        # num_ctx must be set explicitly: Ollama otherwise defaults to a small
-        # context (typically 4096) and silently truncates oversized prompts,
-        # which breaks the onboarding synthesis step (large grounded prompt ->
-        # truncated -> non-JSON output -> SynthesisError fallback).
+        # num_ctx must be set explicitly: Ollama otherwise defaults to a small context
+        # (typically 4096) and silently truncates oversized prompts.
         if num_ctx is not None:
             self._options["num_ctx"] = num_ctx
 

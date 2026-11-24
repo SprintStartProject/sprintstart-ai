@@ -1,0 +1,10 @@
+# Lint and format rules every file must pass. The size and complexity limits are in
+# ruff-limits.toml, whose existing violations are frozen in ruff-limits-baseline.json.
+line-length = 88
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "B008",  # Depends() in default args is standard FastAPI pattern
+]

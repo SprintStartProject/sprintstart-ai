@@ -1,0 +1,390 @@
+{
+  "src/agents/tools/retrieve.py::__init__": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/api/app.py::lifespan": {
+    "BLE001": {
+      "count": 1
+    }
+  },
+  "src/api/routes/ingest.py::ingest": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/api/routes/ingest_run.py::_ingest_one": {
+    "BLE001": {
+      "count": 1
+    },
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/api/routes/summaries.py::summarize_artifact": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/ingestion/chunker.py::_group_paragraphs_into_chunks_with_lines": {
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/ingestion/chunker.py::to_parsed_chunk": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/ingestion/code_parser.py::parse_code": {
+    "BLE001": {
+      "count": 1
+    }
+  },
+  "src/ingestion/context_aware_chunker.py::chunk_text_context_aware": {
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/ingestion/mapper.py::to_chunk": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/ingestion/parser.py::parse": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/ingestion/pdf_parser.py::parse_pdf": {
+    "BLE001": {
+      "count": 2
+    },
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/ingestion/text_parser.py::parse_text": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/ingestion/tree_sitter_parser.py::parse_with_tree_sitter": {
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/insights/faq.py::documents_for": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/insights/faq.py::group_faqs": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/insights/faq_classification.py::_fallback_classification": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/insights/faq_classification.py::classify_question": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/llm/anthropic_client.py::__init__": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/llm/anthropic_client.py::_to_anthropic_messages": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/llm/anthropic_client.py::chat_stream": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/llm/ollama_client.py::__init__": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/llm/openai_client.py::__init__": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/llm/openai_client.py::chat_stream": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/onboarding/buddy_agent.py::_ensure_persona": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/buddy_agent.py::_local_tools": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/buddy_agent.py::_persona_prompt": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/buddy_agent.py::run_agent_turn": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/buddy_agent.py::stream_agent_turn": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/onboarding/buddy_open.py::stream_session": {
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/onboarding/buddy_persona.py::build_persona": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/onboarding/corpus.py::fingerprint_gate": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/diagram.py::_resolve_nodes": {
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/onboarding/diagram.py::assemble_diagram": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/diagram.py::stream_diagram": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/onboarding/orientation.py::_build_prompt": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/orientation.py::assemble_orientation": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/orientation.py::stream_orientation": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/phase.py::_build_prompt": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/phase.py::assemble_phase": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/phase.py::stream_phase": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/onboarding/starter_work.py::_load_candidates": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/starter_work.py::generate_starter_work_pool": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/onboarding/starter_work.py::stream_starter_work_pool": {
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/rag/context_window.py::expand_context_window": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/rag/filters.py::matches_retrieval_filters": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    }
+  },
+  "src/rag/filters.py::where_filter_for_chroma": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/rag/hybrid.py::_semantic_candidates": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/rag/hybrid.py::hybrid_retrieve": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/rag/retriever.py::retrieve": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/skills/suggestion.py::_build_prompt": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/skills/suggestion.py::suggest_skills": {
+    "C901": {
+      "count": 1
+    },
+    "PLR0912": {
+      "count": 1
+    },
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  },
+  "src/store/base.py::query": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/store/chroma_store.py::_max_write_page": {
+    "BLE001": {
+      "count": 1
+    }
+  },
+  "src/store/chroma_store.py::_rewrite_membership": {
+    "PLR0913": {
+      "count": 1
+    }
+  },
+  "src/store/chroma_store.py::query": {
+    "PLR0913": {
+      "count": 1
+    },
+    "PLR0915": {
+      "count": 1
+    }
+  }
+}
