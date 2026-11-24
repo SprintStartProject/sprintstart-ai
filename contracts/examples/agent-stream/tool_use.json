@@ -1,0 +1,1 @@
+{"type": "tool_use", "name": "search_docs", "arguments": {"query": "deploy"}}

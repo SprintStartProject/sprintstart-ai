@@ -1,9 +1,9 @@
 from collections import defaultdict
 
-from rag.filters import matches_retrieval_filters
+from corpus.filters import matches_retrieval_filters
+from corpus.source_filter import SourceExclusions, is_excluded
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk
 from rag.hybrid import to_scored_chunk
-from rag.source_filter import SourceExclusions, is_excluded
-from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 _DEFAULT_RADIUS = 1
@@ -46,9 +46,8 @@ def expand_context_window(
     for hit in direct:
         if hit.position is None:
             continue
-        # PDF positions are page-local. Without a page we cannot distinguish
-        # position 1 on page 2 from position 1 on every other page, so legacy
-        # PDF chunks lacking this locator are deliberately not widened.
+        # PDF positions are page-local, so a PDF chunk without a page cannot be placed
+        # among its neighbours and is not widened.
         if hit.kind == "pdf" and hit.start_page is None:
             continue
         locator = (hit.artifact_id, hit.start_page if hit.kind == "pdf" else None)

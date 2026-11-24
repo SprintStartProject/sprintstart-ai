@@ -1,0 +1,12 @@
+{
+  "type": "result",
+  "final": true,
+  "text": "Deploys run from the release branch.",
+  "messages": [
+    {"role": "user", "content": "How do we deploy?", "tool_calls": [], "tool_call_id": null, "reasoning": null, "reasoning_details": []},
+    {"role": "assistant", "content": "Deploys run from the release branch.", "tool_calls": [], "tool_call_id": null, "reasoning": null, "reasoning_details": []}
+  ],
+  "pending_tool_calls": [],
+  "citations": [{"artifact_id": "a1", "start_line": 12, "start_page": null}],
+  "reasoning": ["I searched the handbook."]
+}

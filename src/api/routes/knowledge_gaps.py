@@ -8,11 +8,11 @@ from api.schemas import (
     KnowledgeGapsRequest,
     KnowledgeGapsResponse,
 )
-from ingestion.metadata_store import IngestionMetadataStore
 from insights.knowledge_gaps import detect_knowledge_gaps
 from llm.base import LLMClient
 from llm.errors import LLMUnavailableError
 from store.base import VectorStore
+from store.metadata_store import IngestionMetadataStore
 
 router = APIRouter(prefix="/insights/knowledge-gaps", tags=["insights"])
 

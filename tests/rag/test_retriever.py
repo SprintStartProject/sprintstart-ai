@@ -1,6 +1,6 @@
+from corpus.source_filter import SourceExclusions
+from corpus.types import Chunk, RetrievalFilters
 from rag.retriever import retrieve
-from rag.source_filter import SourceExclusions
-from rag.types import Chunk, RetrievalFilters
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 

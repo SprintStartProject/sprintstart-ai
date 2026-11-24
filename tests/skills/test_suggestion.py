@@ -2,10 +2,10 @@ import json
 
 import pytest
 
-from api.schemas import SkillCatalogItem
+from corpus.types import Chunk, ScoredChunk
 from llm.base import Message
 from llm.errors import LLMUnavailableError
-from rag.types import Chunk, ScoredChunk
+from skills.models import SkillCatalogEntry
 from skills.suggestion import _build_prompt, suggest_skills
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
@@ -50,16 +50,16 @@ def _make_store_with_chunks() -> StubVectorStore:
 def test_suggest_skills_happy_path() -> None:
     store = _make_store_with_chunks()
     catalog = [
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s1", name="React", category="Frontend & UI", universal=False
         ),
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s2",
             name="Agile/Scrum",
             category="Processes, Methods & Architecture",
             universal=True,
         ),
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s3", name="Python", category="Languages & Paradigms", universal=False
         ),
     ]
@@ -113,8 +113,8 @@ def test_suggest_skills_happy_path() -> None:
 def test_grounding_gate_drops_ungrounded_project_specific_skill() -> None:
     store = _make_store_with_chunks()
     catalog = [
-        SkillCatalogItem(id="s1", name="Docker", category="DevOps", universal=False),
-        SkillCatalogItem(
+        SkillCatalogEntry(id="s1", name="Docker", category="DevOps", universal=False),
+        SkillCatalogEntry(
             id="s2", name="Code Review", category="Processes", universal=True
         ),
     ]
@@ -168,7 +168,7 @@ def test_new_project_specific_skill_from_evidence() -> None:
     store = _make_store_with_chunks()
     # Catalog does not contain Spring Boot
     catalog = [
-        SkillCatalogItem(id="s1", name="React", category="Frontend", universal=False),
+        SkillCatalogEntry(id="s1", name="React", category="Frontend", universal=False),
     ]
 
     llm_payload = {
@@ -256,7 +256,7 @@ def test_llm_unavailable_propagates() -> None:
 def test_project_isolation_filter() -> None:
     store = _make_store_with_chunks()
     catalog = [
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s-rust", name="Rust", category="Languages", universal=False
         ),
     ]
@@ -292,7 +292,7 @@ def test_project_isolation_filter() -> None:
 def test_catalog_match_is_ground_truth_over_llm_is_new_and_category() -> None:
     store = _make_store_with_chunks()
     catalog = [
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s1", name="React", category="Frontend & UI", universal=False
         ),
     ]
@@ -365,8 +365,8 @@ def test_universal_skill_without_catalog_passes_grounding_gate() -> None:
 
 def test_build_prompt_structure() -> None:
     catalog = [
-        SkillCatalogItem(id="s1", name="React", category="Frontend", universal=False),
-        SkillCatalogItem(id="s2", name="Scrum", category="Agile", universal=True),
+        SkillCatalogEntry(id="s1", name="React", category="Frontend", universal=False),
+        SkillCatalogEntry(id="s2", name="Scrum", category="Agile", universal=True),
     ]
     messages = _build_prompt(
         role_name="Fullstack Developer",
@@ -391,10 +391,10 @@ def test_build_prompt_structure() -> None:
 def test_suggest_skills_without_project_id_skips_retrieval() -> None:
     store = _make_store_with_chunks()
     catalog = [
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s1", name="React", category="Frontend & UI", universal=False
         ),
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s2", name="Communication", category="Soft Skills", universal=True
         ),
     ]
@@ -462,7 +462,7 @@ def test_suggest_skills_without_project_id_does_not_query_store() -> None:
         ]
     )
     catalog = [
-        SkillCatalogItem(
+        SkillCatalogEntry(
             id="s1", name="Teamwork", category="Soft Skills", universal=True
         )
     ]

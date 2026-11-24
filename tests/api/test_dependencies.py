@@ -5,12 +5,8 @@ from api.dependencies import (
     _DEFAULT_LLM_TIMEOUT_SECONDS,
     _build_client,
     _llm_timeout,
-    get_onboarding_orchestrator,
 )
 from llm.openai_client import OpenAIClient
-from rag.retriever import get_bm25_cache
-from tests.stubs.llm import StubLLMClient
-from tests.stubs.store import StubVectorStore
 
 
 def test_llm_timeout_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,14 +48,3 @@ def test_openai_reasoning_settings_apply_only_to_chat_client(
     assert isinstance(embed, OpenAIClient)
     assert embed.max_tokens is None
     assert embed.reasoning_max_tokens is None
-
-
-def test_onboarding_orchestrator_shares_the_process_wide_bm25_cache() -> None:
-    """Regression test for issue #129 #8: agent retrieval and onboarding
-    generation must tokenize the corpus once, not maintain independent caches.
-    """
-    orchestrator = get_onboarding_orchestrator(
-        llm=StubLLMClient(), store=StubVectorStore()
-    )
-
-    assert orchestrator._pipeline._bm25_cache is get_bm25_cache()

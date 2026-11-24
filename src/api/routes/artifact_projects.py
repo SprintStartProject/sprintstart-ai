@@ -3,7 +3,7 @@
 Linking a source to another project, unlinking it, and deleting a project all
 change *who may retrieve* an artifact, never the artifact itself. Retrieval is
 fail-closed on the ``project:<id>`` markers in the chunk metadata (see
-``rag.filters``), so a membership change that stops at the backend's database
+``corpus.filters``), so a membership change that stops at the backend's database
 leaves the corpus wrong in one of two directions: invisible where it should be
 readable, or readable where it should be gone.
 
@@ -26,8 +26,8 @@ from api.schemas import (
     ProjectId,
     ProjectMembershipsDeletedResponse,
 )
-from ingestion.metadata_store import IngestionMetadataStore
 from store.base import VectorStore
+from store.metadata_store import IngestionMetadataStore
 
 logger = logging.getLogger(__name__)
 

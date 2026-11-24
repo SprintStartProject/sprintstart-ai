@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import Annotated, Literal, cast
 
 from pydantic import (
     AfterValidator,
@@ -9,10 +9,6 @@ from pydantic import (
     field_validator,
 )
 from pydantic.alias_generators import to_camel
-
-if TYPE_CHECKING:
-    from onboarding.models import Blueprint, PersonProfile
-
 
 # Project ids are stored as a delimited string (``|id1|id2|``) in the chunk
 # metadata and appear verbatim in blueprint scopes (``project:<id>|global``).
@@ -523,194 +519,6 @@ class ErrorEvent(BaseModel):
     message: str
 
 
-class BlueprintStepSchema(BaseModel):
-    id: str
-    title: str
-    description: str = ""
-    requirement: str = "recommended"
-    audience: list[str] = Field(default_factory=list)
-    min_experience: str | None = None
-    tags: list[str] = Field(default_factory=list)
-    invariant: bool = False
-
-
-class BlueprintProvenanceSchema(BaseModel):
-    corpus_fingerprint: str | None = None
-    generated_at: str | None = None
-    model: str | None = None
-    notes: list[str] = Field(default_factory=list)
-
-
-class BlueprintSchema(BaseModel):
-    scope: str
-    version: str = "0"
-    source: str = "authored"
-    steps: list[BlueprintStepSchema] = []
-    # Carried so the backend can round-trip it: ``corpus_fingerprint`` is what
-    # lets a re-generation against an unchanged corpus short-circuit.
-    provenance: BlueprintProvenanceSchema | None = None
-
-    def to_model(self) -> "Blueprint":
-        """Convert the wire schema into the internal Blueprint model."""
-        from onboarding.models import Blueprint, BlueprintProvenance, BlueprintStep
-
-        return Blueprint(
-            scope=self.scope,
-            version=self.version,
-            source=self.source,  # type: ignore[arg-type]
-            steps=[
-                BlueprintStep(
-                    id=s.id,
-                    title=s.title,
-                    description=s.description,
-                    requirement=s.requirement,  # type: ignore[arg-type]
-                    audience=s.audience,
-                    min_experience=s.min_experience,
-                    tags=s.tags,
-                    invariant=s.invariant,
-                )
-                for s in self.steps
-            ],
-            provenance=(
-                BlueprintProvenance(**self.provenance.model_dump())
-                if self.provenance is not None
-                else None
-            ),
-        )
-
-
-class SkillAssessmentSchema(BaseModel):
-    name: Annotated[
-        str,
-        Field(min_length=1, description="Skill tag, e.g. kotlin.", examples=["kotlin"]),
-    ]
-    level: Annotated[
-        str,
-        Field(
-            default="beginner",
-            description=(
-                "Proficiency level: beginner, intermediate, advanced, expert. "
-                "Case-insensitive; unknown values are handled gracefully."
-            ),
-            examples=["advanced"],
-        ),
-    ] = "beginner"
-
-
-class OnboardingPathRequest(ProjectScopedRequest):
-    working_area: Annotated[
-        str,
-        Field(
-            min_length=1,
-            description="The person's working area, e.g. backend, frontend, devops.",
-            examples=["backend"],
-        ),
-    ]
-    skills: list[SkillAssessmentSchema] = Field(
-        default_factory=list[SkillAssessmentSchema],
-        description=(
-            "Optional leveled skills ({name, level}); the backend supplies the "
-            "user's skill assessments so proficiency drives personalization."
-        ),
-    )
-    tags: list[str] = Field(
-        default_factory=list,
-        description="Optional free-form tags used for step targeting.",
-    )
-    blueprints: list[BlueprintSchema] = Field(
-        description=(
-            "Active blueprints provided by the backend. The AI service is "
-            "stateless — the backend owns blueprint persistence and must supply "
-            "these on every request. Only blueprints scoped to this project "
-            "(scope 'project:<projectId>|global' or "
-            "'project:<projectId>|area:<name>') are used."
-        ),
-    )
-
-    def to_profile(self) -> "PersonProfile":
-        from onboarding.models import PersonProfile, SkillAssessment
-
-        return PersonProfile(
-            working_area=self.working_area,
-            skills=[SkillAssessment(name=s.name, level=s.level) for s in self.skills],
-            tags=self.tags,
-        )
-
-    model_config = ConfigDict(
-        populate_by_name=True,
-        json_schema_extra={
-            "example": {
-                "projectId": "3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11",
-                "working_area": "backend",
-                "skills": [{"name": "kotlin", "level": "advanced"}],
-                "tags": [],
-                "blueprints": [
-                    {
-                        "scope": "project:3f1c0b1e-1f4d-4a5e-9b6a-0d2c8f7e5a11|global",
-                        "version": "3",
-                        "source": "generated",
-                        "steps": [
-                            {
-                                "id": "step-abc123",
-                                "title": "Set up development environment",
-                                "description": "Install prerequisites",
-                                "requirement": "required",
-                            }
-                        ],
-                    }
-                ],
-            }
-        },
-    )
-
-
-class GenerateBlueprintsRequest(ProjectScopedRequest):
-    scopes: list[str] | None = Field(
-        default=None,
-        description=(
-            "Scopes to (re)generate, e.g. ['global', 'area:backend', 'area:frontend']. "
-            "Names are qualified with this request's project, so the generated "
-            "blueprints carry scope 'project:<projectId>|global' etc. Omit to "
-            "refresh the project's 'global' scope plus the scopes of its active "
-            "blueprints."
-        ),
-    )
-    active: list[BlueprintSchema] = Field(
-        default=[],
-        description=(
-            "The backend's currently-active blueprints. The AI service is "
-            "stateless, so these drive idempotency and version numbering — pass "
-            "them on every request. Blueprints scoped to another project are "
-            "ignored."
-        ),
-    )
-
-
-class StageEvent(BaseModel):
-    type: Literal["stage"]
-    name: Annotated[
-        str,
-        Field(
-            description="The pipeline stage that just started.",
-            examples=["retrieve"],
-        ),
-    ]
-
-
-class PathEvent(BaseModel):
-    type: Literal["path"]
-    path: dict[str, object] = Field(
-        description="The structured onboarding path (OnboardingPath model)."
-    )
-    path_yaml: str = Field(description="The onboarding path serialized to YAML.")
-    quality: dict[str, object] = Field(
-        description="The deterministic quality report for the path."
-    )
-
-
-# ── GitHub run batch ingest ───────────────────────────────────────────────────
-
-
 class ArtifactRunIngestRequest(BaseModel):
     """One artifact from a completed GitHub ingestion run."""
 
@@ -900,9 +708,6 @@ class IngestStatusResponse(BaseModel):
     )
 
 
-# ── Connector / source enable-disable ───────────────────────────────────────
-
-
 class ConfigureConnectorRequest(BaseModel):
     enabled: bool = Field(description="Whether the connector should be enabled.")
 
@@ -938,9 +743,6 @@ class ArtifactSummaryRequest(BaseModel):
     )
 
     model_config = ConfigDict(populate_by_name=True)
-
-
-# ── Knowledge-gaps (PM insights) ────────────────────────────────────────────
 
 
 class KnowledgeGapsRequest(ProjectScopedRequest):
@@ -985,9 +787,6 @@ class KnowledgeGapSchema(BaseModel):
 
 class KnowledgeGapsResponse(BaseModel):
     gaps: list[KnowledgeGapSchema]
-
-
-# ── FAQ grouping (PM insights) ──────────────────────────────────────────────
 
 
 class FaqQuestionSchema(BaseModel):
@@ -1533,9 +1332,6 @@ class BuddyCompactResponse(BaseModel):
     )
 
 
-# ── FAQ incremental classification (PM insights) ────────────────────────────
-
-
 class FaqGroupRefSchema(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -1734,9 +1530,6 @@ class SkillSuggestionResponse(BaseModel):
         default_factory=list[SkillSuggestionItem],
         description="List of suggested skills matching the role and project.",
     )
-
-
-# ── Project industry evaluation ───────────────────────────────────────────────
 
 
 class IndustryEvaluationResponse(BaseModel):

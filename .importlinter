@@ -1,0 +1,63 @@
+# The layers of the AI service. Higher layers may import lower ones, never the other
+# way round, and the features on one line are independent of each other. There are no known
+# violations: a new one fails the check, and an `ignore_imports` entry needs a human decision.
+# Run with `PYTHONPATH=src uv run lint-imports`.
+
+[importlinter]
+include_external_packages = True
+root_packages =
+    api
+    buddy
+    assembly
+    insights
+    projects
+    skills
+    summaries
+    rag
+    ingestion
+    store
+    llm
+    corpus
+
+[importlinter:contract:layers]
+name = Layers: api > features > rag > ingestion > store > llm | corpus
+type = layers
+layers =
+    api
+    buddy | assembly | insights | projects | skills | summaries
+    rag
+    ingestion
+    store
+    llm | corpus
+
+
+[importlinter:contract:routes-adapt]
+name = Routes adapt: api.routes does not reach into parsing, chunking or the Chroma store
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    api.routes
+forbidden_modules =
+    ingestion.parsing
+    ingestion.chunking
+    store.chroma_store
+
+[importlinter:contract:http-only-in-api]
+name = Only api knows the web framework
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    buddy
+    assembly
+    insights
+    projects
+    skills
+    summaries
+    rag
+    ingestion
+    store
+    llm
+    corpus
+forbidden_modules =
+    fastapi
+    starlette

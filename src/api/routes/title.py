@@ -1,26 +1,12 @@
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.dependencies import get_llm
 from api.schemas import TitleRequest, TitleResponse, ValidationErrorResponse
-from llm.base import LLMClient, Message
+from assembly.titles import generate_title as generate
+from llm.base import LLMClient
 from llm.errors import LLMUnavailableError
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter()
-
-SYSTEM_PROMPT = """
-You generate short descriptive titles.
-
-Rules:
-
-- return only the title
-- no quotes
-- no explanations
-- respect the character limit
-"""
 
 
 @router.post(
@@ -70,35 +56,8 @@ def generate_title(
     Raises:
         HTTPException:
             - 503: If the LLM backend is unavailable or unreachable.
-
-    Behavior:
-        - Sends a system prompt to enforce strict title generation rules.
-        - Combines system + user message for LLM input.
-        - Trims whitespace from LLM output.
-        - Enforces max_length constraint by hard truncation.
     """
-
-    messages: list[Message] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Create a title with maximum {body.max_length} characters.\n\n"
-                f"{body.prompt}"
-            ),
-        },
-    ]
-
     try:
-        generated_title = llm.generate(messages=messages).strip()
-
-        # enforce max length
-        if len(generated_title) > body.max_length:
-            generated_title = generated_title[: body.max_length].rstrip()
-
-        return TitleResponse(title=generated_title)
+        return TitleResponse(title=generate(llm, body.prompt, body.max_length))
     except LLMUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

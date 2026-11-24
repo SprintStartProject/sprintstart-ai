@@ -3,10 +3,8 @@ from typing import Any, cast
 
 import pytest
 
-from llm.anthropic_client import (
-    AnthropicClient,
-    _to_anthropic_messages,  # pyright: ignore[reportPrivateUsage]
-)
+from llm.anthropic_client import AnthropicClient
+from llm.anthropic_wire import to_anthropic_messages
 from llm.base import Message, ReasoningDelta, TextDelta, ToolCall
 
 _EPHEMERAL = {"type": "ephemeral"}
@@ -112,7 +110,7 @@ def _system_blocks(system: object) -> list[dict[str, Any]]:
 def test_system_prompt_carries_a_cache_breakpoint() -> None:
     """Tools render before the system prompt, so one breakpoint on the system
     block covers the whole fixed preamble every chat request shares."""
-    system, _ = _to_anthropic_messages(
+    system, _ = to_anthropic_messages(
         [
             Message(role="system", content="You are SprintStart's assistant."),
             Message(role="user", content="hi"),
@@ -126,7 +124,7 @@ def test_system_prompt_carries_a_cache_breakpoint() -> None:
 
 
 def test_system_parts_are_joined_into_one_cached_block() -> None:
-    system, _ = _to_anthropic_messages(
+    system, _ = to_anthropic_messages(
         [
             Message(role="system", content="First."),
             Message(role="system", content="Second."),
@@ -140,13 +138,13 @@ def test_system_parts_are_joined_into_one_cached_block() -> None:
 def test_absent_system_prompt_is_omitted_not_an_empty_block() -> None:
     from anthropic import Omit
 
-    system, _ = _to_anthropic_messages([Message(role="user", content="hi")])
+    system, _ = to_anthropic_messages([Message(role="user", content="hi")])
 
     assert isinstance(system, Omit)
 
 
 def test_final_user_message_carries_a_cache_breakpoint() -> None:
-    _, converted = _to_anthropic_messages([Message(role="user", content="hi")])
+    _, converted = to_anthropic_messages([Message(role="user", content="hi")])
 
     blocks = _blocks(converted[-1]["content"])
     assert blocks == [{"type": "text", "text": "hi", "cache_control": _EPHEMERAL}]
@@ -159,8 +157,8 @@ def test_user_content_keeps_one_shape_whatever_its_position() -> None:
     request and a block list in the next breaks the prefix match and silently
     never hits — which is the entire value of the breakpoint below it.
     """
-    _, last = _to_anthropic_messages([Message(role="user", content="what broke?")])
-    _, not_last = _to_anthropic_messages(
+    _, last = to_anthropic_messages([Message(role="user", content="what broke?")])
+    _, not_last = to_anthropic_messages(
         [
             Message(role="user", content="what broke?"),
             Message(role="assistant", content="looking"),
@@ -177,7 +175,7 @@ def test_user_content_keeps_one_shape_whatever_its_position() -> None:
 def test_breakpoint_lands_on_the_tool_result_of_the_answer_call() -> None:
     """The buddy agent's answer call ends on tool results; the breakpoint there
     means the next request re-reads everything up to and including them."""
-    _, converted = _to_anthropic_messages(
+    _, converted = to_anthropic_messages(
         [
             Message(role="system", content="sys"),
             Message(role="user", content="what broke?"),
@@ -198,7 +196,7 @@ def test_breakpoint_lands_on_the_tool_result_of_the_answer_call() -> None:
 def test_only_the_last_block_is_marked() -> None:
     """More than four breakpoints is an API error, so exactly one lands in the
     message list however many blocks it holds."""
-    _, converted = _to_anthropic_messages(
+    _, converted = to_anthropic_messages(
         [
             Message(role="user", content="what broke?"),
             Message(
@@ -246,8 +244,8 @@ def test_a_turn_extends_the_previous_turns_cached_prefix() -> None:
         Message(role="tool", content="a chunk", tool_call_id="c1"),
     ]
 
-    decide_system, decide_msgs = _to_anthropic_messages(decide)
-    answer_system, answer_msgs = _to_anthropic_messages(answer)
+    decide_system, decide_msgs = to_anthropic_messages(decide)
+    answer_system, answer_msgs = to_anthropic_messages(answer)
 
     # Identical prefix apart from the breakpoint marker itself, which is
     # metadata rather than rendered content.

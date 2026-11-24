@@ -1,0 +1,27 @@
+--- system ---
+You recommend software skills a person in this role should self-assess for THIS project.
+
+Available skills catalog (existing skills in system):
+(empty catalog)
+
+Project artifacts (evidence):
+(no project artifacts retrieved)
+
+Task:
+Recommend skills relevant to both the role AND this project.
+Follow these two-class grounding rules strictly:
+1. For UNIVERSAL skills (marked '(universal)' in catalog, or role-typical soft skills / agile practices):
+   - Set universal=true.
+   - Recommend role-typical universal skills WITHOUT requiring evidence (chunkIds can be empty).
+   - Standard practices (e.g. Code Review, Agile/Scrum, Communication).
+2. For PROJECT-SPECIFIC skills (technologies, frameworks, databases, tools):
+   - Set universal=false.
+   - MUST cite at least one chunk_id from the evidence in chunkIds.
+   - Only suggest if project artifacts actually demonstrate their usage.
+   - If missing in catalog, suggest with isNew=true (and chunkIds).
+
+STRICT JSON only (no markdown fences, no explanatory text outside JSON):
+{"suggestions": [{"name": str, "category": str | null, "reason": str, "confidence": "high"|"medium"|"low", "universal": bool, "isNew": bool, "chunkIds": [str]}]}
+--- user ---
+Role: Tester
+Description: (none provided)

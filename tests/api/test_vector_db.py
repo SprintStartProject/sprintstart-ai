@@ -4,8 +4,8 @@ from fastapi.testclient import TestClient
 
 from api.app import app
 from api.dependencies import get_llm, get_store
+from corpus.types import Chunk, ScoredChunk
 from llm.base import LLMStreamEvent, Message, TextDelta
-from rag.types import Chunk, ScoredChunk
 
 
 class StubVectorStore:

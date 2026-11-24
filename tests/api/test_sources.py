@@ -6,8 +6,8 @@ from fastapi.testclient import TestClient
 
 from api.app import app
 from api.dependencies import get_source_state_store
-from ingestion.source_state_store import SourceStateStore
-from rag.source_filter import SourceExclusions
+from corpus.source_filter import SourceExclusions
+from store.source_state_store import SourceStateStore
 
 
 @pytest.fixture

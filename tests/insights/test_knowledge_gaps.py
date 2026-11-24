@@ -1,7 +1,6 @@
 import json
 from datetime import UTC, datetime, timedelta
 
-from ingestion.metadata_store import ArtifactRecord, IngestionMetadataStore
 from insights.knowledge_gaps import (
     EXPECTED_TYPES,
     _component_of,
@@ -10,6 +9,7 @@ from insights.knowledge_gaps import (
     _severity,
     detect_knowledge_gaps,
 )
+from store.metadata_store import ArtifactRecord, IngestionMetadataStore
 from tests.stubs.llm import StubLLMClient
 from tests.stubs.store import StubVectorStore
 

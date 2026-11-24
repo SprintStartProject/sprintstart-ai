@@ -24,13 +24,13 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
-from ingestion.metadata_store import IngestionMetadataStore
+from corpus.types import RetrievalFilters
 from insights.redaction import redact_pii
 from llm.base import LLMClient, Message
 from llm.parsing import extract_json_object
 from rag.retriever import retrieve
-from rag.types import RetrievalFilters
 from store.base import VectorStore
+from store.metadata_store import IngestionMetadataStore
 
 logger = logging.getLogger(__name__)
 

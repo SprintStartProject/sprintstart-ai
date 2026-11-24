@@ -1,9 +1,9 @@
 import hashlib
 
+from corpus.filters import normalize_source_system
+from corpus.source_role import SourceRole
+from corpus.types import Chunk, SourceSystem
 from ingestion.models import ParsedChunk
-from ingestion.source_role import SourceRole
-from rag.filters import normalize_source_system
-from rag.types import Chunk, SourceSystem
 
 
 def _deterministic_id(artifact_id: str, content: str, position: int) -> str:

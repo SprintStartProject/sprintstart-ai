@@ -2,19 +2,15 @@ import logging
 import os
 from functools import lru_cache
 
-from fastapi import Depends
-
-from ingestion.metadata_store import IngestionMetadataStore
-from ingestion.source_state_store import SourceStateStore
 from llm.anthropic_client import AnthropicClient
 from llm.base import LLMClient
 from llm.ollama_client import OllamaClient
 from llm.openai_client import OpenAIClient
 from llm.split_client import SplitLLMClient
-from onboarding.orchestrator import OnboardingOrchestrator
-from rag.retriever import get_bm25_cache
 from store.base import VectorStore
 from store.chroma_store import ChromaVectorStore
+from store.metadata_store import IngestionMetadataStore
+from store.source_state_store import SourceStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +141,3 @@ def get_ingestion_metadata_store() -> IngestionMetadataStore:
 def get_source_state_store() -> SourceStateStore:
     path = os.getenv("APP_DB_PATH", "").strip() or "data/sprintstart.db"
     return SourceStateStore(path=path)
-
-
-def get_onboarding_orchestrator(
-    llm: LLMClient = Depends(get_llm),
-    store: VectorStore = Depends(get_store),
-) -> OnboardingOrchestrator:
-    return OnboardingOrchestrator(llm, store, bm25_cache=get_bm25_cache())

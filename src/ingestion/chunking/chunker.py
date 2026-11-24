@@ -1,0 +1,330 @@
+import os
+
+from ingestion.chunking.parsed_chunk import to_parsed_chunk
+from ingestion.models import ParsedChunk
+
+try:
+    chunk_size: int = int(os.getenv("CHUNK_SIZE", "512"))
+    chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "64"))
+except ValueError as err:
+    raise ValueError("CHUNK_SIZE and CHUNK_OVERLAP must be an integer") from err
+
+if chunk_overlap >= chunk_size:
+    raise ValueError("chunk_overlap must be smaller than chunk_size")
+
+
+def _paragraphs_with_start_lines(text: str) -> list[tuple[str, int]]:
+    """Split text into non-empty paragraphs, keeping each one's start line.
+
+    Normalizes Windows (``\\r\\n``) and legacy Mac (``\\r``) line endings to
+    standard Unix newlines (``\\n``) so paragraph splitting on blank lines
+    (``\\n\\n``) works consistently regardless of source file origin.
+
+    Mirrors ``text.split("\\n\\n")`` semantics (paragraphs separated by a
+    blank line, stripped, empty ones dropped) while additionally tracking
+    the 1-based line each surviving paragraph starts on in ``text``. This is
+    the single source of truth for paragraph splitting: :func:`
+    split_into_paragraphs` is defined in terms of it so both stay in sync.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs: list[tuple[str, int]] = []
+    offset = 0
+    for part in text.split("\n\n"):
+        stripped = part.strip()
+        if stripped:
+            # ``split("\n\n")`` only breaks on exactly two newlines, so runs of
+            # 3+ newlines (extra blank lines) leave a leading "\n" attached to
+            # the *next* segment (e.g. "A\n\n\nB".split("\n\n") ==
+            # ["A", "\nB"]). Without accounting for it, the start offset would
+            # be off by however many extra blank lines preceded the paragraph.
+            leading_whitespace = len(part) - len(part.lstrip())
+            start_offset = offset + leading_whitespace
+            # ``count("\n", 0, start_offset)`` is the number of newlines before
+            # the paragraph, i.e. its 0-based line index; +1 makes it 1-based.
+            line_no = text.count("\n", 0, start_offset) + 1
+            paragraphs.append((stripped, line_no))
+        offset += len(part) + 2  # +2 accounts for the removed "\n\n" delimiter
+    return paragraphs
+
+
+def split_into_paragraphs(text: str) -> list[str]:
+    """Split text into non-empty, whitespace-stripped paragraphs.
+
+    Paragraphs are separated by double newlines (``\\n\\n``).
+
+    Args:
+        text (str):
+            Text content to split.
+
+    Returns:
+        list[str]:
+            Only Paragraphs in document order.
+    """
+    return [paragraph for paragraph, _ in _paragraphs_with_start_lines(text)]
+
+
+def _flush_paragraph_bucket_with_lines(
+    chunks: list[tuple[str, int, bool, tuple[int, int] | None]],
+    bucket: list[tuple[str, int]],
+) -> None:
+    if bucket:
+        # bucket[0][1] returns the starting line of this chunk
+        chunks.append(("\n\n".join(p for p, _ in bucket), bucket[0][1], False, None))
+        bucket.clear()
+
+
+def group_paragraphs_into_chunks(
+    paragraphs: list[str],
+    chunk_size: int = chunk_size,
+    chunk_overlap: int = chunk_overlap,
+) -> list[str]:
+    """Accumulate paragraphs into character-limited chunks.
+
+    Paragraphs are accumulated into chunks without exceeding ``chunk_size``.
+    When adding another paragraph would exceed ``chunk_size``, the current
+    chunk is finalized and the next paragraph starts a fresh chunk. Paragraphs
+    that exceed ``chunk_size`` on their own are hard-split into overlapping
+    character chunks using ``chunk_overlap``.
+
+    This function is a plain-string projection of
+    :func:`_group_paragraphs_into_chunks_with_lines` (which is the single
+    source of truth for grouping/hard-split decisions). Synthetic placeholder
+    line indices are passed in and discarded from the resulting tuples.
+
+    Args:
+        paragraphs (list[str]):
+            Paragraphs in document order, e.g. from
+            :func:`split_into_paragraphs`.
+
+        chunk_size (int, optional):
+            Maximum chunk size in characters.
+            Defaults to the value configured via ``CHUNK_SIZE``.
+
+        chunk_overlap (int, optional):
+            Overlap used when hard-splitting oversized paragraphs.
+            Defaults to the value configured via ``CHUNK_OVERLAP``.
+
+    Returns:
+        list[str]:
+            Chunk contents (paragraphs joined by ``\\n\\n``).
+    """
+    return [
+        content
+        for content, *_ in _group_paragraphs_into_chunks_with_lines(
+            [(paragraph, index) for index, paragraph in enumerate(paragraphs)],
+            chunk_size,
+            chunk_overlap,
+        )
+    ]
+
+
+def _group_paragraphs_into_chunks_with_lines(
+    paragraphs: list[tuple[str, int]],
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[tuple[str, int, bool, tuple[int, int] | None]]:
+    """Accumulate paragraphs with line tracking into character-limited chunks.
+
+    Single source of truth for paragraph grouping and hard-split decisions.
+    Operates on ``(paragraph, start_line)`` pairs so each resulting chunk
+    reports the 1-based line it starts on. :func:`group_paragraphs_into_chunks`
+    is defined as a plain-string projection of this function.
+
+    Args:
+        paragraphs (list[tuple[str, int]]):
+            Paragraphs with their 1-based start line, e.g. from
+            :func:`_paragraphs_with_start_lines`.
+
+        chunk_size (int):
+            Maximum chunk size in characters.
+
+        chunk_overlap (int):
+            Overlap used when hard-splitting oversized paragraphs.
+
+    Returns:
+        list[tuple[str, int, bool, tuple[int, int] | None]]:
+            One ``(chunk_content, start_line, has_overlap, overlap_range)``
+            tuple per resulting chunk.
+    """
+    chunks: list[tuple[str, int, bool, tuple[int, int] | None]] = []
+    paragraph_bucket: list[tuple[str, int]] = []
+
+    for paragraph, line in paragraphs:
+        paragraph_length: int = len(paragraph)
+
+        # hard split by character when paragraph itself exceeds chunk_size
+        if paragraph_length > chunk_size:
+            _flush_paragraph_bucket_with_lines(chunks, paragraph_bucket)
+
+            offset: int = 0
+            first: bool = True
+            while offset < len(paragraph) or first:
+                lines_before_piece = paragraph.count("\n", 0, offset)
+                piece_start_line = line + lines_before_piece
+                piece_slice = paragraph[offset : offset + chunk_size]
+                actual_overlap = min(chunk_overlap, len(piece_slice))
+                has_overlap = not first and actual_overlap > 0
+                overlap_range = (0, actual_overlap) if has_overlap else None
+                chunks.append(
+                    (
+                        piece_slice,
+                        piece_start_line,
+                        has_overlap,
+                        overlap_range,
+                    )
+                )
+                if offset + chunk_size >= len(paragraph):
+                    break
+                offset += chunk_size - chunk_overlap
+                first = False
+
+            continue
+
+        # Would adding the paragraph exceed chunk_size?
+        candidate_length: int = (
+            len("\n\n".join([p for p, _ in paragraph_bucket] + [paragraph]))
+            if paragraph_bucket
+            else paragraph_length
+        )
+
+        # handle when paragraph_bucket + paragraph exceeds chunk size
+        if paragraph_bucket and (candidate_length > chunk_size):
+            _flush_paragraph_bucket_with_lines(chunks, paragraph_bucket)
+
+        # append paragraph to bucket
+        paragraph_bucket.append((paragraph, line))
+
+    # if there is some content left, flush it
+    _flush_paragraph_bucket_with_lines(chunks, paragraph_bucket)
+
+    return chunks
+
+
+def chunk_text(
+    filename: str,
+    text: str,
+    chunk_size: int = chunk_size,
+    chunk_overlap: int = chunk_overlap,
+) -> list[ParsedChunk]:
+    """Split text into paragraph-aware chunks.
+
+    The function preserves paragraph boundaries by splitting on
+    double newlines (``\\n\\n``). Paragraphs are accumulated until
+    adding another paragraph would exceed the configured chunk size.
+
+    When a chunk boundary is reached, the current chunk is finalized and the
+    next paragraph starts a fresh chunk. Paragraphs that exceed ``chunk_size``
+    on their own are split into overlapping character chunks by the given
+    chunk_overlap.
+
+    Args:
+        filename (str):
+            Name of the source file.
+
+        text (str):
+            Text content to split.
+
+        chunk_size (int, optional):
+            Maximum chunk size in characters.
+            Defaults to the value configured via ``CHUNK_SIZE``.
+
+        chunk_overlap (int, optional):
+            Overlap used when hard-splitting oversized paragraphs.
+            Defaults to the value configured via ``CHUNK_OVERLAP``.
+
+    Returns:
+        list[ParsedChunk]:
+            Paragraph-aware text chunks with metadata.
+    """
+    paragraphs_with_lines = _paragraphs_with_start_lines(text)
+    chunks = _group_paragraphs_into_chunks_with_lines(
+        paragraphs_with_lines, chunk_size, chunk_overlap
+    )
+
+    total_chunks_amount = len(chunks)
+
+    return [
+        to_parsed_chunk(
+            chunk_content,
+            "text",
+            filename,
+            chunk_index,
+            total_chunks_amount,
+            start_line=start_line,
+            has_overlap=has_overlap,
+            overlap_range=overlap_range,
+        )
+        for chunk_index, (
+            chunk_content,
+            start_line,
+            has_overlap,
+            overlap_range,
+        ) in enumerate(chunks)
+    ]
+
+
+def chunk_code(
+    filename: str,
+    code: str,
+    chunk_size: int = chunk_size,
+    start_line: int | None = None,
+) -> list[ParsedChunk]:
+    """Split large code blocks into smaller code chunks.
+
+    The function preserves line boundaries and creates sequential
+    code chunks that do not exceed the configured chunk size.
+
+    Args:
+        filename (str):
+            Name of the source file.
+
+        code (str):
+            Source code content.
+
+        chunk_size (int, optional):
+            Maximum size of each chunk in characters.
+            Defaults to the value configured via CHUNK_SIZE (fallback 512).
+
+        start_line (int, optional):
+            1-based line the given ``code`` starts on in the source file, if
+            known. Every chunk produced from ``code`` is tagged with this
+            same value, so it points at the enclosing symbol's definition
+            rather than at each individual split's own offset.
+
+    Returns:
+        list[ParsedChunk]:
+            Sequential code chunks with metadata and chunk indices.
+    """
+    lines: list[str] = code.splitlines()
+    chunks_content: list[str] = []
+    current_chunk_content: list[str] = []
+    current_chunk_content_length = 0
+    for line in lines:
+        if (
+            current_chunk_content_length + len(line) > chunk_size
+            and current_chunk_content
+        ):
+            chunks_content.append("\n".join(current_chunk_content))
+            current_chunk_content = []
+            current_chunk_content_length = 0
+
+        current_chunk_content.append(line)
+        current_chunk_content_length += len(line) + 1  # + 1, because each added line
+        # brings a line break (/n) with it
+
+    if current_chunk_content:
+        chunks_content.append("\n".join(current_chunk_content))
+
+    total_chunks_amount: int = len(chunks_content)
+
+    return [
+        to_parsed_chunk(
+            chunk_content,
+            "code",
+            filename,
+            chunk_index,
+            total_chunks_amount,
+            start_line=start_line,
+        )
+        for chunk_index, chunk_content in enumerate(chunks_content)
+    ]

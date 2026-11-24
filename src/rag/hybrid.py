@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from rank_bm25 import BM25Okapi  # type: ignore[import-untyped]
 
-from ingestion.source_role import SourceRole
+from corpus.filters import matches_retrieval_filters
+from corpus.source_filter import SourceExclusions, is_excluded
+from corpus.source_role import SourceRole
+from corpus.types import Chunk, RetrievalFilters, ScoredChunk
 from llm.base import LLMClient
-from rag.filters import matches_retrieval_filters
-from rag.source_filter import SourceExclusions, is_excluded
-from rag.types import Chunk, RetrievalFilters, ScoredChunk
 from store.base import VectorStore
 
 if TYPE_CHECKING:
@@ -222,9 +222,8 @@ class BM25IndexCache:
         self._lock = threading.Lock()
 
     def get(self, store: VectorStore) -> BM25Index:
-        # One scalar SQLite read replaces the previous metadata scan over every
-        # Chroma chunk. Any instance that changes retrieval-visible state bumps
-        # this shared revision through ChromaVectorStore.
+        # One scalar SQLite read. Any instance that changes retrieval-visible state
+        # bumps this shared revision through ChromaVectorStore.
         current_revision = store.corpus_revision()
 
         snapshot = self._snapshot
