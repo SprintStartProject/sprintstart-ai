@@ -8,3 +8,6 @@ SourceId = NewType("SourceId", str)
 
 #: Identifies one chunk in the vector store.
 ChunkId = NewType("ChunkId", str)
+
+#: Identifies the project a request is scoped to.
+ProjectKey = NewType("ProjectKey", str)
