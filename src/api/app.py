@@ -20,6 +20,7 @@ from api.routes import (  # noqa: E402
     ingest_status,
     insights,
     knowledge_gaps,
+    offboarding,
     orientation,
     phase,
     projects,
@@ -92,6 +93,7 @@ api_router.include_router(starter_work.router)
 api_router.include_router(summaries.router)
 api_router.include_router(sources.router)
 api_router.include_router(knowledge_gaps.router)
+api_router.include_router(offboarding.router)
 api_router.include_router(insights.router)
 api_router.include_router(grading.router)
 api_router.include_router(skills.router)
